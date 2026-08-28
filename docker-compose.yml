@@ -1,0 +1,104 @@
+name: bellenneone
+
+services:
+  gateway:
+    image: nginx:1.27-alpine
+    container_name: bellenneone-gateway
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${BELLENNE_PORT:-17863}:80"
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      shell:
+        condition: service_healthy
+      pulse:
+        condition: service_healthy
+      echo:
+        condition: service_healthy
+      vector:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1/gateway-health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  shell:
+    build:
+      context: .
+      dockerfile: apps/shell/Dockerfile
+    container_name: bellenneone-shell
+    restart: unless-stopped
+    init: true
+    expose:
+      - "8000"
+
+  pulse:
+    build:
+      context: ./apps/pulse
+    container_name: bellenneone-pulse
+    restart: unless-stopped
+    init: true
+    environment:
+      APP_HOST: 0.0.0.0
+      APP_PORT: 17863
+      MODULE_PREFIX: /pulse
+      APP_SECRET_KEY: "${APP_SECRET_KEY:-replace-this-secret-before-production}"
+      CREDENTIALS_ENCRYPTION_KEY: "${CREDENTIALS_ENCRYPTION_KEY:-}"
+      DATABASE_URL: sqlite:////app/data/bellennepulse.db
+      TIMEZONE: "${TIMEZONE:-Europe/Moscow}"
+      SECURE_COOKIES: "${SECURE_COOKIES:-false}"
+      SCHEDULER_ENABLED: "${PULSE_SCHEDULER_ENABLED:-true}"
+      DEMO_MODE: "${DEMO_MODE:-true}"
+      SEED_DEMO_DATA: "${SEED_DEMO_DATA:-true}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+    volumes:
+      - pulse_data:/app/data
+    expose:
+      - "17863"
+
+  echo:
+    build:
+      context: ./apps/echo
+    container_name: bellenneone-echo
+    restart: unless-stopped
+    init: true
+    environment:
+      APP_SECRET: "${APP_SECRET_KEY:-replace-this-secret-before-production}"
+      DATABASE_URL: sqlite:////app/data/bellenneecho.db
+      MODULE_PREFIX: /echo
+      EXTERNAL_AUTH_ENABLED: "true"
+      DRY_RUN: "${ECHO_DRY_RUN:-true}"
+    volumes:
+      - echo_data:/app/data
+    expose:
+      - "8000"
+
+  vector:
+    build:
+      context: ./apps/vector
+    container_name: bellenneone-vector
+    restart: unless-stopped
+    init: true
+    environment:
+      DATA_DIR: /data
+      DATABASE_URL: sqlite:////data/bellennevector.db
+      APP_TIMEZONE: "${TIMEZONE:-Europe/Moscow}"
+      MODULE_PREFIX: /vector
+      EXTERNAL_AUTH_ENABLED: "true"
+      SESSION_HTTPS_ONLY: "${SECURE_COOKIES:-false}"
+      WB_HTTP_TIMEOUT_SECONDS: "${WB_HTTP_TIMEOUT_SECONDS:-30}"
+      WB_REQUEST_INTERVAL_SECONDS: "${WB_REQUEST_INTERVAL_SECONDS:-20.2}"
+      WB_INFO_REQUEST_INTERVAL_SECONDS: "${WB_INFO_REQUEST_INTERVAL_SECONDS:-0.22}"
+    volumes:
+      - vector_data:/data
+    expose:
+      - "8000"
+
+volumes:
+  pulse_data:
+  echo_data:
+  vector_data:

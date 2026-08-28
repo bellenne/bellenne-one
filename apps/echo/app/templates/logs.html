@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% from "icons.html" import icon %}
+{% block title %}Журнал Echo{% endblock %}
+{% block content %}
+<div class="page-header"><div><h1 class="page-title">Журнал ответов</h1><p class="page-subtitle">История публикаций, пропусков и ошибок обработки.</p></div><form method="post" action="{{ module_prefix }}/run-now"><button class="button button-product" type="submit">{{ icon('power', 18) }}<span>Запустить обработку</span></button></form></div>
+{% if ran is not none %}<div class="alert alert-success" role="status">Готово. Отправлено ответов: {{ ran }}.</div>{% endif %}
+{% if started %}<div class="alert alert-success" role="status">Обработка запущена в фоне. Журнал будет пополняться по мере отправки.</div>{% endif %}
+<section class="card data-section">
+  {% if logs %}<div class="table-scroll"><table class="data-table echo-log-table"><thead><tr><th>Время</th><th>Маркетплейс</th><th>Товар</th><th class="number">Рейтинг</th><th>Тип</th><th>Статус</th><th>Сообщение</th></tr></thead><tbody>{% for log in logs %}<tr><td>{{ log.created_at.strftime('%d.%m %H:%M') }}</td><td>{{ marketplace_name(log.marketplace) }}</td><td>{{ log.product_name or log.article or '—' }}</td><td class="number"><span class="rating-label">★ {{ log.rating or '—' }}</span></td><td>{{ kind_name(log.review_kind) }}</td><td><span class="badge {{ 'badge-positive' if log.status == 'sent' else 'badge-negative' if log.status == 'error' else 'badge-warning' if log.status in ['queued', 'processing', 'skipped'] else 'badge-neutral' }}">{{ status_name(log.status) }}</span></td><td>{{ log.message or '—' }}</td></tr>{% endfor %}</tbody></table></div>{% else %}<div class="empty-state"><h3 class="section-title">Событий пока нет</h3><p>Журнал заполнится после первой обработки отзывов.</p></div>{% endif %}
+</section>
+{% endblock %}

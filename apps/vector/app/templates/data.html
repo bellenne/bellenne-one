@@ -1,0 +1,194 @@
+{% extends "base.html" %}
+{% from "icons.html" import icon %}
+{% block title %}Все данные · BellenneVector{% endblock %}
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <span class="eyebrow">Vector · вся история</span>
+      <h1>Данные рекламных кампаний</h1>
+      <p>Каждая строка — один день, кампания и артикул. KPI рассчитаны из исходных полей.</p>
+    </div>
+    {% if account %}
+      <a class="button button-primary"
+         href="{{ module_prefix }}/export.xlsx{% if filters.date_from or filters.date_to %}?date_from={{ filters.date_from or '' }}&date_to={{ filters.date_to or '' }}{% endif %}">
+        Скачать Excel
+      </a>
+    {% endif %}
+  </section>
+
+  {% if not account %}
+    <section class="empty-state card">
+      <h2>Кабинет не настроен</h2>
+      <a class="button button-product" href="{{ module_prefix }}/cabinet">Добавить API-ключ</a>
+    </section>
+  {% else %}
+    <section class="card filter-card">
+      <form method="get" action="{{ module_prefix }}/data" class="filter-form">
+        <label><span>С даты</span><input type="date" name="date_from" value="{{ filters.date_from or '' }}"></label>
+        <label><span>По дату</span><input type="date" name="date_to" value="{{ filters.date_to or '' }}"></label>
+        <label>
+          <span>Группа</span>
+          <select name="group">
+            <option value="">Все группы</option>
+            {% for item in groups %}
+              <option value="{{ item }}" {{ 'selected' if filters.group == item else '' }}>{{ item }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="filter-search"><span>Поиск</span><input name="query" value="{{ filters.query or '' }}" placeholder="Артикул, товар, кампания"></label>
+        <button class="button button-secondary" type="submit">Применить</button>
+        <a class="text-link filter-reset" href="{{ module_prefix }}/data">Сбросить</a>
+      </form>
+    </section>
+
+    <section class="comments-workspace">
+      <article class="card comment-create-card">
+        <div class="card-header">
+          <div>
+            <span class="eyebrow">Заметка по товару</span>
+            <h2>Добавить по артикулу</h2>
+          </div>
+          <span class="comment-mark">{{ icon('reports', 24) }}</span>
+        </div>
+        <form method="post" action="{{ module_prefix }}/comments" class="comment-create-form">
+          <input type="hidden" name="return_to" value="{{ current_page_url }}">
+          <label>
+            <span>Артикул WB</span>
+            <input type="number" name="nm_id" min="1" step="1" inputmode="numeric" placeholder="Например, 699712395" required>
+          </label>
+          <label>
+            <span>Комментарий</span>
+            <textarea name="comment" maxlength="4000" rows="3" placeholder="Что проверить, изменить или учесть…" required></textarea>
+          </label>
+          <button class="button button-primary" type="submit">Сохранить комментарий</button>
+        </form>
+      </article>
+
+      <details class="card comments-library" {{ 'open' if comments else '' }}>
+        <summary>
+          <span>
+            <span class="eyebrow">Все заметки</span>
+            <strong>Комментарии к артикулам</strong>
+          </span>
+          <span class="pill">{{ comments|length }}</span>
+        </summary>
+        {% if comments %}
+          <div class="comments-list">
+            {% for item in comments %}
+              <form method="post" action="{{ module_prefix }}/comments" class="saved-comment">
+                <input type="hidden" name="nm_id" value="{{ item.nm_id }}">
+                <input type="hidden" name="return_to" value="{{ current_page_url }}">
+                <div class="saved-comment-title">
+                  <div>
+                    <strong>{{ item.product_name or 'Артикул ' ~ item.nm_id }}</strong>
+                    <small>{{ item.nm_id }} · изменён {{ item.updated_at.strftime('%d.%m.%Y в %H:%M') }}</small>
+                  </div>
+                  <a href="{{ module_prefix }}/data?query={{ item.nm_id }}">Найти в данных</a>
+                </div>
+                <textarea name="comment" maxlength="4000" rows="3" aria-label="Комментарий к артикулу {{ item.nm_id }}">{{ item.comment }}</textarea>
+                <div class="saved-comment-actions">
+                  <small>Чтобы удалить комментарий, очистите текст и сохраните.</small>
+                  <button type="submit">Сохранить изменения</button>
+                </div>
+              </form>
+            {% endfor %}
+          </div>
+        {% else %}
+          <div class="comments-empty">Сохранённых комментариев пока нет.</div>
+        {% endif %}
+      </details>
+    </section>
+
+    <section class="card data-card">
+      <div class="card-header">
+        <div><span class="eyebrow">Результат</span><h2>{{ total }} строк</h2></div>
+        <span class="pill">Страница {{ page }} из {{ pages if pages else 1 }}</span>
+      </div>
+      {% if rows %}
+        <div class="table-wrap data-table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Дата</th><th>Группа / товар</th><th>Кампания</th><th>Показы</th>
+                <th>Клики</th><th>CTR</th><th>CPC</th><th>Затраты</th>
+                <th>Корзина</th><th>Заказы</th><th>Сумма заказов</th><th>ДРРЗ</th><th>Комментарий</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in rows %}
+                <tr>
+                  <td>{{ row.date.strftime('%d.%m.%Y') }}</td>
+                  <td>
+                    <strong>{{ row.product or 'Без названия' }}</strong>
+                    <small>{{ row.group }} · {{ row.nm_id }}</small>
+                  </td>
+                  <td><strong>{{ row.campaign or 'Кампания ' ~ row.advert_id }}</strong><small>ID {{ row.advert_id }}</small></td>
+                  <td class="numeric">{{ "{:,}".format(row.views).replace(',', ' ') }}</td>
+                  <td class="numeric">{{ "{:,}".format(row.clicks).replace(',', ' ') }}</td>
+                  <td class="numeric">{{ "%.2f"|format(row.ctr * 100) }}%</td>
+                  <td class="numeric">{{ "%.2f"|format(row.cpc) }} ₽</td>
+                  <td class="numeric">{{ "{:,.2f}".format(row.spend).replace(',', ' ') }} ₽</td>
+                  <td class="numeric">{{ row.atbs }}</td>
+                  <td class="numeric">{{ row.orders }}</td>
+                  <td class="numeric">{{ "{:,.2f}".format(row.revenue).replace(',', ' ') }} ₽</td>
+                  <td class="numeric">{{ "%.2f"|format(row.drr * 100) }}%</td>
+                  <td class="comment-cell">
+                    <details class="inline-comment">
+                      <summary>{{ row.comment.comment|truncate(38) if row.comment else 'Добавить' }}</summary>
+                      <form method="post" action="{{ module_prefix }}/comments">
+                        <input type="hidden" name="nm_id" value="{{ row.nm_id }}">
+                        <input type="hidden" name="return_to" value="{{ current_page_url }}">
+                        <textarea name="comment" maxlength="4000" rows="3" aria-label="Комментарий к артикулу {{ row.nm_id }}" placeholder="Комментарий к артикулу…">{{ row.comment.comment if row.comment else '' }}</textarea>
+                        <button type="submit">Сохранить</button>
+                      </form>
+                    </details>
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% if pages > 1 %}
+          <nav class="pagination" aria-label="Страницы данных">
+            {% if pagination.previous %}
+              <a class="pagination-direction" href="{{ pagination.previous }}">← Назад</a>
+            {% endif %}
+            <span class="pagination-pages">
+              {% for item in pagination["items"] %}
+                {% if item.current %}
+                  <strong aria-current="page">{{ item.number }}</strong>
+                {% else %}
+                  <a href="{{ item.url }}">{{ item.number }}</a>
+                {% endif %}
+              {% endfor %}
+            </span>
+            {% if pagination.next %}
+              <a class="pagination-direction" href="{{ pagination.next }}">Вперёд →</a>
+            {% endif %}
+          </nav>
+        {% endif %}
+      {% else %}
+        <div class="table-empty">Нет данных по выбранным условиям.</div>
+      {% endif %}
+    </section>
+
+    {% if products %}
+      <details class="card group-editor">
+        <summary>
+          <span><span class="eyebrow">Структура Excel</span><strong>Группы товаров</strong></span>
+          <span>{{ products|length }} артикулов · настроить</span>
+        </summary>
+        <div class="group-grid">
+          {% for product in products %}
+            <form method="post" action="{{ module_prefix }}/products/group" class="group-item">
+              <input type="hidden" name="product_id" value="{{ product.id }}">
+              <div><strong>{{ product.name or 'Артикул ' ~ product.nm_id }}</strong><small>{{ product.nm_id }} · предмет: {{ product.subject_name or 'не определён' }}</small></div>
+              <input name="report_group" value="{{ product.report_group }}" maxlength="200" aria-label="Группа товара {{ product.nm_id }}">
+              <button type="submit">Сохранить</button>
+            </form>
+          {% endfor %}
+        </div>
+      </details>
+    {% endif %}
+  {% endif %}
+{% endblock %}

@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Регистрация Echo{% endblock %}
+{% block auth %}
+<main class="login-shell">
+  <section class="login-card" aria-labelledby="register-title">
+    <div class="auth-wordmark">Bellenne<span>Echo</span></div>
+    <h1 class="login-title" id="register-title">Новый локальный аккаунт</h1>
+    <p class="login-copy">В составе BellenneOne отдельная регистрация Echo не требуется.</p>
+    <form method="post" class="stack-compact">
+      <div class="field"><label for="username">Логин</label><input class="input" id="username" name="username" autocomplete="username" required autofocus></div>
+      <div class="field"><label for="password">Пароль</label><input class="input" id="password" name="password" type="password" autocomplete="new-password" required></div>
+      {% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
+      <button class="button button-product" type="submit">Создать аккаунт</button>
+    </form>
+    <p class="auth-switch">Уже есть аккаунт? <a href="{{ module_prefix }}/login">Войти</a></p>
+  </section>
+</main>
+{% endblock %}

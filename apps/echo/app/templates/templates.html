@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Шаблоны Echo{% endblock %}
+{% block content %}
+<div class="page-header"><div><h1 class="page-title">Шаблоны ответов</h1><p class="page-subtitle">Правила подбора текста по товару, типу отзыва и рейтингу.</p></div></div>
+<div class="stack">
+  <section class="card">
+    <div class="card-header"><div><h2 class="section-title">Новый шаблон</h2><p class="section-copy">Для низких оценок используйте отдельные, нейтральные формулировки.</p></div></div>
+    <form method="post" action="{{ module_prefix }}/templates" class="card-body form-grid">
+      <div class="field"><label for="template-name">Название</label><input class="input" id="template-name" name="name" placeholder="Благодарность за покупку" required></div>
+      <div class="field"><label for="match-mode">Для товаров</label><select class="select" id="match-mode" name="match_mode" data-match-mode><option value="all">Все товары</option><option value="category">Категория</option><option value="article">Артикул</option></select></div>
+      <div class="field" data-category-value-field hidden><label for="category-value">Категория</label><select class="select" id="category-value" name="match_value" data-category-value disabled>{% for category in product_categories %}<option value="{{ category }}">{{ category }}</option>{% endfor %}</select></div>
+      <div class="field" data-text-value-field hidden><label for="article-value">Артикул</label><input class="input" id="article-value" name="match_value" data-text-value placeholder="ART-100" disabled></div>
+      <div class="field"><label for="review-kind">Тип отзыва</label><select class="select" id="review-kind" name="review_kind"><option value="any">Любой</option><option value="text">Только текст</option><option value="photo">С фото</option><option value="video">С видео</option></select></div>
+      <div class="field"><label for="rating-from">Оценка от</label><input class="input" id="rating-from" name="rating_from" type="number" min="1" max="5" value="1"></div>
+      <div class="field"><label for="rating-to">Оценка до</label><input class="input" id="rating-to" name="rating_to" type="number" min="1" max="5" value="5"></div>
+      <div class="field field-wide"><label for="template-body">Текст ответа</label><textarea class="textarea" id="template-body" name="body" rows="5" required>Спасибо за отзыв! Нам очень приятно, что вы выбрали {товар}.</textarea><span class="field-help">Подстановки: {товар}, {артикул}, {оценка}, {кабинет}</span></div>
+      <div class="form-actions"><button class="button button-product" type="submit">Сохранить шаблон</button></div>
+    </form>
+  </section>
+
+  <section>
+    <div class="section-heading"><div><h2 class="section-title">Сохранённые шаблоны</h2><p class="section-copy">Активные шаблоны участвуют в автоматической обработке.</p></div></div>
+    {% if items %}<div class="template-grid">{% for item in items %}<article class="card card-body template-card">
+      <div class="account-title-row"><div><h3 class="section-title">{{ item.name }}</h3><p class="section-copy">{{ kind_name(item.review_kind) }} · рейтинг {{ item.rating_from }}–{{ item.rating_to }}</p></div><span class="badge {{ 'badge-positive' if item.is_active else 'badge-neutral' }}">{{ 'Включён' if item.is_active else 'Отключён' }}</span></div>
+      <div class="badge-row"><span class="badge badge-neutral">{% if item.match_mode == 'all' %}Все товары{% elif item.match_mode == 'category' %}Категория: {{ item.match_value }}{% else %}Артикул: {{ item.match_value }}{% endif %}</span><span class="rating-label" aria-label="Диапазон рейтинга">★ {{ item.rating_from }}–{{ item.rating_to }}</span></div>
+      {% if template_safety_warning(item) %}<div class="alert alert-warning" role="status">{{ template_safety_warning(item) }}</div>{% endif %}
+      <blockquote class="reply-preview">{{ item.body }}</blockquote>
+      <div class="account-actions"><form method="post" action="{{ module_prefix }}/templates/{{ item.id }}/toggle"><button class="button button-secondary button-small" type="submit">{{ 'Отключить' if item.is_active else 'Включить' }}</button></form><form method="post" action="{{ module_prefix }}/templates/{{ item.id }}/delete" data-confirm="Удалить шаблон?"><button class="button button-danger button-small" type="submit">Удалить</button></form></div>
+    </article>{% endfor %}</div>{% else %}<div class="card empty-state"><h3 class="section-title">Шаблонов пока нет</h3><p>Создайте первый шаблон для автоматических ответов.</p></div>{% endif %}
+  </section>
+</div>
+{% endblock %}

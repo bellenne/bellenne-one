@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Вход Echo{% endblock %}
+{% block auth %}
+<main class="login-shell">
+  <section class="login-card" aria-labelledby="login-title">
+    <img class="module-brand-logo auth-wordmark" src="{{ module_prefix }}/static/logo.svg" alt="BellenneEcho">
+    <h1 class="login-title" id="login-title">Вход в Echo</h1>
+    <p class="login-copy">Локальный режим разработки. В BellenneOne используется единый вход Pulse.</p>
+    <form method="post" class="stack-compact">
+      <div class="field"><label for="username">Логин</label><input class="input" id="username" name="username" autocomplete="username" required autofocus></div>
+      <div class="field"><label for="password">Пароль</label><input class="input" id="password" name="password" type="password" autocomplete="current-password" required></div>
+      {% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
+      <button class="button button-product" type="submit">Войти</button>
+    </form>
+    <p class="auth-switch">Нет аккаунта? <a href="{{ module_prefix }}/register">Зарегистрироваться</a></p>
+  </section>
+</main>
+{% endblock %}

@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% from "icons.html" import icon %}
+{% block content %}
+<div class="page-header"><div><h1 class="page-title">Обновление плана</h1><p class="page-subtitle">Три понятных шага: период, способ расчёта и показатели месяца.</p></div></div>
+
+<div class="stack">
+  <form class="card filter-panel plan-period-filter" method="get" action="{{ module_prefix }}/plans">
+    <div class="filter-panel-head"><div class="filter-title">{{ icon('filter', 18) }}<span>1. Выберите период</span></div><span class="badge badge-neutral">Текущий выбор: {{ period|month_year }}</span></div>
+    <div class="filter-fields filter-fields-compact"><div class="field"><label for="plan-period-filter">Месяц</label><input class="input" id="plan-period-filter" type="month" name="period" value="{{ period.strftime('%Y-%m') }}"></div><div class="field"><label for="plan-market-filter">Маркетплейс</label><select class="select" id="plan-market-filter" name="marketplace"><option value="WB" {{ 'selected' if marketplace == 'WB' else '' }}>Wildberries</option><option value="OZON" {{ 'selected' if marketplace == 'OZON' else '' }}>Ozon</option></select></div><button class="button button-secondary" type="submit">Открыть план</button></div>
+  </form>
+
+  <form class="plan-workflow" method="post" action="{{ module_prefix }}/plans">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="period" value="{{ period.strftime('%Y-%m') }}"><input type="hidden" name="marketplace" value="{{ marketplace }}">
+
+    <section class="card plan-step">
+      <div class="card-header"><div><span class="step-label">Шаг 2</span><h2 class="section-title">Выберите способ планирования</h2><p class="section-copy">Можно распределить общий план долями или ввести независимый план для каждого типа товара.</p></div></div>
+      <div class="card-body plan-mode-grid" role="radiogroup" aria-label="Способ заполнения плана">
+        <label class="plan-mode-option"><input type="radio" name="mode" value="total" {{ 'checked' if mode == 'total' else '' }}><span class="plan-mode-content"><strong>Общий план + доли</strong><small>Заполните итог месяца и распределите 100% между типами товаров.</small></span></label>
+        <label class="plan-mode-option"><input type="radio" name="mode" value="by_product" {{ 'checked' if mode == 'by_product' else '' }}><span class="plan-mode-content"><strong>Отдельно по товарам</strong><small>Заполните показатели по каждому типу — общий план сложится автоматически.</small></span></label>
+      </div>
+    </section>
+
+    <div class="plan-panels" data-plan-panel="total">
+      <section class="card plan-step"><div class="card-header"><div><span class="step-label">Шаг 3</span><h2 class="section-title">Показатели месяца</h2><p class="section-copy">Значения автоматически делятся на календарные дни и суммируются по неделям.</p></div></div><div class="card-body plan-metrics">
+        <div class="field"><label>Заказано, шт</label><input class="input" type="number" min="0" step="1" name="total_ordered_units" value="{{ totals.ordered_units|input_number }}"></div>
+        <div class="field"><label>Сумма заказов, ₽</label><input class="input" type="number" min="0" step="0.01" name="total_ordered_amount" value="{{ totals.ordered_amount|input_number }}"></div>
+        <div class="field"><label>Выкуплено, шт</label><input class="input" type="number" min="0" step="1" name="total_buyout_units" value="{{ totals.buyout_units|input_number }}"></div>
+        <div class="field"><label>Сумма выкупов, ₽</label><input class="input" type="number" min="0" step="0.01" name="total_buyout_amount" value="{{ totals.buyout_amount|input_number }}"></div>
+        <div class="field"><label>Выручка после комиссий, ₽</label><input class="input" type="number" min="0" step="0.01" name="total_net_revenue" value="{{ totals.net_revenue|input_number }}"></div>
+        <div class="field"><label>РК Денег, ₽</label><input class="input" type="number" min="0" step="0.01" name="total_ad_spend" value="{{ totals.ad_spend|input_number }}"></div>
+        <div class="field"><label>РК Бонусов, ₽</label><input class="input" type="number" min="0" step="0.01" name="total_ad_bonus_spend" value="{{ totals.ad_bonus_spend|input_number }}"></div>
+        <div class="field"><label>Валовая прибыль, ₽</label><input class="input" type="number" min="0" step="0.01" name="total_gross_profit" value="{{ totals.gross_profit|input_number }}"><span class="field-help">Заполняется как план; факт позже поступит из внешнего сервиса.</span></div>
+      </div></section>
+      <section class="card plan-step"><div class="card-header"><div><h2 class="section-title">Распределение по типам товаров</h2><p class="section-copy">Укажите долю каждого типа. Итог должен быть ровно 100%.</p></div><div class="allocation-total" data-allocation-total></div></div><div class="card-body plan-metrics">{% for group in groups %}<div class="field"><label for="allocation-{{ group.id }}">{{ group.name }}, %</label><input class="input" id="allocation-{{ group.id }}" type="number" min="0" max="100" step="0.01" name="allocation_{{ group.id }}" value="{{ allocations[group.id]|input_number }}" data-allocation></div>{% endfor %}{% if not groups %}<div class="empty-state inline-empty">Сначала добавьте типы товаров в разделе «Кабинеты».</div>{% endif %}</div></section>
+    </div>
+
+    <div class="plan-panels" data-plan-panel="by_product" hidden>
+      <section class="card plan-step"><div class="card-header"><div><span class="step-label">Шаг 3</span><h2 class="section-title">Планы по типам товаров</h2><p class="section-copy">Каждый блок независим. Общий итог сформируется при сохранении.</p></div></div></section>
+      {% for group in groups %}<section class="card product-plan-card"><div class="card-header"><div><span class="badge badge-neutral">Тип товара</span><h3 class="section-title">{{ group.name }}</h3></div></div><div class="card-body plan-metrics">
+        <div class="field"><label>Заказано, шт</label><input class="input" type="number" min="0" step="1" name="group_{{ group.id }}_ordered_units" value="{{ group_values[group.id].ordered_units|input_number }}"></div>
+        <div class="field"><label>Сумма заказов, ₽</label><input class="input" type="number" min="0" step="0.01" name="group_{{ group.id }}_ordered_amount" value="{{ group_values[group.id].ordered_amount|input_number }}"></div>
+        <div class="field"><label>Выкуплено, шт</label><input class="input" type="number" min="0" step="1" name="group_{{ group.id }}_buyout_units" value="{{ group_values[group.id].buyout_units|input_number }}"></div>
+        <div class="field"><label>Сумма выкупов, ₽</label><input class="input" type="number" min="0" step="0.01" name="group_{{ group.id }}_buyout_amount" value="{{ group_values[group.id].buyout_amount|input_number }}"></div>
+        <div class="field"><label>Выручка после комиссий, ₽</label><input class="input" type="number" min="0" step="0.01" name="group_{{ group.id }}_net_revenue" value="{{ group_values[group.id].net_revenue|input_number }}"></div>
+        <div class="field"><label>РК Денег, ₽</label><input class="input" type="number" min="0" step="0.01" name="group_{{ group.id }}_ad_spend" value="{{ group_values[group.id].ad_spend|input_number }}"></div>
+        <div class="field"><label>РК Бонусов, ₽</label><input class="input" type="number" min="0" step="0.01" name="group_{{ group.id }}_ad_bonus_spend" value="{{ group_values[group.id].ad_bonus_spend|input_number }}"></div>
+        <div class="field"><label>Валовая прибыль, ₽</label><input class="input" type="number" min="0" step="0.01" name="group_{{ group.id }}_gross_profit" value="{{ group_values[group.id].gross_profit|input_number }}"><span class="field-help">Только план; факт из внешнего сервиса.</span></div>
+      </div></section>{% endfor %}
+    </div>
+
+    <section class="card plan-save-bar"><div><strong>План на {{ period|month_year }} · {{ marketplace }}</strong><span>Сохранение будущего месяца не меняет текущий.</span></div><button class="button button-primary" type="submit">Сохранить и пересчитать</button></section>
+  </form>
+</div>
+{% endblock %}

@@ -1,0 +1,425 @@
+{% extends "base.html" %}
+{% from "icons.html" import icon %}
+{% block title %}Аналитика · BellenneVector{% endblock %}
+{% macro money(value) -%}
+  {{ "{:,.0f}".format(value or 0).replace(',', ' ') }}
+{%- endmacro %}
+{% macro number(value) -%}
+  {{ "{:,.0f}".format(value or 0).replace(',', ' ') }}
+{%- endmacro %}
+{% macro change(value, better='up') -%}
+  {% if value is not none %}
+    {% set positive = (better == 'up' and value > 0) or (better == 'down' and value < 0) %}
+    {% set negative = (better == 'up' and value < 0) or (better == 'down' and value > 0) %}
+    <span class="metric-delta {{ 'delta-positive' if positive else ('delta-negative' if negative else 'delta-neutral') }}">
+      {{ '↑' if value > 0 else ('↓' if value < 0 else '→') }} {{ "%.1f"|format(value|abs) }}%
+    </span>
+  {% else %}
+    <span class="metric-delta delta-empty">нет базы сравнения</span>
+  {% endif %}
+{%- endmacro %}
+{% block content %}
+  <section class="page-heading report-heading">
+    <div>
+      <span class="eyebrow">Полный отчёт по РК</span>
+      <h1>Аналитика продвижения</h1>
+      <p>
+        {% if report %}
+          {{ report.begin.strftime('%d.%m.%Y') }} — {{ report.end.strftime('%d.%m.%Y') }}
+          · {{ number(report.row_count) }} строк исходных данных
+        {% elif date_min %}
+          Выберите период и разрез отчёта.
+        {% else %}
+          Подключите кабинет и выполните первый сбор.
+        {% endif %}
+      </p>
+    </div>
+    <div class="heading-actions">
+      <a class="button button-secondary" href="{{ module_prefix }}/scheduler">Запустить сбор</a>
+      {% if report %}
+        <a class="button button-product" href="{{ module_prefix }}/export.xlsx?date_from={{ report.begin.isoformat() }}&date_to={{ report.end.isoformat() }}">
+          Скачать Excel
+        </a>
+      {% endif %}
+    </div>
+  </section>
+
+  {% if not account %}
+    <section class="onboarding card">
+      <div class="onboarding-index">01</div>
+      <div>
+        <span class="eyebrow">Первый шаг</span>
+        <h2>Добавьте API-ключ кабинета</h2>
+        <p>Нужен токен Wildberries с категорией «Продвижение». Он будет зашифрован и сохранён только в Docker volume.</p>
+        <a class="button button-product" href="{{ module_prefix }}/cabinet">Настроить кабинет</a>
+      </div>
+    </section>
+  {% elif not date_min %}
+    <section class="empty-state card">
+      <div class="empty-icon">{{ icon('reports', 24) }}</div>
+      <h2>История пока пуста</h2>
+      <p>Настройте расписание или запустите сбор вручную за нужный период.</p>
+      <a class="button button-product" href="{{ module_prefix }}/scheduler">Перейти к автосбору</a>
+    </section>
+  {% else %}
+    <section class="card report-filter-card">
+      <form method="get" action="{{ module_prefix }}/" class="report-filter-form">
+        <label>
+          <span>Дата начала</span>
+          <input type="date" name="date_from" value="{{ filters.date_from.isoformat() if filters.date_from else '' }}">
+        </label>
+        <label>
+          <span>Дата окончания</span>
+          <input type="date" name="date_to" value="{{ filters.date_to.isoformat() if filters.date_to else '' }}">
+        </label>
+        <label>
+          <span>Группа отчёта</span>
+          <select name="group">
+            <option value="">Все группы</option>
+            {% for item in groups %}
+              <option value="{{ item }}" {{ 'selected' if filters.group == item else '' }}>{{ item }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          <span>Категория WB</span>
+          <select name="subject">
+            <option value="">Все категории</option>
+            {% for item in subjects %}
+              <option value="{{ item }}" {{ 'selected' if filters.subject == item else '' }}>{{ item }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <button class="button button-primary" type="submit">Применить</button>
+      </form>
+      <div class="quick-ranges" aria-label="Быстрый выбор периода">
+        <span>Период:</span>
+        <a href="{{ module_prefix }}/?date_from={{ quick_ranges.week.isoformat() }}&date_to={{ quick_ranges.end.isoformat() }}">7 дней</a>
+        <a href="{{ module_prefix }}/?date_from={{ quick_ranges.month.isoformat() }}&date_to={{ quick_ranges.end.isoformat() }}">30 дней</a>
+        <a href="{{ module_prefix }}/?date_from={{ quick_ranges.all.isoformat() }}&date_to={{ quick_ranges.end.isoformat() }}">Вся история</a>
+        {% if filters.group or filters.subject %}
+          <a class="filter-clear" href="{{ module_prefix }}/?date_from={{ filters.date_from.isoformat() }}&date_to={{ filters.date_to.isoformat() }}">Сбросить разрез</a>
+        {% endif %}
+      </div>
+    </section>
+
+    {% if not report or report.row_count == 0 %}
+      <section class="empty-state card">
+        <div class="empty-icon">{{ icon('filter', 24) }}</div>
+        <h2>В выбранном разрезе нет данных</h2>
+        <p>Измените период, группу или категорию WB.</p>
+        <a class="button button-secondary" href="{{ module_prefix }}/?date_from={{ quick_ranges.all.isoformat() }}&date_to={{ quick_ranges.end.isoformat() }}">Показать всю историю</a>
+      </section>
+    {% else %}
+      <section class="kpi-grid report-kpi-grid">
+        <article class="kpi-card kpi-primary">
+          <span>Затраты</span>
+          <strong>{{ money(totals.spend) }} ₽</strong>
+          <small>{{ change(report.deltas.spend, 'neutral') }} к предыдущему периоду</small>
+        </article>
+        <article class="kpi-card">
+          <span>Заказали на сумму</span>
+          <strong>{{ money(totals.revenue) }} ₽</strong>
+          <small>{{ change(report.deltas.revenue, 'up') }} · ROAS {{ "%.2f"|format(totals.roas) }}</small>
+        </article>
+        <article class="kpi-card">
+          <span>Заказы</span>
+          <strong>{{ number(totals.orders) }}</strong>
+          <small>{{ number(totals.orders) }} заказов · CPO {{ "%.2f"|format(totals.cpo) }} ₽</small>
+        </article>
+        <article class="kpi-card">
+          <span>ДРРЗ</span>
+          <strong>{{ "%.2f"|format(totals.drr * 100) }}%</strong>
+          <small>{{ change(report.deltas.drr, 'down') }} · отмены {{ "%.2f"|format(totals.cancel_rate * 100) }}%</small>
+        </article>
+        <article class="kpi-card">
+          <span>CTR · кликабельность</span>
+          <strong>{{ "%.2f"|format(totals.ctr * 100) }}%</strong>
+          <small>CPC {{ "%.2f"|format(totals.cpc) }} ₽ · CPM {{ "%.2f"|format(totals.cpm) }} ₽</small>
+        </article>
+        <article class="kpi-card">
+          <span>Конверсии</span>
+          <strong>{{ "%.2f"|format(totals.order_cr * 100) }}%</strong>
+          <small>В корзину {{ "%.2f"|format(totals.cart_cr * 100) }}% · {{ number(totals.atbs) }} корзин</small>
+        </article>
+      </section>
+
+      <section class="analytics-hero-grid">
+        <article class="card analytics-card trend-card">
+          <div class="card-header">
+            <div>
+              <span class="eyebrow">Динамика по дням</span>
+              <h2>Затраты и сумма заказов</h2>
+            </div>
+            <div class="legend">
+              <span><i class="legend-revenue"></i>Заказали</span>
+              <span><i class="legend-spend"></i>Затраты</span>
+            </div>
+          </div>
+          <div class="line-chart-wrap">
+            <svg class="line-chart" viewBox="0 0 {{ report.chart.width }} {{ report.chart.height }}" role="img" aria-label="Динамика затрат и суммы заказов">
+              <defs>
+                <linearGradient id="revenue-area" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stop-color="var(--bp-violet)" stop-opacity=".32"/>
+                  <stop offset="100%" stop-color="var(--bp-violet)" stop-opacity=".02"/>
+                </linearGradient>
+              </defs>
+              <line class="chart-grid-line" x1="58" y1="22" x2="942" y2="22"/>
+              <line class="chart-grid-line" x1="58" y1="140" x2="942" y2="140"/>
+              <line class="chart-grid-line" x1="58" y1="{{ report.chart.baseline }}" x2="942" y2="{{ report.chart.baseline }}"/>
+              <path class="chart-area" d="{{ report.chart.revenue_area }}"/>
+              <polyline class="chart-line chart-line-revenue" points="{{ report.chart.revenue_line }}"/>
+              <polyline class="chart-line chart-line-spend" points="{{ report.chart.spend_line }}"/>
+              {% for point in report.chart.points %}
+                <circle class="chart-point chart-point-revenue" cx="{{ point.x }}" cy="{{ point.revenue_y }}" r="4">
+                  <title>{{ point.date.strftime('%d.%m.%Y') }} · заказали {{ money(point.revenue) }} ₽ · {{ point.orders }} заказов</title>
+                </circle>
+                <circle class="chart-point chart-point-spend" cx="{{ point.x }}" cy="{{ point.spend_y }}" r="3.5">
+                  <title>{{ point.date.strftime('%d.%m.%Y') }} · затраты {{ money(point.spend) }} ₽ · ДРРЗ {{ "%.2f"|format(point.drr * 100) }}%</title>
+                </circle>
+              {% endfor %}
+              {% for tick in report.chart.ticks %}
+                <text class="chart-axis-label" x="{{ tick.x }}" y="288" text-anchor="middle">{{ tick.date.strftime('%d.%m') }}</text>
+              {% endfor %}
+              <text class="chart-scale chart-scale-revenue" x="58" y="14">до {{ money(report.chart.revenue_max) }} ₽</text>
+              <text class="chart-scale chart-scale-spend" x="942" y="14" text-anchor="end">до {{ money(report.chart.spend_max) }} ₽</text>
+            </svg>
+          </div>
+          <div class="chart-summary">
+            <span><strong>{{ number(totals.views) }}</strong> показов</span>
+            <span><strong>{{ number(totals.clicks) }}</strong> кликов</span>
+            <span><strong>{{ number(totals.shks) }}</strong> выкупов</span>
+            <span><strong>{{ totals.products_count }}</strong> артикулов</span>
+          </div>
+        </article>
+
+        <article class="card analytics-card funnel-card" data-funnel-card>
+          <span class="eyebrow">Воронка</span>
+          <div class="funnel-title-row">
+            <h2>Путь до заказа</h2>
+            <span class="pill" data-funnel-current>Все категории</span>
+          </div>
+          <div class="funnel-category-tabs" role="tablist" aria-label="Категория воронки">
+            <button
+              class="funnel-category-tab active"
+              type="button"
+              role="tab"
+              aria-selected="true"
+              data-funnel-label="Все категории"
+              data-funnel-views="{{ totals.views }}"
+              data-funnel-clicks="{{ totals.clicks }}"
+              data-funnel-atbs="{{ totals.atbs }}"
+              data-funnel-orders="{{ totals.orders }}"
+              data-funnel-ctr="{{ totals.ctr }}"
+              data-funnel-cart-cr="{{ totals.cart_cr }}"
+              data-funnel-order-cr="{{ totals.order_cr }}"
+            >Все</button>
+            {% for category in report.funnel_categories %}
+              <button
+                class="funnel-category-tab"
+                type="button"
+                role="tab"
+                aria-selected="false"
+                data-funnel-label="{{ category.label }}"
+                data-funnel-views="{{ category.views }}"
+                data-funnel-clicks="{{ category.clicks }}"
+                data-funnel-atbs="{{ category.atbs }}"
+                data-funnel-orders="{{ category.orders }}"
+                data-funnel-ctr="{{ category.ctr }}"
+                data-funnel-cart-cr="{{ category.cart_cr }}"
+                data-funnel-order-cr="{{ category.order_cr }}"
+              >{{ category.label }}</button>
+            {% endfor %}
+          </div>
+          <div class="funnel">
+            <div class="funnel-step" style="--funnel-width: 100%">
+              <span>Показы</span><strong data-funnel-value="views">{{ number(totals.views) }}</strong>
+            </div>
+            <div class="funnel-conversion">CTR <span data-funnel-rate="ctr">{{ "%.2f"|format(totals.ctr * 100) }}%</span></div>
+            <div class="funnel-step" style="--funnel-width: 82%">
+              <span>Клики</span><strong data-funnel-value="clicks">{{ number(totals.clicks) }}</strong>
+            </div>
+            <div class="funnel-conversion">В корзину <span data-funnel-rate="cartCr">{{ "%.2f"|format(totals.cart_cr * 100) }}%</span></div>
+            <div class="funnel-step" style="--funnel-width: 64%">
+              <span>Корзины</span><strong data-funnel-value="atbs">{{ number(totals.atbs) }}</strong>
+            </div>
+            <div class="funnel-conversion">В заказ <span data-funnel-rate="orderCr">{{ "%.2f"|format(totals.order_cr * 100) }}%</span></div>
+            <div class="funnel-step funnel-final" style="--funnel-width: 46%">
+              <span>Заказы</span><strong data-funnel-value="orders">{{ number(totals.orders) }}</strong>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section class="analytics-split">
+        <article class="card analytics-card">
+          <div class="card-header">
+            <div>
+              <span class="eyebrow">Структура затрат</span>
+              <h2>Группы отчёта</h2>
+            </div>
+          </div>
+          <div class="donut-layout">
+            <div class="donut-chart" style="background: {{ report.donut_background }}">
+              <div>
+                <strong>{{ money(totals.spend) }} ₽</strong>
+                <span>всего затрат</span>
+              </div>
+            </div>
+            <div class="donut-legend">
+              {% for row in report.groups %}
+                <div>
+                  <i style="background: {{ row.color }}"></i>
+                  <span>{{ row.label }}</span>
+                  <strong>{{ "%.1f"|format(row.spend_share * 100) }}%</strong>
+                </div>
+              {% endfor %}
+            </div>
+          </div>
+        </article>
+
+        <article class="card analytics-card">
+          <div class="card-header">
+            <div>
+              <span class="eyebrow">Категории WB</span>
+              <h2>Оборот и затраты</h2>
+            </div>
+            <span class="pill">Категорий: {{ report.subjects|length }}</span>
+          </div>
+          <div class="dimension-chart">
+            {% for row in report.subjects %}
+              <div class="dimension-row">
+                <div class="dimension-label">
+                  <strong>{{ row.label }}</strong>
+                  <span>{{ money(row.revenue) }} ₽ · ДРРЗ {{ "%.1f"|format(row.drr * 100) }}%</span>
+                </div>
+                <div class="dimension-bars">
+                  <i class="dimension-revenue" style="width: {{ row.bar_revenue }}%"></i>
+                  <i class="dimension-spend" style="width: {{ row.bar_spend }}%"></i>
+                </div>
+              </div>
+            {% endfor %}
+          </div>
+          <div class="legend chart-bottom-legend">
+            <span><i class="legend-revenue"></i>Сумма заказов</span>
+            <span><i class="legend-spend"></i>Затраты</span>
+          </div>
+        </article>
+      </section>
+
+      <section class="card analytics-card metric-matrix-card">
+        <div class="card-header">
+          <div>
+            <span class="eyebrow">Показатели из Excel</span>
+            <h2>Эффективность по группам</h2>
+          </div>
+          <span class="matrix-hint"><i class="zone-dot zone-good"></i>цель <i class="zone-dot zone-warning"></i>внимание <i class="zone-dot zone-bad"></i>риск</span>
+        </div>
+        <div class="table-wrap">
+          <table class="analytics-table metric-matrix">
+            <thead>
+              <tr>
+                <th>Группа</th><th>Показы</th><th>CPM</th><th>Клики</th>
+                <th>CTR</th><th>CPC</th><th>Затраты</th><th>Корзины</th>
+                <th>Конв. корзины</th><th>Заказы</th><th>Конв. заказа</th>
+                <th>Сумма заказов</th><th>CPO</th><th>ДРРЗ</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in report.groups %}
+                <tr>
+                  <td><strong>{{ row.label }}</strong><small>{{ "%.1f"|format(row.spend_share * 100) }}% затрат</small></td>
+                  <td class="numeric">{{ number(row.views) }}</td>
+                  <td class="numeric">{{ "%.2f"|format(row.cpm) }} ₽</td>
+                  <td class="numeric">{{ number(row.clicks) }}</td>
+                  <td class="numeric zone-cell zone-{{ row.zones.ctr }}">{{ "%.2f"|format(row.ctr * 100) }}%</td>
+                  <td class="numeric zone-cell zone-{{ row.zones.cpc }}">{{ "%.2f"|format(row.cpc) }} ₽</td>
+                  <td class="numeric">{{ money(row.spend) }} ₽</td>
+                  <td class="numeric">{{ number(row.atbs) }}</td>
+                  <td class="numeric zone-cell zone-{{ row.zones.cart_cr }}">{{ "%.2f"|format(row.cart_cr * 100) }}%</td>
+                  <td class="numeric">{{ number(row.orders) }}</td>
+                  <td class="numeric zone-cell zone-{{ row.zones.order_cr }}">{{ "%.2f"|format(row.order_cr * 100) }}%</td>
+                  <td class="numeric">{{ money(row.revenue) }} ₽</td>
+                  <td class="numeric">{{ "%.2f"|format(row.cpo) }} ₽</td>
+                  <td class="numeric zone-cell zone-{{ row.zones.drr }}">{{ "%.2f"|format(row.drr * 100) }}%</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <p class="matrix-note">Цветовые зоны рассчитаны по целевым показателям листа «Целевые показатели по РК»; для футболок применяется отдельный профиль.</p>
+      </section>
+
+      <section class="analytics-split ranking-grid">
+        <article class="card analytics-card">
+          <div class="card-header">
+            <div>
+              <span class="eyebrow">Товары</span>
+              <h2>Топ артикулов по обороту</h2>
+            </div>
+            <a class="text-link" href="{{ module_prefix }}/data?date_from={{ report.begin.isoformat() }}&date_to={{ report.end.isoformat() }}">Все данные →</a>
+          </div>
+          <div class="table-wrap compact-table-wrap">
+            <table class="analytics-table ranking-table">
+              <thead><tr><th>#</th><th>Артикул</th><th>Заказы</th><th>Оборот</th><th>Затраты</th><th>ДРРЗ</th></tr></thead>
+              <tbody>
+                {% for row in report.products %}
+                  <tr>
+                    <td class="rank-number">{{ row.rank }}</td>
+                    <td><strong>{{ row.name }}</strong><small>{{ row.nm_id }} · {{ row.group }} · {{ row.subject }}</small></td>
+                    <td class="numeric">{{ number(row.orders) }}</td>
+                    <td class="numeric">{{ money(row.revenue) }} ₽</td>
+                    <td class="numeric">{{ money(row.spend) }} ₽</td>
+                    <td class="numeric">{{ "%.2f"|format(row.drr * 100) }}%</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="card analytics-card">
+          <div class="card-header">
+            <div>
+              <span class="eyebrow">Кампании</span>
+              <h2>Эффективность РК</h2>
+            </div>
+            <span class="pill">{{ totals.campaigns_count }} кампаний</span>
+          </div>
+          <div class="table-wrap compact-table-wrap">
+            <table class="analytics-table ranking-table">
+              <thead><tr><th>#</th><th>Кампания</th><th>CTR</th><th>Заказы</th><th>Затраты</th><th>ДРРЗ</th></tr></thead>
+              <tbody>
+                {% for row in report.campaigns %}
+                  <tr>
+                    <td class="rank-number">{{ row.rank }}</td>
+                    <td><strong>{{ row.name }}</strong><small>ID {{ row.advert_id }}</small></td>
+                    <td class="numeric">{{ "%.2f"|format(row.ctr * 100) }}%</td>
+                    <td class="numeric">{{ number(row.orders) }}</td>
+                    <td class="numeric">{{ money(row.spend) }} ₽</td>
+                    <td class="numeric">{{ "%.2f"|format(row.drr * 100) }}%</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <section class="card report-status-card">
+        <div>
+          <span class="eyebrow">Контроль данных</span>
+          <h2>{{ report.begin.strftime('%d.%m.%Y') }} — {{ report.end.strftime('%d.%m.%Y') }}</h2>
+          <p>{{ number(report.row_count) }} строк · {{ totals.products_count }} артикулов · {{ totals.campaigns_count }} кампаний</p>
+        </div>
+        {% if last_run %}
+          <div class="report-sync">
+            <span class="run-status run-{{ last_run.status }}"><span></span>{{ 'Успешно' if last_run.status == 'success' else ('Выполняется' if last_run.status == 'running' else 'Ошибка') }}</span>
+            <strong>{{ last_run.started_at.strftime('%d.%m.%Y · %H:%M') }}</strong>
+            <small>Последняя синхронизация · {{ last_run.records_upserted }} строк обновлено</small>
+          </div>
+        {% endif %}
+      </section>
+    {% endif %}
+  {% endif %}
+{% endblock %}

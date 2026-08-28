@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% from "icons.html" import icon %}
+{% block content %}
+<div class="page-header"><div><h1 class="page-title">Кабинеты</h1><p class="page-subtitle">Подключение WB и Ozon, расписание и состав товаров.</p></div></div>
+
+<div class="stack">
+  <section class="card">
+    <div class="card-header"><div><h2 class="section-title">Добавить кабинет</h2><p class="section-copy">Ключи шифруются перед записью в SQLite.</p></div></div>
+    <form class="card-body stack-compact" method="post" action="{{ module_prefix }}/accounts">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="form-grid">
+        <div class="field"><label for="account-name">Название</label><input class="input" id="account-name" name="name" placeholder="Основной кабинет" required></div>
+        <div class="field"><label for="account-marketplace">Маркетплейс</label><select class="select" id="account-marketplace" name="marketplace" data-marketplace-select><option value="WB">Wildberries</option><option value="OZON">Ozon</option></select></div>
+        <div class="field"><label for="account-time">Время сбора</label><input class="input" id="account-time" type="time" name="sync_time" value="06:15" required></div>
+        <div class="field"><label for="account-timezone">Часовой пояс</label><input class="input" id="account-timezone" name="timezone" value="{{ default_timezone }}" required></div>
+      </div>
+      <div class="credentials-panel form-grid-2" data-marketplace-credentials="WB"><div class="field"><label for="wb-api-token">WB API-токен</label><input class="input" id="wb-api-token" type="password" name="wb_api_token" autocomplete="off" placeholder="Категория Статистика"></div><div class="field"><label for="wb-advert-token">WB токен продвижения</label><input class="input" id="wb-advert-token" type="password" name="wb_advert_token" autocomplete="off" placeholder="Если отличается от основного"></div></div>
+      <div class="credentials-panel form-grid-2" data-marketplace-credentials="OZON" hidden><div class="field"><label for="ozon-client-id">Ozon Client-Id</label><input class="input" id="ozon-client-id" type="password" name="ozon_client_id" autocomplete="off"></div><div class="field"><label for="ozon-api-key">Ozon Api-Key</label><input class="input" id="ozon-api-key" type="password" name="ozon_api_key" autocomplete="off"></div></div>
+      <div class="form-actions"><label class="checkbox-field"><input type="checkbox" name="schedule_enabled" checked> Запускать сбор ежедневно</label><button class="button button-primary" type="submit">Добавить кабинет</button></div>
+    </form>
+  </section>
+
+  <section>
+    <div class="section-heading"><div><h2 class="section-title">Подключённые кабинеты</h2><p class="section-copy">Демонстрационные кабинеты удаляются так же, как обычные.</p></div></div>
+    {% if accounts %}<div class="account-grid">
+      {% for account in accounts %}<article class="card card-body account-card">
+        <div class="account-title-row"><h3 class="section-title">{{ account.name }}</h3><div class="badge-row"><span class="badge badge-neutral">{{ account.marketplace }}</span>{% if account.is_demo %}<span class="badge badge-warning">Демо</span>{% endif %}</div></div>
+        <div class="account-meta"><span><span class="status-dot status-dot-{{ account.last_sync_status or 'neutral' }}"></span> {{ account.last_sync_message or 'Ещё не проверялся' }}</span><span>Расписание: {{ account.sync_time.strftime('%H:%M') }} · {{ account.timezone }} · {{ 'включено' if account.schedule_enabled else 'выключено' }}</span><span>Последний сбор: {{ account.last_sync_at|date('%d.%m.%Y %H:%M') }}</span></div>
+        <div class="account-actions"><form class="inline-form" method="post" action="{{ module_prefix }}/accounts/{{ account.id }}/sync"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input class="input" type="date" name="target_date" value="{{ yesterday.isoformat() }}" max="{{ yesterday.isoformat() }}"><button class="button button-primary button-small" type="submit">Собрать</button></form><form method="post" action="{{ module_prefix }}/accounts/{{ account.id }}/validate"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button button-secondary button-small" type="submit">Проверить</button></form><form method="post" action="{{ module_prefix }}/accounts/{{ account.id }}/toggle"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button button-secondary button-small" type="submit">{{ 'Отключить' if account.is_active else 'Включить' }}</button></form><form method="post" action="{{ module_prefix }}/accounts/{{ account.id }}/delete" onsubmit="return confirm('Удалить кабинет и все связанные метрики?')"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button button-danger button-small" type="submit">Удалить</button></form></div>
+        {% if account.marketplace == 'WB' and not account.is_demo %}<div class="stack-compact">
+          <form class="inline-form" method="post" action="{{ module_prefix }}/accounts/{{ account.id }}/wb-summary" enctype="multipart/form-data"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><div class="field"><label for="wb-summary-{{ account.id }}">Сводный отчёт WB</label><input class="input" id="wb-summary-{{ account.id }}" type="file" name="summary_file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" required></div><button class="button button-secondary button-small" type="submit">{{ icon('export', 16) }}<span>Загрузить XLSX</span></button></form>
+          <p class="section-copy">Корректирует общие заказы, выкупы и «К перечислению» по официальному отчёту. Сегодняшняя строка всегда пропускается.{% set summary = summary_info.get(account.id) %}{% if summary %} Дневных строк: {{ summary.rows }}, по {{ summary.last_date|date('%d.%m.%Y') }} включительно.{% endif %}</p>
+        </div>{% endif %}
+      </article>{% endfor %}
+    </div>{% else %}<div class="card empty-state"><h3 class="section-title">Кабинетов пока нет</h3><p>Добавьте WB или Ozon, чтобы начать ежедневный сбор.</p></div>{% endif %}
+  </section>
+
+  <section class="card data-section">
+    <div class="card-header"><div><h2 class="section-title">Категории отчёта</h2><p class="section-copy">Отключение категории исключает её товары из категорийных графиков, планов и строк XLSX. Общий итог кабинета WB может быть скорректирован загруженным сводным отчётом.</p></div><form class="inline-form" method="post" action="{{ module_prefix }}/product-groups"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input class="input" name="name" placeholder="Новая категория" required><button class="button button-primary button-small" type="submit">Добавить</button></form></div>
+    {% if groups|length > 1 %}
+    <form class="category-merge-form" method="post" action="{{ module_prefix }}/product-groups/merge" data-category-merge-form data-confirm="Объединить выбранные категории? Исходные категории будут удалены после переноса данных.">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="category-merge-copy"><h3 class="section-title">Объединить категории</h3><p class="section-copy">Товары, история и планы исходных категорий будут перенесены в итоговую. Исходные категории удалятся.</p></div>
+      <div class="field"><label for="merge-target">Итоговая категория</label><select class="select" id="merge-target" name="target_group_id" data-merge-target required>{% for group in groups %}<option value="{{ group.id }}">{{ group.name }}</option>{% endfor %}</select></div>
+      <fieldset class="category-merge-sources"><legend class="field-label">Исходные категории</legend><div class="category-choice-list">{% for group in groups %}<label class="checkbox-field"><input type="checkbox" name="source_group_ids" value="{{ group.id }}" data-merge-source> {{ group.name }}</label>{% endfor %}</div></fieldset>
+      <div class="form-actions"><button class="button button-secondary" type="submit" data-merge-submit disabled>Объединить выбранные</button></div>
+    </form>
+    {% endif %}
+    <div class="table-scroll"><table class="data-table category-table"><thead><tr><th>Категория</th><th class="number">Товаров</th><th>Участие в отчёте</th><th class="number">Действие</th></tr></thead><tbody>
+      {% for group in groups %}<tr class="{{ 'is-disabled' if not group.is_active else '' }}"><td>{{ group.name }}</td><td class="number">{{ group.products|length }}</td><td><span class="badge {{ 'badge-positive' if group.is_active else 'badge-neutral' }}">{{ 'Учитывается' if group.is_active else 'Исключена' }}</span></td><td class="number"><form method="post" action="{{ module_prefix }}/product-groups/{{ group.id }}/toggle"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button button-secondary button-small" type="submit">{{ icon('power', 16) }}<span>{{ 'Отключить категорию' if group.is_active else 'Включить категорию' }}</span></button></form></td></tr>{% endfor %}
+      {% if not groups %}<tr><td colspan="4" class="empty-state">Категории появятся после первого сбора или после ручного добавления.</td></tr>{% endif %}
+    </tbody></table></div>
+  </section>
+
+  <section class="card data-section">
+    <div class="card-header"><div><h2 class="section-title">Товары кабинетов</h2><p class="section-copy">Отдельный товар можно исключить при следующем сборе или перенести в другую категорию отчёта.</p></div></div>
+    <div class="table-scroll"><table class="data-table"><thead><tr><th>Товар</th><th>Артикул / SKU</th><th>Кабинет</th><th>Категория API</th><th>Состояние</th><th>Тип товара</th><th class="number">Действие</th></tr></thead><tbody>
+      {% for product in products %}<tr class="{{ 'is-disabled' if not product.is_active else '' }}"><td>{{ product.name }}</td><td>{{ product.offer_id or product.external_id }}</td><td>{{ product.account.name }}</td><td>{{ product.category or '—' }}</td><td><span class="badge {{ 'badge-positive' if product.is_active else 'badge-neutral' }}">{{ 'Включён' if product.is_active else 'Отключён' }}</span></td><td><form class="inline-form" method="post" action="{{ module_prefix }}/products/{{ product.id }}/group"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><select class="select" name="product_group_id" aria-label="Тип товара для {{ product.name }}">{% for group in groups %}<option value="{{ group.id }}" {{ 'selected' if product.product_group_id == group.id else '' }}>{{ group.name }}{{ ' · исключена' if not group.is_active else '' }}</option>{% endfor %}</select><button class="button button-secondary button-small" type="submit">Сохранить</button></form></td><td class="number"><form method="post" action="{{ module_prefix }}/products/{{ product.id }}/toggle"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button button-secondary button-small" type="submit">{{ icon('power', 16) }}<span>{{ 'Отключить' if product.is_active else 'Включить' }}</span></button></form></td></tr>{% endfor %}
+      {% if not products %}<tr><td colspan="7" class="empty-state">Товары появятся после первого сбора.</td></tr>{% endif %}
+    </tbody></table></div>
+  </section>
+</div>
+{% endblock %}

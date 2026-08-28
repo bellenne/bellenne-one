@@ -1,0 +1,68 @@
+{% from "icons.html" import icon %}
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>{% block title %}BellenneVector{% endblock %} · Bellenne</title>
+  <link rel="icon" href="{{ module_prefix }}/static/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ module_prefix }}/static/theme.css">
+  <link rel="stylesheet" href="{{ module_prefix }}/static/app.css">
+  <link rel="stylesheet" href="{{ module_prefix }}/static/vector.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Навигация BellenneVector">
+      <a class="module-brand" href="{{ module_prefix }}/" aria-label="BellenneVector — обзор">
+        <img class="module-brand-logo" src="{{ module_prefix }}/static/logo.svg" alt="BellenneVector">
+        <small>Аналитика продвижения</small>
+      </a>
+      <nav class="sidebar-nav">
+        <a class="sidebar-item" href="/">{{ icon('dashboard') }}<span>BellenneOne</span></a>
+        <a class="sidebar-item" href="/pulse/">{{ icon('pulse') }}<span>BellennePulse</span></a>
+        <a class="sidebar-item" href="/echo/">{{ icon('echo') }}<span>BellenneEcho</span></a>
+        <a class="sidebar-item product-current" href="{{ module_prefix }}/">{{ icon('vector') }}<span>BellenneVector</span></a>
+        <a class="sidebar-item" href="/settings">{{ icon('settings') }}<span>Настройки</span></a>
+        <span class="sidebar-divider" aria-hidden="true"></span>
+        <a class="sidebar-item {{ 'is-active' if active == 'dashboard' else '' }}" href="{{ module_prefix }}/">{{ icon('dashboard') }}<span>Аналитика</span></a>
+        <a class="sidebar-item {{ 'is-active' if active == 'cabinet' else '' }}" href="{{ module_prefix }}/cabinet">{{ icon('accounts') }}<span>Кабинет</span></a>
+        <a class="sidebar-item {{ 'is-active' if active == 'scheduler' else '' }}" href="{{ module_prefix }}/scheduler">{{ icon('plan') }}<span>Автосбор</span></a>
+        <a class="sidebar-item {{ 'is-active' if active == 'data' else '' }}" href="{{ module_prefix }}/data">{{ icon('reports') }}<span>Все данные</span></a>
+      </nav>
+      <div class="sidebar-pulse" aria-label="Состояние хранилища Vector">
+        <div class="pulse-copy"><span class="pulse-status-dot"></span><span>Vector активен</span></div>
+        <svg class="vector-signal" viewBox="0 0 180 52" role="img" aria-label="Индикатор направления роста Vector">
+          <path class="vector-grid-line" d="M2 42H178M2 26H178M2 10H178"/>
+          <path class="vector-route vector-route-back" d="M4 42L40 34 70 38 104 22 132 27 174 8"/>
+          <path class="vector-route vector-route-main" d="M4 44L38 38 70 28 102 32 134 17 174 10"/>
+          <path class="vector-scan" pathLength="1" d="M4 44L38 38 70 28 102 32 134 17 174 10"/>
+          <path class="vector-arrow" d="M160 8H176V24"/>
+          <circle class="vector-node" cx="174" cy="10" r="3"/>
+        </svg>
+      </div>
+      <div class="sidebar-foot">BellenneOne · Vector</div>
+    </aside>
+    <div class="main-shell">
+      <header class="topbar">
+        <button class="button button-secondary button-small sidebar-toggle" type="button" data-sidebar-toggle>{{ icon('menu', 18) }}<span>Меню</span></button>
+        <div class="product-heading"><span class="product-context">BellenneVector</span><strong>{{ account.name if account else 'Кабинет не настроен' }}</strong></div>
+        <div class="topbar-spacer"></div>
+        <div class="user-menu" data-user-menu>
+          <button class="user-menu-trigger" type="button" aria-haspopup="menu" aria-expanded="false" data-user-menu-trigger><span class="user-avatar">{{ icon('user', 18) }}</span><span class="user-menu-label">{{ request.state.username }}</span>{{ icon('chevron', 16) }}</button>
+          <div class="user-menu-panel" role="menu" data-user-menu-panel hidden>
+            <div class="user-menu-identity"><span class="user-avatar">{{ icon('user', 18) }}</span><div><span class="field-label">Пользователь</span><strong>{{ request.state.username }}</strong></div></div>
+            <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ platform_csrf_token }}"><button class="user-menu-action" type="submit" role="menuitem">{{ icon('logout', 18) }}<span>Выйти</span></button></form>
+          </div>
+        </div>
+      </header>
+      <main class="main-content module-content">
+        {% if message %}<div class="alert alert-{{ 'error' if kind == 'error' else 'success' }}" role="status">{{ message }}</div>{% endif %}
+        {% block content %}{% endblock %}
+      </main>
+    </div>
+  </div>
+  <script src="{{ module_prefix }}/static/app.js" defer></script>
+  <script src="{{ module_prefix }}/static/module.js" defer></script>
+</body>
+</html>

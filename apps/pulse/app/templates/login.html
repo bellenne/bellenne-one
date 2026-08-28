@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block public_content %}
+<main class="login-shell">
+  <section class="login-card" aria-labelledby="login-title">
+    <img class="platform-logo" src="{{ module_prefix }}/static/one-logo.svg" alt="BellenneOne">
+    {% if flashes %}
+    <div class="alert-stack" aria-live="polite">
+      {% for item in flashes %}<div class="alert alert-{{ item.kind }}">{{ item.message }}</div>{% endfor %}
+    </div>
+    {% endif %}
+    <h1 class="login-title" id="login-title">Вход в BellenneOne</h1>
+    <p class="login-copy">Один аккаунт для Pulse, Echo и Vector.</p>
+    <form class="stack-compact" method="post" action="/login">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="field">
+        <label for="username">Логин</label>
+        <input class="input" id="username" name="username" autocomplete="username" required autofocus>
+      </div>
+      <div class="field">
+        <label for="password">Пароль</label>
+        <input class="input" id="password" name="password" type="password" autocomplete="current-password" required>
+      </div>
+      <button class="button button-primary" type="submit">Войти</button>
+    </form>
+    <p class="auth-switch">Нет аккаунта? <a href="/register">Зарегистрироваться</a></p>
+  </section>
+</main>
+{% endblock %}

@@ -1,0 +1,2 @@
+"""BellenneOne application shell."""
+

@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Кабинеты Echo{% endblock %}
+{% block content %}
+<div class="page-header"><div><h1 class="page-title">Кабинеты Echo</h1><p class="page-subtitle">Подключения для получения отзывов и публикации ответов.</p></div></div>
+<div class="stack">
+  <section class="card">
+    <div class="card-header"><div><h2 class="section-title">Добавить кабинет</h2><p class="section-copy">API-данные используются только внутри модуля Echo.</p></div></div>
+    <form method="post" action="{{ module_prefix }}/cabinets" class="card-body form-grid">
+      <div class="field"><label for="cabinet-name">Название</label><input class="input" id="cabinet-name" name="name" placeholder="Основной магазин" required></div>
+      <div class="field"><label for="marketplace">Маркетплейс</label><select class="select" id="marketplace" name="marketplace" data-marketplace-select><option value="wb">Wildberries</option><option value="ozon">Ozon</option></select></div>
+      <div class="field credentials-panel" data-echo-credentials="wb"><label for="wb-api-key">Ключ Wildberries</label><input class="input" id="wb-api-key" type="password" name="wb_api_key" autocomplete="off"></div>
+      <div class="field credentials-panel" data-echo-credentials="ozon" hidden><label for="ozon-client-id">ID продавца Ozon</label><input class="input" id="ozon-client-id" name="ozon_client_id" autocomplete="off"></div>
+      <div class="field credentials-panel" data-echo-credentials="ozon" hidden><label for="ozon-api-key">Ключ Ozon</label><input class="input" id="ozon-api-key" type="password" name="ozon_api_key" autocomplete="off"></div>
+      <div class="form-actions"><button class="button button-product" type="submit">Добавить кабинет</button></div>
+    </form>
+  </section>
+  <section>
+    <div class="section-heading"><div><h2 class="section-title">Подключённые кабинеты</h2><p class="section-copy">Статус всегда обозначен текстом и семантическим цветом.</p></div></div>
+    {% if cabinets %}<div class="account-grid">{% for cabinet in cabinets %}<article class="card card-body account-card">
+      <div class="account-title-row"><div><h3 class="section-title">{{ cabinet.name }}</h3><p class="section-copy">{{ marketplace_name(cabinet.marketplace) }}</p></div><span class="badge {{ 'badge-positive' if cabinet.is_active else 'badge-neutral' }}">{{ 'Включён' if cabinet.is_active else 'Отключён' }}</span></div>
+      <div class="account-meta">{% if cabinet.marketplace == 'wb' %}<span>Ключ: {{ mask(cabinet.wb_api_key) }}</span>{% else %}<span>ID: {{ cabinet.ozon_client_id }}</span><span>Ключ: {{ mask(cabinet.ozon_api_key) }}</span>{% endif %}</div>
+      <div class="account-actions"><form method="post" action="{{ module_prefix }}/cabinets/{{ cabinet.id }}/toggle"><button class="button button-secondary button-small" type="submit">{{ 'Отключить' if cabinet.is_active else 'Включить' }}</button></form><form method="post" action="{{ module_prefix }}/cabinets/{{ cabinet.id }}/delete" data-confirm="Удалить кабинет и его настройки?"><button class="button button-danger button-small" type="submit">Удалить</button></form></div>
+    </article>{% endfor %}</div>{% else %}<div class="card empty-state"><h3 class="section-title">Кабинетов пока нет</h3><p>Добавьте Wildberries или Ozon, чтобы начать обработку отзывов.</p></div>{% endif %}
+  </section>
+</div>
+{% endblock %}

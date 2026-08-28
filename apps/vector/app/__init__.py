@@ -1,0 +1,2 @@
+"""WB Ads Statistics application."""
+

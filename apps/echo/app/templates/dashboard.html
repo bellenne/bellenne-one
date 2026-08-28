@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% from "icons.html" import icon %}
+{% block title %}Обзор Echo{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div><h1 class="page-title">Обзор отзывов</h1><p class="page-subtitle">Состояние подключений, автоматизации и последних ответов.</p></div>
+  <form method="post" action="{{ module_prefix }}/run-now"><button class="button button-product" type="submit">{{ icon('power', 18) }}<span>Запустить обработку</span></button></form>
+</div>
+<div class="stack">
+  <section class="kpi-grid" aria-label="Ключевые показатели Echo">
+    <article class="card kpi-card"><div><p class="kpi-label">Кабинеты</p><p class="kpi-value">{{ stats.cabinets }}</p></div><p class="kpi-note">Подключения маркетплейсов</p><span class="kpi-accent"></span></article>
+    <article class="card kpi-card"><div><p class="kpi-label">Шаблоны</p><p class="kpi-value">{{ stats.templates }}</p></div><p class="kpi-note">Правила готовых ответов</p><span class="kpi-accent"></span></article>
+    <article class="card kpi-card kpi-positive"><div><p class="kpi-label">Опубликовано</p><p class="kpi-value">{{ stats.sent }}</p></div><p class="kpi-note">Успешно отправленные ответы</p><span class="kpi-accent"></span></article>
+    <article class="card kpi-card kpi-danger"><div><p class="kpi-label">Ошибки</p><p class="kpi-value">{{ stats.errors }}</p></div><p class="kpi-note">Требуют внимания</p><span class="kpi-accent"></span></article>
+  </section>
+  <section class="echo-overview-grid">
+    <article class="card data-section">
+      <div class="card-header"><div><h2 class="section-title">Автоматизация</h2><p class="section-copy">Текущий режим обработки отзывов.</p></div><span class="badge {{ 'badge-positive' if settings.enabled else 'badge-neutral' }}">{{ 'Включена' if settings.enabled else 'Отключена' }}</span></div>
+      <dl class="detail-list"><div><dt>Частота</dt><dd>Раз в {{ settings.interval_minutes }} мин.</dd></div><div><dt>Лимит запуска</dt><dd>{{ settings.max_replies_per_run }} ответов</dd></div><div><dt>Следующий запуск</dt><dd>{{ next_run }}</dd></div></dl>
+      <div class="card-footer"><a class="button button-secondary button-small" href="{{ module_prefix }}/settings">Настроить автоматизацию</a></div>
+    </article>
+    <article class="card data-section">
+      <div class="card-header"><div><h2 class="section-title">Последние события</h2><p class="section-copy">Свежие результаты обработки.</p></div><a class="button button-secondary button-small" href="{{ module_prefix }}/logs">Весь журнал</a></div>
+      {% if logs %}<div class="event-list">{% for log in logs %}<div class="event-row"><span class="status-dot status-dot-{{ 'success' if log.status == 'sent' else 'error' if log.status == 'error' else 'warning' }}"></span><div><strong>{{ status_name(log.status) }}</strong><span>{{ marketplace_name(log.marketplace) }} · {{ log.message }}</span></div></div>{% endfor %}</div>{% else %}<div class="empty-state compact-empty"><h3 class="section-title">Журнал пока пуст</h3><p>Запустите обработку после подключения кабинета и шаблона.</p></div>{% endif %}
+    </article>
+  </section>
+</div>
+{% endblock %}

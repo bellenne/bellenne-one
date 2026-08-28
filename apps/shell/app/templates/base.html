@@ -1,0 +1,68 @@
+{% from "icons.html" import icon %}
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>{{ title }} · BellenneOne</title>
+  <link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/theme.css">
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/shell.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Навигация BellenneOne">
+      <a class="shell-brand" href="/" aria-label="BellenneOne — обзор">
+        <img class="shell-brand-logo" src="/static/logo.svg" alt="BellenneOne">
+        <small>Единая рабочая среда</small>
+      </a>
+      <nav class="sidebar-nav">
+        <a class="sidebar-item shell-current {{ 'is-active' if active == 'overview' else '' }}" href="/">{{ icon('dashboard') }}<span>Обзор</span></a>
+        <span class="sidebar-divider" aria-hidden="true"></span>
+        <a class="sidebar-item" href="/pulse/">{{ icon('pulse') }}<span>BellennePulse</span></a>
+        <a class="sidebar-item" href="/echo/">{{ icon('echo') }}<span>BellenneEcho</span></a>
+        <a class="sidebar-item" href="/vector/">{{ icon('vector') }}<span>BellenneVector</span></a>
+        <span class="sidebar-divider" aria-hidden="true"></span>
+        <a class="sidebar-item shell-current {{ 'is-active' if active == 'settings' else '' }}" href="/settings">{{ icon('settings') }}<span>Настройки</span></a>
+      </nav>
+      <div class="sidebar-pulse" aria-label="Состояние платформы">
+        <div class="pulse-copy"><span class="pulse-status-dot"></span><span>Платформа активна</span></div>
+        <svg class="one-signal" viewBox="0 0 180 52" role="img" aria-label="Индикатор объединения модулей BellenneOne">
+          <defs>
+            <linearGradient id="one-sidebar-gradient" x1="0" y1="0" x2="1" y2="0">
+              <stop class="one-stop-violet" offset="0"/>
+              <stop class="one-stop-blue" offset="1"/>
+            </linearGradient>
+          </defs>
+          <path class="one-line one-line-top" d="M2 8C34 8 48 26 82 26H178"/>
+          <path class="one-line one-line-middle" d="M2 26H178"/>
+          <path class="one-line one-line-bottom" d="M2 44C34 44 48 26 82 26H178"/>
+          <path class="one-flow one-flow-top" pathLength="1" d="M2 8C34 8 48 26 82 26H178"/>
+          <path class="one-flow one-flow-middle" pathLength="1" d="M2 26H178"/>
+          <path class="one-flow one-flow-bottom" pathLength="1" d="M2 44C34 44 48 26 82 26H178"/>
+          <circle class="one-hub" cx="82" cy="26" r="3"/>
+        </svg>
+      </div>
+      <div class="sidebar-foot">BellenneOne · Platform</div>
+    </aside>
+    <div class="main-shell">
+      <header class="topbar">
+        <button class="button button-secondary button-small sidebar-toggle" type="button" data-sidebar-toggle>{{ icon('menu', 18) }}<span>Меню</span></button>
+        <span class="shell-context">BellenneOne</span>
+        <div class="topbar-spacer"></div>
+        <div class="user-menu" data-user-menu>
+          <button class="user-menu-trigger" type="button" aria-haspopup="menu" aria-expanded="false" data-user-menu-trigger><span class="user-avatar">{{ icon('user', 18) }}</span><span class="user-menu-label">{{ username }}</span>{{ icon('chevron', 16) }}</button>
+          <div class="user-menu-panel" role="menu" data-user-menu-panel hidden>
+            <div class="user-menu-identity"><span class="user-avatar">{{ icon('user', 18) }}</span><div><span class="field-label">Единый аккаунт</span><strong>{{ username }}</strong></div></div>
+            <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ platform_csrf_token }}"><button class="user-menu-action" type="submit" role="menuitem">{{ icon('logout', 18) }}<span>Выйти</span></button></form>
+          </div>
+        </div>
+      </header>
+      <main class="main-content shell-content">{% block content %}{% endblock %}</main>
+    </div>
+  </div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

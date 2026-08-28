@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Очередь Echo{% endblock %}
+{% block content %}
+<div class="page-header"><div><h1 class="page-title">Очередь обработки</h1><p class="page-subtitle">Отзывы, выбранные шаблоны и ожидаемые действия в компактном списке.</p></div><a class="button button-secondary" href="{{ module_prefix }}/queue">Обновить</a></div>
+<section class="card data-section">
+  {% if items %}<div class="table-scroll"><table class="data-table echo-queue-table"><thead><tr><th>Кабинет</th><th>Товар</th><th>Категория</th><th class="number">Рейтинг</th><th>Тип</th><th>Шаблон</th><th>Ожидается</th><th>Статус</th></tr></thead><tbody>{% for item in items %}<tr>
+    <td>{{ item.cabinet_name }}<span class="cell-note">{{ marketplace_name(item.marketplace) }}</span></td>
+    <td>{{ item.product_name or item.article or '—' }}{% if item.article %}<span class="cell-note">{{ item.article }}</span>{% endif %}</td>
+    <td>{{ item.detected_categories or item.category or '—' }}</td>
+    <td class="number"><span class="rating-label">★ {{ item.rating or '—' }}</span>{% if item.rating_source or item.rating_raw %}<span class="cell-note">{{ item.rating_source or 'rating' }}={{ item.rating_raw or '—' }}</span>{% endif %}</td>
+    <td>{{ kind_name(item.review_kind) }}</td><td>{{ item.template_name or '—' }}</td><td>{% if item.expected_at %}{{ item.expected_at.strftime('%H:%M:%S') }}{% else %}—{% endif %}</td>
+    <td><span class="badge {{ 'badge-positive' if item.status == 'sent' else 'badge-negative' if item.status == 'error' else 'badge-warning' if item.status in ['queued', 'processing'] else 'badge-neutral' }}">{{ status_name(item.status) }}</span><span class="cell-note">{{ item.message }}</span></td>
+  </tr>{% endfor %}</tbody></table></div>{% else %}<div class="empty-state"><h3 class="section-title">Очередь пуста</h3><p>Нет новых отзывов или активных кабинетов для проверки.</p></div>{% endif %}
+</section>
+{% if items %}<span data-queue-auto-refresh data-refresh-url="{{ module_prefix }}/queue" hidden></span>{% endif %}
+{% endblock %}

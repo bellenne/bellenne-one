@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% from "icons.html" import icon %}
+{% block content %}
+<div class="page-header">
+  <div><h1 class="page-title">Ежедневный обзор</h1><p class="page-subtitle">Факт, план и динамика подключённых кабинетов.</p></div>
+  <a class="button button-primary" href="{{ module_prefix }}/reports/export.xlsx?period={{ date_to.strftime('%Y-%m') }}{% if account_id %}&account_id={{ account_id }}{% endif %}">{{ icon('export', 18) }}<span>Выгрузить XLSX</span></a>
+</div>
+
+<div class="stack">
+  <form class="card filter-panel" method="get" action="{{ module_prefix }}/">
+    <div class="filter-panel-head"><div class="filter-title">{{ icon('filter', 18) }}<span>Фильтры отчёта</span></div><a class="filter-reset" href="{{ module_prefix }}/">Сбросить</a></div>
+    <div class="filter-fields">
+      <div class="field"><label for="date_from">С даты</label><input class="input" id="date_from" type="date" name="date_from" value="{{ date_from.isoformat() }}"></div>
+      <div class="field"><label for="date_to">По дату</label><input class="input" id="date_to" type="date" name="date_to" value="{{ date_to.isoformat() }}"></div>
+      <div class="field"><label for="marketplace">Маркетплейс</label><select class="select" id="marketplace" name="marketplace"><option value="ALL" {{ 'selected' if marketplace == 'ALL' else '' }}>Все</option><option value="WB" {{ 'selected' if marketplace == 'WB' else '' }}>Wildberries</option><option value="OZON" {{ 'selected' if marketplace == 'OZON' else '' }}>Ozon</option></select></div>
+      <div class="field"><label for="account_id">Кабинет</label><select class="select" id="account_id" name="account_id"><option value="">Все кабинеты</option>{% for account in accounts %}<option value="{{ account.id }}" {{ 'selected' if account_id == account.id else '' }}>{{ account.name }}</option>{% endfor %}</select></div>
+      <div class="field"><label for="product_group_id">Тип товара</label><select class="select" id="product_group_id" name="product_group_id"><option value="">Все товары</option>{% for group in groups %}<option value="{{ group.id }}" {{ 'selected' if group_id == group.id else '' }}>{{ group.name }}</option>{% endfor %}</select></div>
+      <button class="button button-secondary" type="submit">Применить</button>
+    </div>
+  </form>
+
+  <section class="charts-grid metric-charts" aria-label="Ключевые показатели и динамика">
+    {% for card in chart_cards %}
+    <article class="card chart-card metric-chart-card chart-card-{{ card.tone }}">
+      <div class="metric-chart-head">
+        <div><p class="kpi-label">{{ card.label }}</p><p class="kpi-value">{% if card.format == 'money' %}{{ card.value|money }}{% elif card.format == 'percent' %}{{ card.value|percent }}{% else %}{{ card.value|number }}{% endif %}</p></div>
+        <div class="metric-chart-status"><span class="kpi-plan badge badge-neutral metric-plan-badge">План: {% if card.format == 'money' %}{{ card.plan|money }}{% elif card.format == 'percent' %}{{ card.plan|percent }}{% else %}{{ card.plan|number }}{% endif %}</span>{% if card.completion is not none %}<span class="badge {{ 'badge-positive' if card.completion >= 1 else 'badge-warning' }}">{{ '↑' if card.completion >= 1 else '↓' }} {{ card.completion|percent }}</span>{% endif %}</div>
+      </div>
+      <div class="metric-chart-meta"><span>Динамика факта относительно дневного плана</span><div class="chart-legend"><span class="legend-key"><span class="legend-swatch legend-swatch-{{ card.tone }}"></span>Факт</span><span class="legend-key"><span class="legend-swatch legend-swatch-plan"></span>План</span></div></div>
+      <div class="chart-wrap" data-chart='{{ series_json|safe }}' data-actual="{{ card.actual_key }}" data-plan="{{ card.plan_key }}" data-tone="{{ card.tone }}" data-format="{{ card.format }}"></div>
+    </article>
+    {% endfor %}
+  </section>
+
+  <section class="kpi-compact-grid" aria-label="Дополнительные показатели">
+    {% for card in secondary_cards %}
+    <article class="card kpi-card kpi-card-compact kpi-{{ card.tone }}">
+      <div><p class="kpi-label">{{ card.label }}</p><p class="kpi-value">{% if card.format == 'money' %}{{ card.value|money }}{% elif card.format == 'percent' %}{{ card.value|percent }}{% else %}{{ card.value|number }}{% endif %}</p></div>
+      <div><div class="kpi-plan badge badge-neutral metric-plan-badge">{% if card.plan is not none %}План: {% if card.format == 'money' %}{{ card.plan|money }}{% elif card.format == 'percent' %}{{ card.plan|percent }}{% else %}{{ card.plan|number }}{% endif %}{% else %}План не задан{% endif %}</div>{% if card.note %}<div class="kpi-note">{{ card.note }}</div>{% endif %}<div class="kpi-foot">{% if card.completion is not none %}<span class="badge {{ 'badge-positive' if card.completion >= 1 else 'badge-warning' }}">{{ card.completion|percent }}</span>{% elif card.value is not none %}<span class="badge badge-neutral">Без плана</span>{% else %}<span class="badge badge-neutral">Факт недоступен</span>{% endif %}</div></div>
+      <span class="kpi-accent" aria-hidden="true"></span>
+    </article>
+    {% endfor %}
+  </section>
+
+  <section class="card data-section">
+    <div class="card-header"><div><h2 class="section-title">Ежедневная динамика</h2><p class="section-copy">Данные для сверки и оперативного контроля.</p></div><a class="button button-secondary button-small" href="{{ module_prefix }}/reports?date_from={{ date_from.isoformat() }}&date_to={{ date_to.isoformat() }}&marketplace={{ marketplace }}">Открыть отчёт</a></div>
+    <div class="table-scroll"><table class="data-table dashboard-metrics-table"><thead><tr><th>Дата</th><th class="number">Заказано</th><th class="number">Сумма заказов</th><th class="number">Средний чек</th><th class="number">Выкуплено</th><th class="number">Сумма выкупов</th><th class="number">РК Денег</th><th class="number">РК Бонусов</th><th class="number">Общий ДРРв</th><th class="number">Общий ДРРз</th><th class="number">Денег ДРРв</th><th class="number">Денег ДРРз</th><th class="number">Валовая прибыль</th></tr></thead><tbody>
+      {% for row in series %}<tr><td>{{ row.date|date }}</td><td class="number">{{ row.ordered_units|number }}</td><td class="number">{{ row.ordered_amount|money }}</td><td class="number">{{ row.average_order_value|money }}</td><td class="number">{{ row.buyout_units|number }}</td><td class="number">{{ row.buyout_amount|money }}</td><td class="number">{{ row.ad_spend|money }}</td><td class="number">{{ row.ad_bonus_spend|money }}</td><td class="number">{{ row.drr_buyouts_total|percent }}</td><td class="number">{{ row.drr_orders_total|percent }}</td><td class="number">{{ row.drr_buyouts_cash|percent }}</td><td class="number">{{ row.drr_orders_cash|percent }}</td><td class="number muted">—</td></tr>{% endfor %}
+    </tbody></table></div>
+  </section>
+</div>
+{% endblock %}

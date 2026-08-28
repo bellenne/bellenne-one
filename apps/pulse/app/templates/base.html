@@ -1,0 +1,81 @@
+{% from "icons.html" import icon %}
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>{{ title }} · {{ 'BellennePulse' if user else 'BellenneOne' }}</title>
+  <link rel="icon" href="{{ module_prefix }}/static/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ module_prefix }}/static/css/theme.css">
+  <link rel="stylesheet" href="{{ module_prefix }}/static/css/app.css">
+  <link rel="stylesheet" href="{{ module_prefix }}/static/css/pulse-shell.css">
+</head>
+<body>
+  {% if user %}
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Основная навигация">
+      <a class="module-brand" href="{{ module_prefix }}/" aria-label="BellennePulse — обзор">
+        <img class="module-brand-logo" src="{{ module_prefix }}/static/logo.svg" alt="BellennePulse">
+        <small>Business intelligence</small>
+      </a>
+      <nav class="sidebar-nav">
+        <a class="sidebar-item" href="/">{{ icon('dashboard') }}<span>BellenneOne</span></a>
+        <a class="sidebar-item product-current" href="{{ module_prefix }}/">{{ icon('pulse') }}<span>BellennePulse</span></a>
+        <a class="sidebar-item" href="/echo/">{{ icon('echo') }}<span>BellenneEcho</span></a>
+        <a class="sidebar-item" href="/vector/">{{ icon('vector') }}<span>BellenneVector</span></a>
+        <a class="sidebar-item" href="/settings">{{ icon('settings') }}<span>Настройки</span></a>
+        <span class="sidebar-divider" aria-hidden="true"></span>
+        <a class="sidebar-item {{ 'is-active' if active_page == 'dashboard' else '' }}" href="{{ module_prefix }}/">{{ icon('dashboard') }}<span>Обзор</span></a>
+        <a class="sidebar-item {{ 'is-active' if active_page == 'accounts' else '' }}" href="{{ module_prefix }}/accounts">{{ icon('accounts') }}<span>Кабинеты</span></a>
+        <a class="sidebar-item {{ 'is-active' if active_page == 'plans' else '' }}" href="{{ module_prefix }}/plans">{{ icon('plan') }}<span>Обновление плана</span></a>
+        <a class="sidebar-item {{ 'is-active' if active_page == 'reports' else '' }}" href="{{ module_prefix }}/reports">{{ icon('reports') }}<span>Отчёты</span></a>
+      </nav>
+      <div class="sidebar-pulse" aria-label="Автосбор WB и Ozon активен">
+        <div class="pulse-copy"><span class="pulse-status-dot"></span><span>Поток данных</span></div>
+        <svg class="pulse-signal" viewBox="0 0 180 52" role="img" aria-label="Индикатор потока метрик">
+          <path class="pulse-line pulse-line-back" pathLength="1" d="M2 33L26 32 44 17 62 36 80 20 98 32 118 12 138 35 156 26 178 29"/>
+          <path class="pulse-line pulse-line-main" pathLength="1" d="M2 29L25 29 43 38 62 12 80 34 97 25 118 40 137 16 154 31 178 25"/>
+          <path class="pulse-line pulse-line-front" pathLength="1" d="M2 36L24 34 43 24 62 40 80 14 98 36 118 21 137 38 155 18 178 33"/>
+          <path class="pulse-scan" pathLength="1" d="M2 29L25 29 43 38 62 12 80 34 97 25 118 40 137 16 154 31 178 25"/>
+          <circle class="pulse-node" cx="137" cy="16" r="3"/>
+        </svg>
+      </div>
+      <div class="sidebar-foot">BellenneOne · Pulse</div>
+    </aside>
+    <div class="main-shell">
+      <header class="topbar">
+        <button class="button button-secondary button-small sidebar-toggle" type="button" data-sidebar-toggle>{{ icon('menu', 18) }}<span>Меню</span></button>
+        <span class="product-context">BellennePulse</span>
+        <div class="topbar-spacer"></div>
+        <div class="user-menu" data-user-menu>
+          <button class="user-menu-trigger" type="button" aria-haspopup="menu" aria-expanded="false" data-user-menu-trigger>
+            <span class="user-avatar">{{ icon('user', 18) }}</span>
+            <span class="user-menu-label">{{ user.username }}</span>
+            {{ icon('chevron', 16) }}
+          </button>
+          <div class="user-menu-panel" role="menu" data-user-menu-panel hidden>
+            <div class="user-menu-identity"><span class="user-avatar">{{ icon('user', 18) }}</span><div><span class="field-label">Пользователь</span><strong>{{ user.username }}</strong></div></div>
+            <form method="post" action="/logout">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button class="user-menu-action" type="submit" role="menuitem">{{ icon('logout', 18) }}<span>Выйти</span></button>
+            </form>
+          </div>
+        </div>
+      </header>
+      <main class="main-content">
+        {% if flashes %}
+        <div class="alert-stack" aria-live="polite">
+          {% for item in flashes %}<div class="alert alert-{{ item.kind }}">{{ item.message }}</div>{% endfor %}
+        </div>
+        {% endif %}
+        {% block content %}{% endblock %}
+      </main>
+    </div>
+  </div>
+  {% else %}
+    {% block public_content %}{% endblock %}
+  {% endif %}
+  <script src="{{ module_prefix }}/static/js/app.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header shell-enter">
+  <div><p class="shell-eyebrow">Единая экосистема</p><h1 class="page-title">BellenneOne</h1><p class="page-subtitle">Три рабочих модуля, один аккаунт и единый адрес.</p></div>
+  <a class="button button-secondary" href="/settings">{{ icon('settings', 18) }}<span>Настройки модулей</span></a>
+</div>
+
+<section class="platform-summary card shell-enter" aria-label="Состояние платформы">
+  <div><span class="badge badge-positive">Доступ подтверждён</span><h2 class="section-title">Добро пожаловать, {{ username }}</h2><p class="section-copy">Выберите модуль. Переходы не требуют повторного входа.</p></div>
+  <div class="platform-facts"><span><strong>3</strong> модуля</span><span><strong>1</strong> аккаунт</span><span><strong>1</strong> порт</span></div>
+</section>
+
+<section class="product-grid shell-enter" aria-label="Модули BellenneOne">
+  <article class="card product-card product-pulse">
+    <div class="product-card-head"><span class="product-icon">{{ icon('pulse', 22) }}</span><span class="badge badge-neutral">Business intelligence</span></div>
+    <div><h2 class="section-title">BellennePulse</h2><p class="section-copy">Общая аналитика бизнеса, планы, отчёты и ежедневные метрики маркетплейсов.</p></div>
+    <a class="button button-secondary" href="/pulse/">Открыть Pulse</a>
+  </article>
+  <article class="card product-card product-echo">
+    <div class="product-card-head"><span class="product-icon">{{ icon('echo', 22) }}</span><span class="badge badge-neutral">Репутация</span></div>
+    <div><h2 class="section-title">BellenneEcho</h2><p class="section-copy">Отзывы, ответы клиентам, правила автоматизации и журнал обработки.</p></div>
+    <a class="button button-secondary" href="/echo/">Открыть Echo</a>
+  </article>
+  <article class="card product-card product-vector">
+    <div class="product-card-head"><span class="product-icon">{{ icon('vector', 22) }}</span><span class="badge badge-neutral">Продвижение</span></div>
+    <div><h2 class="section-title">BellenneVector</h2><p class="section-copy">Статистика рекламы, эффективность кампаний и автоматический сбор данных.</p></div>
+    <a class="button button-secondary" href="/vector/">Открыть Vector</a>
+  </article>
+</section>
+{% endblock %}
+

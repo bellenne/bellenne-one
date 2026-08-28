@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% from "icons.html" import icon %}
+{% block title %}Кабинет · BellenneVector{% endblock %}
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <span class="eyebrow">Доступ к API</span>
+      <h1>Кабинет Wildberries</h1>
+      <p>Токен используется только для чтения кампаний и статистики продвижения.</p>
+    </div>
+  </section>
+
+  <section class="form-layout">
+    <article class="card form-card">
+      <div class="card-header">
+        <div>
+          <span class="step-label">01 · Подключение</span>
+          <h2>{{ 'Обновить кабинет' if account else 'Добавить кабинет' }}</h2>
+        </div>
+        {% if account and account.encrypted_token %}
+          <span class="pill pill-ok">Ключ сохранён</span>
+        {% endif %}
+      </div>
+      <form method="post" action="{{ module_prefix }}/cabinet" class="stack-form">
+        <label>
+          <span>Название кабинета</span>
+          <input name="name" value="{{ account.name if account else 'Основной кабинет' }}" maxlength="160" required>
+        </label>
+        <label>
+          <span>API-ключ</span>
+          <div class="token-field">
+            <input id="api-token" type="password" name="token" autocomplete="new-password"
+              placeholder="{{ 'Оставьте пустым, чтобы не менять · ' ~ account.token_hint if account and account.token_hint else 'Вставьте токен категории Продвижение' }}">
+            <button type="button" class="reveal-token" aria-label="Показать ключ">Показать</button>
+          </div>
+          <small>
+            {% if account and account.token_hint %}
+              Текущий ключ: {{ account.token_hint }}. Новый ключ полностью заменит его.
+            {% else %}
+              Создайте токен в кабинете WB и включите категорию «Продвижение».
+            {% endif %}
+          </small>
+        </label>
+        <button class="button button-primary" type="submit">Сохранить настройки</button>
+      </form>
+      {% if account and account.encrypted_token %}
+        <form method="post" action="{{ module_prefix }}/cabinet/test" class="inline-action">
+          <button class="button button-secondary" type="submit">Проверить подключение</button>
+          <span>Проверит доступ и посчитает доступные кампании.</span>
+        </form>
+      {% endif %}
+    </article>
+
+    <aside class="card help-card">
+      <span class="step-label">Безопасность</span>
+      <h2>Ключ не показывается повторно</h2>
+      <ul class="check-list">
+        <li>{{ icon('settings', 16) }}<span>Шифруется перед записью в SQLite</span></li>
+        <li>{{ icon('settings', 16) }}<span>Ключ шифрования лежит в Docker volume</span></li>
+        <li>{{ icon('settings', 16) }}<span>В интерфейсе остаётся только маска</span></li>
+        <li>{{ icon('settings', 16) }}<span>Доступ к кабинету защищён единым аккаунтом</span></li>
+      </ul>
+      <div class="note">
+        Для работы нужен токен категории «Продвижение». Токены других категорий не дают доступ к статистике РК.
+      </div>
+    </aside>
+  </section>
+{% endblock %}

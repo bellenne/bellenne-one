@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% from "icons.html" import icon %}
+{% block title %}Автосбор · BellenneVector{% endblock %}
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <span class="eyebrow">Автоматизация</span>
+      <h1>Расписание и ручной запуск</h1>
+      <p>Повторная загрузка последних дней учитывает поздние заказы и корректировки атрибуции.</p>
+    </div>
+    {% if next_run %}
+      <div class="next-run">
+        <span>Следующий запуск</span>
+        <strong>{{ next_run.strftime('%d.%m.%Y · %H:%M') }}</strong>
+      </div>
+    {% endif %}
+  </section>
+
+  {% if not account %}
+    <section class="empty-state card">
+      <div class="empty-icon">{{ icon('accounts', 24) }}</div>
+      <h2>Сначала подключите кабинет</h2>
+      <a class="button button-product" href="{{ module_prefix }}/cabinet">Настроить кабинет</a>
+    </section>
+  {% else %}
+    <section class="scheduler-grid">
+      <article class="card form-card">
+        <div class="card-header">
+          <div><span class="step-label">01 · Ежедневно</span><h2>Автоматический сбор</h2></div>
+          <span class="pill {{ 'pill-ok' if setting and setting.enabled else '' }}">
+            {{ 'Включён' if setting and setting.enabled else 'Выключен' }}
+          </span>
+        </div>
+        <form method="post" action="{{ module_prefix }}/scheduler" class="stack-form">
+          <label class="toggle-row">
+            <span><strong>Запускать автоматически</strong><small>Один раз в день по указанному часовому поясу</small></span>
+            <input type="checkbox" name="enabled" {{ 'checked' if setting and setting.enabled else '' }}>
+          </label>
+          <div class="form-row">
+            <label>
+              <span>Время запуска</span>
+              <input type="time" name="run_time" value="{{ setting.run_time.strftime('%H:%M') if setting else '05:15' }}" required>
+            </label>
+            <label>
+              <span>Часовой пояс</span>
+              <input name="timezone_name" value="{{ setting.timezone_name if setting else 'Europe/Moscow' }}" required>
+            </label>
+          </div>
+          <label>
+            <span>Повторно загружать, дней</span>
+            <input type="number" name="lookback_days" min="1" max="31" value="{{ setting.lookback_days if setting else 3 }}" required>
+            <small>Оптимально 3 дня: WB может уточнять конверсии после первого получения.</small>
+          </label>
+          <button class="button button-primary" type="submit">Сохранить расписание</button>
+        </form>
+      </article>
+
+      <article class="card form-card manual-card">
+        <div class="card-header">
+          <div><span class="step-label">02 · По запросу</span><h2>Запустить сейчас</h2></div>
+          <span class="manual-mark">{{ icon('power', 24) }}</span>
+        </div>
+        <form method="post" action="{{ module_prefix }}/scheduler/run" class="stack-form">
+          <div class="form-row">
+            <label>
+              <span>Дата с</span>
+              <input type="date" name="date_from" value="{{ default_from.isoformat() }}" required>
+            </label>
+            <label>
+              <span>Дата по</span>
+              <input type="date" name="date_to" value="{{ yesterday.isoformat() }}" required>
+            </label>
+          </div>
+          <div class="note compact">
+            API WB отдаёт максимум 31 день и 50 кампаний за запрос. Приложение само делит больший период и соблюдает лимит 20 секунд.
+          </div>
+          <button class="button button-secondary" type="submit">Запустить сбор в фоне</button>
+        </form>
+      </article>
+    </section>
+
+    <section class="card runs-card">
+      <div class="card-header">
+        <div><span class="eyebrow">Контроль</span><h2>Журнал запусков</h2></div>
+        <button type="button" class="button button-small button-ghost" data-refresh>Обновить</button>
+      </div>
+      {% if runs %}
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Старт</th><th>Период</th><th>Источник</th><th>Статус</th><th>Строк</th><th>Сообщение</th></tr></thead>
+            <tbody>
+              {% for run in runs %}
+                <tr>
+                  <td>{{ run.started_at.strftime('%d.%m.%Y %H:%M') }}</td>
+                  <td>{{ run.requested_from.strftime('%d.%m') }}—{{ run.requested_to.strftime('%d.%m.%Y') }}</td>
+                  <td>{{ 'Расписание' if run.trigger == 'scheduler' else 'Вручную' }}</td>
+                  <td><span class="status-label status-{{ run.status }}">{{ 'Успешно' if run.status == 'success' else ('Выполняется' if run.status == 'running' else 'Ошибка') }}</span></td>
+                  <td>{{ run.records_upserted }}</td>
+                  <td class="message-cell" title="{{ run.message }}">{{ run.message or '—' }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <div class="table-empty">Журнал появится после первого запуска.</div>
+      {% endif %}
+    </section>
+  {% endif %}
+{% endblock %}

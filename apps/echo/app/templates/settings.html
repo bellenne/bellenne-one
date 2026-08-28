@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Автоматизация Echo{% endblock %}
+{% block content %}
+<div class="page-header"><div><h1 class="page-title">Автоматизация Echo</h1><p class="page-subtitle">Частота обработки, лимиты и тихий период модуля.</p></div></div>
+<div class="settings-grid">
+  <section class="card">
+    <div class="card-header"><div><h2 class="section-title">Правила запуска</h2><p class="section-copy">Изменения относятся только к BellenneEcho.</p></div>{% if saved %}<span class="badge badge-positive">Сохранено</span>{% endif %}</div>
+    <form method="post" action="{{ module_prefix }}/settings" class="card-body stack-compact">
+      <label class="toggle-field"><span><strong>Автоматические ответы</strong><small>Разрешить обработку по расписанию</small></span><input type="checkbox" name="enabled" {% if settings.enabled %}checked{% endif %}></label>
+      <div class="field"><label for="interval-minutes">Как часто проверять отзывы</label><select class="select" id="interval-minutes" name="interval_minutes">{% for value, label in [(5, 'каждые 5 минут'), (15, 'каждые 15 минут'), (30, 'каждые 30 минут'), (60, 'раз в час'), (180, 'раз в 3 часа'), (360, 'раз в 6 часов'), (720, 'два раза в день'), (1440, 'раз в день')] %}<option value="{{ value }}" {% if settings.interval_minutes == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
+      <div class="field"><label for="max-replies">Ответов за один запуск</label><input class="input" id="max-replies" name="max_replies_per_run" type="number" min="1" max="100" value="{{ settings.max_replies_per_run }}"></div>
+      <div class="form-grid-2"><div class="field"><label for="quiet-start">Тихий период с</label><input class="input" id="quiet-start" name="quiet_start" type="time" value="{{ settings.quiet_start }}"></div><div class="field"><label for="quiet-end">До</label><input class="input" id="quiet-end" name="quiet_end" type="time" value="{{ settings.quiet_end }}"></div></div>
+      <div class="form-actions"><button class="button button-product" type="submit">Сохранить</button></div>
+    </form>
+  </section>
+  <aside class="card data-section settings-note"><h2 class="section-title">Безопасная настройка</h2><p class="section-copy">Начните с небольшого лимита и проверьте журнал. Для разных диапазонов рейтинга используйте отдельные шаблоны.</p><div class="alert alert-warning">Автоматизация не отправит явно позитивный шаблон на низкую оценку.</div></aside>
+</div>
+{% endblock %}

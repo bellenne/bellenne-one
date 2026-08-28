@@ -1,0 +1,78 @@
+:root {
+  color-scheme: dark;
+
+  --bp-bg: #0F1420;
+  --bp-surface: #1A2233;
+  --bp-surface-elevated: #2A3346;
+
+  --bp-text: #F8FAFC;
+  --bp-text-secondary: #AAB3C2;
+  --bp-text-muted: #6B7587;
+
+  --bp-violet: #7B3CFF;
+  --bp-violet-secondary: #A855F7;
+  --bp-blue: #2563EB;
+  --bp-cyan: #06B6D4;
+  --bp-positive: #22D3A5;
+  --bp-negative: #FF5C70;
+  --bp-warning: #F59E0B;
+
+  --bp-border: rgba(255, 255, 255, 0.08);
+  --bp-border-strong: rgba(255, 255, 255, 0.12);
+  --bp-row-divider: rgba(255, 255, 255, 0.06);
+  --bp-grid: rgba(255, 255, 255, 0.06);
+  --bp-white-hover: rgba(255, 255, 255, 0.04);
+  --bp-neutral-bg: rgba(255, 255, 255, 0.06);
+  --bp-brand-subtle: rgba(123, 60, 255, 0.08);
+  --bp-row-hover: rgba(123, 60, 255, 0.06);
+  --bp-brand-hover: rgba(123, 60, 255, 0.12);
+  --bp-brand-selected: rgba(123, 60, 255, 0.18);
+  --bp-brand-border: rgba(123, 60, 255, 0.35);
+  --bp-focus-ring: rgba(123, 60, 255, 0.18);
+  --bp-positive-bg: rgba(34, 211, 165, 0.10);
+  --bp-negative-bg: rgba(255, 92, 112, 0.10);
+  --bp-warning-bg: rgba(245, 158, 11, 0.10);
+  --bp-glow-violet: rgba(123, 60, 255, 0.24);
+  --bp-glow-blue: rgba(37, 99, 235, 0.18);
+  --bp-shadow-color: rgba(0, 0, 0, 0.28);
+
+  --bp-gradient-primary: linear-gradient(90deg, #7B3CFF 0%, #2563EB 100%);
+
+  --bp-font: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --bp-font-page-title: 600 28px/34px var(--bp-font);
+  --bp-font-section-title: 600 18px/24px var(--bp-font);
+  --bp-font-card-title: 600 14px/20px var(--bp-font);
+  --bp-font-body: 400 14px/20px var(--bp-font);
+  --bp-font-body-secondary: 400 13px/18px var(--bp-font);
+  --bp-font-table: 400 13px/18px var(--bp-font);
+  --bp-font-table-header: 600 12px/16px var(--bp-font);
+  --bp-font-label: 500 12px/16px var(--bp-font);
+  --bp-font-kpi: 600 28px/32px var(--bp-font);
+  --bp-font-kpi-large: 600 32px/38px var(--bp-font);
+
+  --bp-space-1: 4px;
+  --bp-space-2: 8px;
+  --bp-space-3: 12px;
+  --bp-space-4: 16px;
+  --bp-space-5: 20px;
+  --bp-space-6: 24px;
+  --bp-space-8: 32px;
+  --bp-space-10: 40px;
+  --bp-space-12: 48px;
+
+  --bp-radius-sm: 6px;
+  --bp-radius-nav: 8px;
+  --bp-radius-md: 10px;
+  --bp-radius-lg: 12px;
+  --bp-radius-xl: 16px;
+
+  --bp-shadow-card: 0 8px 30px rgba(0, 0, 0, 0.20);
+  --bp-shadow-elevated: 0 12px 40px var(--bp-shadow-color);
+
+  --bp-control-height: 40px;
+  --bp-table-header-height: 40px;
+  --bp-table-row-height: 44px;
+  --bp-sidebar-width: 232px;
+  --bp-motion-fast: 140ms ease-out;
+  --bp-motion-normal: 180ms ease-out;
+}

@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header shell-enter"><div><p class="shell-eyebrow">Центр управления</p><h1 class="page-title">Настройки BellenneOne</h1><p class="page-subtitle">API-ключи и автоматизация остаются внутри соответствующего модуля.</p></div></div>
+
+<section class="settings-grid shell-enter" aria-label="Настройки модулей">
+  <article class="card settings-card product-pulse">
+    <div class="settings-card-head"><span class="product-icon">{{ icon('pulse', 22) }}</span><div><h2 class="section-title">Pulse</h2><p class="section-copy">Кабинеты, токены маркетплейсов и источники метрик.</p></div></div>
+    <a class="button button-secondary" href="/pulse/accounts">Кабинеты Pulse</a>
+  </article>
+  <article class="card settings-card product-echo">
+    <div class="settings-card-head"><span class="product-icon">{{ icon('echo', 22) }}</span><div><h2 class="section-title">Echo</h2><p class="section-copy">Доступ к отзывам, шаблоны и правила автоматической обработки.</p></div></div>
+    <div class="settings-actions"><a class="button button-secondary" href="/echo/cabinets">Кабинеты Echo</a><a class="button button-secondary" href="/echo/settings">Автоматизация</a></div>
+  </article>
+  <article class="card settings-card product-vector">
+    <div class="settings-card-head"><span class="product-icon">{{ icon('vector', 22) }}</span><div><h2 class="section-title">Vector</h2><p class="section-copy">API-ключ продвижения и расписание сбора рекламных данных.</p></div></div>
+    <div class="settings-actions"><a class="button button-secondary" href="/vector/cabinet">Кабинет Vector</a><a class="button button-secondary" href="/vector/scheduler">Автосбор</a></div>
+  </article>
+</section>
+
+<section class="card account-card shell-enter">
+  <div><span class="badge badge-positive">Единая авторизация активна</span><h2 class="section-title">Аккаунт {{ username }}</h2><p class="section-copy">Сессия действует для BellenneOne, Pulse, Echo и Vector. Повторный вход между модулями не требуется.</p></div>
+  <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ platform_csrf_token }}"><button class="button button-secondary" type="submit">{{ icon('logout', 18) }}<span>Выйти из BellenneOne</span></button></form>
+</section>
+{% endblock %}
+

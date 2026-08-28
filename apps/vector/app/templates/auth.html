@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>{{ 'Регистрация' if mode == 'register' else 'Вход' }} · BellenneVector</title>
+  <link rel="stylesheet" href="{{ module_prefix }}/static/theme.css">
+  <link rel="stylesheet" href="{{ module_prefix }}/static/app.css">
+  <link rel="stylesheet" href="{{ module_prefix }}/static/vector.css">
+</head>
+<body>
+  <main class="login-shell">
+    <section class="login-card vector-login-card">
+      <div class="auth-wordmark">Bellenne<span>Vector</span></div>
+      <h1 class="login-title">{{ 'Новый локальный аккаунт' if mode == 'register' else 'Вход в Vector' }}</h1>
+      <p class="login-copy">Локальный режим разработки. В BellenneOne используется единый аккаунт Pulse.</p>
+      {% if message %}<div class="alert alert-{{ 'error' if kind == 'error' else 'success' }}">{{ message }}</div>{% endif %}
+      <form class="stack-compact" method="post" action="{{ module_prefix }}{{ '/register' if mode == 'register' else '/login' }}">
+        <input type="hidden" name="next" value="{{ next }}">
+        <div class="field"><label for="username">Логин</label><input class="input" id="username" name="username" autocomplete="username" minlength="3" maxlength="64" required autofocus></div>
+        <div class="field"><label for="password">Пароль</label><input class="input" id="password" type="password" name="password" autocomplete="{{ 'new-password' if mode == 'register' else 'current-password' }}" minlength="8" maxlength="128" required></div>
+        {% if mode == 'register' %}<div class="field"><label for="password-confirm">Повторите пароль</label><input class="input" id="password-confirm" type="password" name="password_confirm" autocomplete="new-password" minlength="8" maxlength="128" required></div>{% endif %}
+        <button class="button button-product" type="submit">{{ 'Зарегистрироваться' if mode == 'register' else 'Войти' }}</button>
+      </form>
+      <p class="auth-switch">{% if mode == 'register' %}Уже есть аккаунт? <a href="{{ module_prefix }}/login">Войти</a>{% else %}Нет аккаунта? <a href="{{ module_prefix }}/register">Зарегистрироваться</a>{% endif %}</p>
+    </section>
+  </main>
+</body>
+</html>

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block public_content %}
+<main class="login-shell">
+  <section class="login-card" aria-labelledby="register-title">
+    <img class="platform-logo" src="{{ module_prefix }}/static/one-logo.svg" alt="BellenneOne">
+    {% if flashes %}
+    <div class="alert-stack" aria-live="polite">
+      {% for item in flashes %}<div class="alert alert-{{ item.kind }}">{{ item.message }}</div>{% endfor %}
+    </div>
+    {% endif %}
+    <h1 class="login-title" id="register-title">Создать аккаунт</h1>
+    <p class="login-copy">Один аккаунт откроет доступ ко всем модулям платформы.</p>
+    <form class="stack-compact" method="post" action="/register">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="field"><label for="username">Логин</label><input class="input" id="username" name="username" minlength="3" maxlength="80" pattern="[A-Za-zА-Яа-яЁё0-9_.-]+" autocomplete="username" required autofocus><span class="field-help">От 3 символов: буквы, цифры, точка, дефис или подчёркивание.</span></div>
+      <div class="field"><label for="password">Пароль</label><input class="input" id="password" name="password" type="password" minlength="8" autocomplete="new-password" required></div>
+      <div class="field"><label for="password-confirm">Повторите пароль</label><input class="input" id="password-confirm" name="password_confirm" type="password" minlength="8" autocomplete="new-password" required></div>
+      <button class="button button-primary" type="submit">Создать аккаунт</button>
+    </form>
+    <p class="auth-switch">Уже есть аккаунт? <a href="/login">Войти</a></p>
+  </section>
+</main>
+{% endblock %}
