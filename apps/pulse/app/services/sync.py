@@ -30,11 +30,57 @@ logger = logging.getLogger(__name__)
 
 _ADVERTISING_RESIDUAL_SCOPE = "unallocated:advertising"
 _AUTHORITATIVE_ADVERTISING_FIELDS = frozenset({"ad_spend", "ad_bonus_spend"})
+_PRODUCT_NAME_GROUP_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Фотообои", ("фотообо", "обои", "обоев", "обоям", "обоями", "обоях")),
+    ("Футболки", ("футболк", "футболок")),
+    ("Фотосетка", ("фотосетк", "фотофасад")),
+)
 
 
 def slugify(value: str) -> str:
     normalized = re.sub(r"[^a-zа-яё0-9]+", "-", value.lower(), flags=re.IGNORECASE).strip("-")
     return normalized[:100] or "product"
+
+
+def product_group_from_name(name: str) -> str | None:
+    """Return a canonical product group when the product name is unambiguous."""
+    normalized = name.casefold().replace("ё", "е")
+    for group_name, markers in _PRODUCT_NAME_GROUP_RULES:
+        if any(marker in normalized for marker in markers):
+            return group_name
+    return None
+
+
+def _product_group_by_name(session: Session, user_id: int, group_name: str) -> ProductGroup | None:
+    exact_match = session.scalar(
+        select(ProductGroup).where(
+            ProductGroup.user_id == user_id,
+            ProductGroup.name == group_name,
+        )
+    )
+    if exact_match is not None:
+        return exact_match
+
+    normalized_name = group_name.casefold()
+    return next(
+        (
+            group
+            for group in session.scalars(
+                select(ProductGroup).where(ProductGroup.user_id == user_id)
+            )
+            if group.name.casefold() == normalized_name
+        ),
+        None,
+    )
+
+
+def _get_or_create_product_group(session: Session, user_id: int, group_name: str) -> ProductGroup:
+    group = _product_group_by_name(session, user_id, group_name)
+    if group is None:
+        group = ProductGroup(user_id=user_id, name=group_name, code=slugify(group_name))
+        session.add(group)
+        session.flush()
+    return group
 
 
 def integration_for(account: MarketplaceAccount, credentials: dict[str, str], settings: Settings):
@@ -54,20 +100,15 @@ def _group_for_product(session: Session, account: MarketplaceAccount, external_i
             MarketplaceProduct.external_id == external_id,
         )
     )
-    if product and product.product_group:
+    detected_group_name = product_group_from_name(name)
+    if product and product.product_group and detected_group_name is None:
         product.name = name
         product.category = category
         product.offer_id = offer_id
         return product, product.product_group
 
-    group_name = (category or name or f"Товар {external_id}").strip()[:120]
-    group = session.scalar(
-        select(ProductGroup).where(ProductGroup.user_id == account.user_id, ProductGroup.name == group_name)
-    )
-    if group is None:
-        group = ProductGroup(user_id=account.user_id, name=group_name, code=slugify(group_name))
-        session.add(group)
-        session.flush()
+    group_name = (detected_group_name or category or name or f"Товар {external_id}").strip()[:120]
+    group = _get_or_create_product_group(session, account.user_id, group_name)
     if product is None:
         product = MarketplaceProduct(
             account_id=account.id,

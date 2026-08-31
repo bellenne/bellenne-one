@@ -13,7 +13,7 @@ from app.services.exporter import build_report_workbook
 from app.services.integrations.base import MetricPayload, ProductMetric, SyncPayload
 from app.services.planning import save_plan
 from app.services.reporting import report_rows
-from app.services.sync import persist_payload, rebuild_user_totals
+from app.services.sync import persist_payload, product_group_from_name, rebuild_user_totals
 from tests.conftest import csrf_from
 
 
@@ -22,6 +22,125 @@ def test_seeded_metrics_never_fill_gross_profit(client):
         rows = list(session.scalars(select(DailyMetric)))
         assert rows
         assert all(row.gross_profit is None for row in rows)
+
+
+def test_product_group_is_detected_from_product_name():
+    cases = {
+        "Обои для спальни": "Фотообои",
+        "Флизелиновые фотообои 3D": "Фотообои",
+        "Клей для обоев": "Фотообои",
+        "Женская футболка оверсайз": "Футболки",
+        "Комплект футболок": "Футболки",
+        "Фотосетка для забора": "Фотосетка",
+        "Фотофасад для строительных лесов": "Фотосетка",
+        "Футбольный мяч": None,
+    }
+
+    for product_name, expected_group in cases.items():
+        assert product_group_from_name(product_name) == expected_group
+
+
+def test_name_detection_unifies_products_from_all_accounts(authenticated_client):
+    first_date = date(2037, 1, 10)
+    second_date = date(2037, 1, 11)
+    with authenticated_client.app.state.session_factory() as session:
+        user = session.scalar(select(User).where(User.username == "test-owner"))
+        first_account = session.scalar(
+            select(MarketplaceAccount).where(
+                MarketplaceAccount.user_id == user.id,
+                MarketplaceAccount.is_demo.is_(True),
+            )
+        )
+        second_account = MarketplaceAccount(
+            user_id=user.id,
+            name="Second auto-category cabinet",
+            marketplace="WB",
+            is_demo=True,
+        )
+        session.add(second_account)
+        session.flush()
+
+        persist_payload(
+            session,
+            first_account,
+            first_date,
+            SyncPayload(
+                total=MetricPayload(),
+                products=[
+                    ProductMetric(
+                        "auto-wallpaper-existing",
+                        "Декор для стены",
+                        "Декор",
+                        metrics=MetricPayload(ordered_units=1),
+                    )
+                ]
+            ),
+        )
+        persist_payload(
+            session,
+            first_account,
+            second_date,
+            SyncPayload(
+                total=MetricPayload(),
+                products=[
+                    ProductMetric(
+                        "auto-wallpaper-existing",
+                        "Фотообои с видом на море",
+                        "Декор",
+                        metrics=MetricPayload(ordered_units=1),
+                    ),
+                    ProductMetric(
+                        "auto-shirt",
+                        "Футболка женская",
+                        "Одежда",
+                        metrics=MetricPayload(ordered_units=1),
+                    ),
+                    ProductMetric(
+                        "auto-mesh",
+                        "Фотофасад для забора",
+                        "Уличный декор",
+                        metrics=MetricPayload(ordered_units=1),
+                    ),
+                ]
+            ),
+        )
+        persist_payload(
+            session,
+            second_account,
+            second_date,
+            SyncPayload(
+                total=MetricPayload(),
+                products=[
+                    ProductMetric(
+                        "auto-wallpaper-second-cabinet",
+                        "Обои для детской",
+                        "Отделочные материалы",
+                        metrics=MetricPayload(ordered_units=1),
+                    )
+                ]
+            ),
+        )
+        session.commit()
+
+        products = {
+            product.external_id: product
+            for product in session.scalars(
+                select(MarketplaceProduct).where(
+                    MarketplaceProduct.external_id.in_(
+                        (
+                            "auto-wallpaper-existing",
+                            "auto-shirt",
+                            "auto-mesh",
+                            "auto-wallpaper-second-cabinet",
+                        )
+                    )
+                )
+            )
+        }
+        assert products["auto-wallpaper-existing"].product_group.name == "Фотообои"
+        assert products["auto-wallpaper-second-cabinet"].product_group_id == products["auto-wallpaper-existing"].product_group_id
+        assert products["auto-shirt"].product_group.name == "Футболки"
+        assert products["auto-mesh"].product_group.name == "Фотосетка"
 
 
 def test_xlsx_export_contains_only_target_sheet(authenticated_client):
