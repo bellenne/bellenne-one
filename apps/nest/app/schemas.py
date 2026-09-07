@@ -69,6 +69,17 @@ class ImageIn(BaseModel):
     )
     width_cm: int | None = Field(default=None, gt=0, le=100_000)
     height_cm: int | None = Field(default=None, gt=0, le=100_000)
+    running_length_cm: float | None = Field(
+        default=None,
+        gt=0,
+        le=1_000_000,
+        description="Optional pre-calculated roll length before the configured job gap.",
+    )
+    calculation_group: str | None = Field(
+        default=None,
+        max_length=160,
+        description="Optional optimization pool shared by items with different heights.",
+    )
     qty: int | None = Field(default=None, ge=0, le=10_000_000)
     quantity: int | None = Field(default=None, ge=0, le=10_000_000)
 

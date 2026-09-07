@@ -42,6 +42,7 @@ class ItemType:
     panels_per_unit: int
     len_per_unit_cm: float
     qty: int
+    calculation_group: str | None = None
 
 
 def parse_size(text: str, default_height_cm: int) -> tuple[int, int]:
@@ -174,7 +175,7 @@ def consume_combo(combo: dict[str, Any], types: list[ItemType], repeats: int) ->
 
 
 def completion_advice_for_buckets(
-    buckets: dict[int, list[ItemType]],
+    buckets: dict[str, list[ItemType]],
     settings: Settings,
 ) -> list[dict[str, Any]]:
     # The desktop application currently leaves this feature unimplemented too.
@@ -184,7 +185,7 @@ def completion_advice_for_buckets(
 
 def make_item_types(images: list[dict[str, Any]], settings: Settings) -> list[ItemType]:
     accumulated: dict[str, int] = {}
-    sizes: dict[str, tuple[int, int]] = {}
+    specs: dict[str, tuple[int, int, float | None, str | None]] = {}
 
     for index, image in enumerate(images, start=1):
         article = str(
@@ -216,6 +217,20 @@ def make_item_types(images: list[dict[str, Any]], settings: Settings) -> list[It
         if height_cm <= 0:
             raise ValueError(f"Image '{article}' has invalid height_cm.")
 
+        raw_running_length = image.get("running_length_cm")
+        try:
+            running_length_cm = (
+                float(raw_running_length) if raw_running_length is not None else None
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid running_length_cm for image '{article}'.") from exc
+        if running_length_cm is not None and running_length_cm <= 0:
+            raise ValueError(f"Image '{article}' has invalid running_length_cm.")
+
+        raw_group = image.get("calculation_group")
+        calculation_group = str(raw_group).strip() if raw_group is not None else None
+        calculation_group = calculation_group or None
+
         try:
             qty = int(image.get("qty", image.get("quantity", 1)))
         except (TypeError, ValueError) as exc:
@@ -225,31 +240,37 @@ def make_item_types(images: list[dict[str, Any]], settings: Settings) -> list[It
         if qty <= 0:
             continue
 
-        size = (width_cm, height_cm)
-        previous_size = sizes.get(article)
-        if previous_size is not None and previous_size != size:
+        spec = (width_cm, height_cm, running_length_cm, calculation_group)
+        previous_spec = specs.get(article)
+        if previous_spec is not None and previous_spec != spec:
             raise ValueError(
-                f"Image '{article}' is repeated with conflicting sizes: "
-                f"{previous_size[0]}x{previous_size[1]} and {width_cm}x{height_cm}."
+                f"Image '{article}' is repeated with conflicting geometry or calculation settings."
             )
 
         accumulated[article] = accumulated.get(article, 0) + qty
-        sizes[article] = size
+        specs[article] = spec
 
     items: list[ItemType] = []
     for article, qty in accumulated.items():
-        width_cm, height_cm = sizes[article]
+        width_cm, height_cm, running_length_cm, calculation_group = specs[article]
         panels = panels_from_width(width_cm)
         if panels <= 0:
             raise ValueError(f"Image '{article}' is too narrow to form a panel.")
+        if running_length_cm is None:
+            item_length_cm = unit_len_cm(panels, height_cm, settings)
+        elif settings.length_mode == "per_panel":
+            item_length_cm = running_length_cm + settings.job_gap_cm
+        else:
+            item_length_cm = running_length_cm + settings.top_bottom_margin_cm
         items.append(
             ItemType(
                 article=article,
                 width_cm=width_cm,
                 height_cm=height_cm,
                 panels_per_unit=panels,
-                len_per_unit_cm=unit_len_cm(panels, height_cm, settings),
+                len_per_unit_cm=item_length_cm,
                 qty=qty,
+                calculation_group=calculation_group,
             )
         )
     return items
@@ -326,9 +347,10 @@ def process_items(all_types: list[ItemType], settings: Settings) -> dict[str, An
     original_types = [replace(item) for item in all_types]
     working_types = [replace(item) for item in all_types]
 
-    buckets: dict[int, list[ItemType]] = {}
+    buckets: dict[str, list[ItemType]] = {}
     for item in working_types:
-        buckets.setdefault(item.height_cm, []).append(item)
+        bucket_key = item.calculation_group or f"height:{item.height_cm}"
+        buckets.setdefault(bucket_key, []).append(item)
 
     total_cm_all = sum(item.qty * item.len_per_unit_cm for item in original_types)
     total_m_all = round(total_cm_all / 100, 2)

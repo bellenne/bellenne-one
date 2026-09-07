@@ -43,7 +43,7 @@ def test_duplicate_article_with_conflicting_size_is_rejected() -> None:
     try:
         process_images(images, Settings())
     except ValueError as exc:
-        assert "conflicting sizes" in str(exc)
+        assert "conflicting geometry" in str(exc)
     else:
         raise AssertionError("Conflicting sizes must be rejected")
 
@@ -94,3 +94,40 @@ def test_leader_and_trailer_can_be_included_in_target_length() -> None:
 
     assert result["is_ideal"] is True
     assert result["impositions"][0]["total_m"] == 10.0
+
+
+def test_explicit_running_lengths_with_shared_group_form_one_ideal_roll() -> None:
+    settings = Settings(
+        roll_length_m=8.3,
+        target_min_m=8.3,
+        upper_tolerance_m=0.0,
+        job_gap_cm=15.0,
+    )
+    result = process_images(
+        [
+            {
+                "article": "SHORT_100x270",
+                "width_cm": 100,
+                "height_cm": 270,
+                "running_length_cm": 300,
+                "calculation_group": "mes-batch",
+                "qty": 1,
+            },
+            {
+                "article": "LONG_400x250",
+                "width_cm": 400,
+                "height_cm": 250,
+                "running_length_cm": 500,
+                "calculation_group": "mes-batch",
+                "qty": 1,
+            },
+        ],
+        settings,
+    )
+
+    assert result["is_ideal"] is True
+    assert result["impositions"][0]["total_m"] == 8.3
+    assert result["impositions"][0]["item_counts"] == {
+        "SHORT_100x270": 1,
+        "LONG_400x250": 1,
+    }

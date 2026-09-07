@@ -78,6 +78,51 @@ def test_calculate_preserves_result_and_records_user(
         assert log.is_ideal is True
 
 
+def test_calculate_combines_mes_items_with_different_layout_heights(
+    client: TestClient,
+    identity_headers: dict[str, str],
+) -> None:
+    response = client.post(
+        "/api/v1/calculate",
+        headers={"AUTH-TOKEN": TEST_TOKEN, "X-MES-User": "mes.operator"},
+        json={
+            "items": [
+                {
+                    "article": "SHORT_100x270",
+                    "width_cm": 100,
+                    "height_cm": 270,
+                    "running_length_cm": 300,
+                    "calculation_group": "mes-print-batch",
+                    "quantity": 1,
+                },
+                {
+                    "article": "LONG_400x250",
+                    "width_cm": 400,
+                    "height_cm": 250,
+                    "running_length_cm": 500,
+                    "calculation_group": "mes-print-batch",
+                    "quantity": 1,
+                },
+            ],
+            "settings": {
+                "roll_length_m": 8.3,
+                "target_min_m": 8.3,
+                "upper_tolerance_m": 0,
+                "job_gap_cm": 15,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["is_ideal"] is True
+    assert body["impositions"][0]["total_m"] == 8.3
+    assert body["impositions"][0]["item_counts"] == {
+        "SHORT_100x270": 1,
+        "LONG_400x250": 1,
+    }
+
+
 def test_invalid_request_is_recorded_in_history(
     client: TestClient,
     identity_headers: dict[str, str],
