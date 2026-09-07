@@ -1,13 +1,13 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="page-header shell-enter">
-  <div><p class="shell-eyebrow">Единая экосистема</p><h1 class="page-title">BellenneOne</h1><p class="page-subtitle">Три рабочих модуля, один аккаунт и единый адрес.</p></div>
+  <div><p class="shell-eyebrow">Единая экосистема</p><h1 class="page-title">BellenneOne</h1><p class="page-subtitle">Четыре рабочих модуля, один аккаунт и единый адрес.</p></div>
   <a class="button button-secondary" href="/settings">{{ icon('settings', 18) }}<span>Настройки модулей</span></a>
 </div>
 
 <section class="platform-summary card shell-enter" aria-label="Состояние платформы">
   <div><span class="badge badge-positive">Доступ подтверждён</span><h2 class="section-title">Добро пожаловать, {{ username }}</h2><p class="section-copy">Выберите модуль. Переходы не требуют повторного входа.</p></div>
-  <div class="platform-facts"><span><strong>3</strong> модуля</span><span><strong>1</strong> аккаунт</span><span><strong>1</strong> порт</span></div>
+  <div class="platform-facts"><span><strong>4</strong> модуля</span><span><strong>1</strong> аккаунт</span><span><strong>1</strong> порт</span></div>
 </section>
 
 <section class="product-grid shell-enter" aria-label="Модули BellenneOne">
@@ -26,6 +26,10 @@
     <div><h2 class="section-title">BellenneVector</h2><p class="section-copy">Статистика рекламы, эффективность кампаний и автоматический сбор данных.</p></div>
     <a class="button button-secondary" href="/vector/">Открыть Vector</a>
   </article>
+  <article class="card product-card product-nest">
+    <div class="product-card-head"><span class="product-icon">{{ icon('nest', 22) }}</span><span class="badge badge-neutral">Оптимизация раскладки</span></div>
+    <div><h2 class="section-title">BellenneNest</h2><p class="section-copy">API расчёта раскладки, конфигурация алгоритма и история запросов.</p></div>
+    <a class="button button-secondary" href="/nest/">Открыть Nest</a>
+  </article>
 </section>
 {% endblock %}
-

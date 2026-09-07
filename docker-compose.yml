@@ -19,6 +19,8 @@ services:
         condition: service_healthy
       vector:
         condition: service_healthy
+      nest:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1/gateway-health"]
       interval: 30s
@@ -98,7 +100,25 @@ services:
     expose:
       - "8000"
 
+  nest:
+    build:
+      context: .
+      dockerfile: apps/nest/Dockerfile
+    container_name: bellenneone-nest
+    restart: unless-stopped
+    init: true
+    environment:
+      DATA_DIR: /data
+      DATABASE_URL: sqlite:////data/bellennenest.db
+      MODULE_PREFIX: /nest
+      NEST_API_DOCS_ENABLED: "${NEST_API_DOCS_ENABLED:-false}"
+    volumes:
+      - nest_data:/data
+    expose:
+      - "8000"
+
 volumes:
   pulse_data:
   echo_data:
   vector_data:
+  nest_data:

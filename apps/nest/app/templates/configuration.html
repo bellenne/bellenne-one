@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header"><div><p class="eyebrow">Раскладка</p><h1 class="page-title">Конфигурация</h1><p class="page-subtitle">Значения используются, когда API-запрос не передаёт собственный объект <span class="technical-value">settings</span>.</p></div></div>
+{% if saved %}<div class="alert alert-success" role="status">Конфигурация сохранена.</div>{% endif %}
+{% if error %}<div class="alert alert-error" role="alert"><div><strong>Конфигурация не сохранена</strong><small>{{ error }}</small></div></div>{% endif %}
+
+<form method="post" action="{{ module_prefix }}/configuration" class="configuration-form">
+  <input type="hidden" name="csrf_token" value="{{ platform_csrf_token }}">
+  <section class="card configuration-section">
+    <div class="card-header"><div><h2 class="section-title">Длина рулона</h2><p class="section-copy">Фактические границы эффективной раскладки.</p></div></div>
+    <div class="settings-fields">
+      <label>Длина рулона <span class="unit-field"><input type="number" name="roll_length_m" value="{{ configuration.roll_length_m }}" min="0.01" max="10000" step="0.01" required><span>м</span></span></label>
+      <label>Целевая длина от <span class="unit-field"><input type="number" name="target_min_m" value="{{ configuration.target_min_m }}" min="0.01" max="10000" step="0.01" required><span>м</span></span></label>
+      <label>Допуск вверх <span class="unit-field"><input type="number" name="upper_tolerance_m" value="{{ configuration.upper_tolerance_m }}" min="0" max="10000" step="0.01" required><span>м</span></span></label>
+      <label>Мягкий допуск вниз <span class="unit-field"><input type="number" name="lower_soft_margin_m" value="{{ configuration.lower_soft_margin_m }}" min="0" max="10000" step="0.01" required><span>м</span></span></label>
+    </div>
+  </section>
+
+  <section class="card configuration-section">
+    <div class="card-header"><div><h2 class="section-title">Отступы и материал</h2><p class="section-copy">Все значения передаются движку в сантиметрах.</p></div></div>
+    <div class="settings-fields">
+      <label>Зазор между заданиями <span class="unit-field"><input type="number" name="job_gap_cm" value="{{ configuration.job_gap_cm }}" min="0" max="100000" step="0.01" required><span>см</span></span></label>
+      <label>Лидер <span class="unit-field"><input type="number" name="leader_cm" value="{{ configuration.leader_cm }}" min="0" max="100000" step="0.01" required><span>см</span></span></label>
+      <label>Трейлер <span class="unit-field"><input type="number" name="trailer_cm" value="{{ configuration.trailer_cm }}" min="0" max="100000" step="0.01" required><span>см</span></span></label>
+      <label>Зазор между полотнами <span class="unit-field"><input type="number" name="panel_gap_cm" value="{{ configuration.panel_gap_cm }}" min="0" max="100000" step="0.01" required><span>см</span></span></label>
+      <label>Верхний и нижний отступ <span class="unit-field"><input type="number" name="top_bottom_margin_cm" value="{{ configuration.top_bottom_margin_cm }}" min="0" max="100000" step="0.01" required><span>см</span></span></label>
+      <label>Высота по умолчанию <span class="unit-field"><input type="number" name="default_height_cm" value="{{ configuration.default_height_cm }}" min="1" max="100000" step="1" required><span>см</span></span></label>
+    </div>
+    <div class="toggle-list">
+      <label class="toggle-row"><span><strong>Учитывать количество</strong><small>Параметр <span class="technical-value">use_qty</span></small></span><input type="checkbox" name="use_qty" {{ 'checked' if configuration.use_qty else '' }}></label>
+      <label class="toggle-row"><span><strong>Включать лидер и трейлер в целевую длину</strong><small>Параметр <span class="technical-value">include_leader_trailer_in_target</span></small></span><input type="checkbox" name="include_leader_trailer_in_target" {{ 'checked' if configuration.include_leader_trailer_in_target else '' }}></label>
+    </div>
+  </section>
+
+  <section class="card configuration-section">
+    <div class="card-header"><div><h2 class="section-title">Режим расчёта</h2><p class="section-copy">Существующие параметры Nest Engine без дополнительных эвристик.</p></div></div>
+    <div class="settings-fields">
+      <label>Режим длины <select name="length_mode" required><option value="per_panel" {{ 'selected' if configuration.length_mode == 'per_panel' else '' }}>На каждое полотно</option><option value="combined" {{ 'selected' if configuration.length_mode == 'combined' else '' }}>Общая длина</option></select></label>
+      <label>Цель дополнения <select name="completion_objective" required><option value="max_groups" {{ 'selected' if configuration.completion_objective == 'max_groups' else '' }}>Максимум групп</option><option value="min_additions" {{ 'selected' if configuration.completion_objective == 'min_additions' else '' }}>Минимум добавлений</option><option value="exact_groups" {{ 'selected' if configuration.completion_objective == 'exact_groups' else '' }}>Точное число групп</option></select></label>
+      <label>Точное число групп <input type="number" name="completion_exact_groups" value="{{ configuration.completion_exact_groups }}" min="0" max="10000" step="1" required></label>
+      <label>Допустимые ширины добавлений, см <input type="text" name="completion_allowed_add_widths" value="{{ configuration.completion_allowed_add_widths|join(', ') }}" required><small>Через запятую</small></label>
+    </div>
+  </section>
+
+  <details class="card advanced-section">
+    <summary><div><h2 class="section-title">Расширенные ограничения</h2><p class="section-copy">Изменение может существенно повлиять на длительность расчёта.</p></div><span class="badge badge-warning">Advanced</span></summary>
+    <div class="settings-fields">
+      <label>Лимит полного перебора <input type="number" name="brute_force_limit" value="{{ configuration.brute_force_limit }}" min="1" max="10000" step="1" required></label>
+      <label>Частичный максимум R <input type="number" name="partial_max_r" value="{{ configuration.partial_max_r }}" min="1" max="10000" step="1" required></label>
+    </div>
+  </details>
+
+  <div class="configuration-save"><div><strong>Пользовательская конфигурация</strong><span>Применяется к запросам пользователя {{ username }} без явных settings.</span></div><button class="button button-product" type="submit">Сохранить конфигурацию</button></div>
+</form>
+{% endblock %}

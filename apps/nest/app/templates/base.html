@@ -1,0 +1,65 @@
+{% from "icons.html" import icon %}
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>{{ title }} · BellenneNest</title>
+  <link rel="icon" href="{{ module_prefix }}/static/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ module_prefix }}/static/theme.css">
+  <link rel="stylesheet" href="{{ module_prefix }}/static/app.css">
+  <link rel="stylesheet" href="{{ module_prefix }}/static/nest.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Навигация BellenneNest">
+      <a class="module-brand" href="{{ module_prefix }}/" aria-label="BellenneNest — обзор">
+        <img class="module-brand-logo" src="{{ module_prefix }}/static/logo.svg" alt="BellenneNest">
+        <small>Layout optimization engine</small>
+      </a>
+      <nav class="sidebar-nav">
+        <a class="sidebar-item" href="/">{{ icon('dashboard') }}<span>BellenneOne</span></a>
+        <a class="sidebar-item" href="/pulse/">{{ icon('pulse') }}<span>BellennePulse</span></a>
+        <a class="sidebar-item" href="/echo/">{{ icon('echo') }}<span>BellenneEcho</span></a>
+        <a class="sidebar-item" href="/vector/">{{ icon('vector') }}<span>BellenneVector</span></a>
+        <a class="sidebar-item product-current" href="{{ module_prefix }}/">{{ icon('nest') }}<span>BellenneNest</span></a>
+        <a class="sidebar-item" href="/settings">{{ icon('settings') }}<span>Настройки</span></a>
+        <span class="sidebar-divider" aria-hidden="true"></span>
+        <a class="sidebar-item {{ 'is-active' if active == 'overview' else '' }}" href="{{ module_prefix }}/">{{ icon('dashboard') }}<span>Обзор</span></a>
+        <a class="sidebar-item {{ 'is-active' if active == 'configuration' else '' }}" href="{{ module_prefix }}/configuration">{{ icon('settings') }}<span>Конфигурация</span></a>
+        <a class="sidebar-item {{ 'is-active' if active == 'api' else '' }}" href="{{ module_prefix }}/api-info">{{ icon('api') }}<span>API</span></a>
+        <a class="sidebar-item {{ 'is-active' if active == 'history' else '' }}" href="{{ module_prefix }}/history">{{ icon('history') }}<span>История</span></a>
+      </nav>
+      <div class="sidebar-pulse" aria-label="Состояние Nest Engine">
+        <div class="pulse-copy"><span class="pulse-status-dot"></span><span>Nest Engine активен</span></div>
+        <svg class="nest-signal" viewBox="0 0 180 52" role="img" aria-label="Индикатор оптимизации раскладки">
+          <rect class="nest-frame" x="3" y="7" width="174" height="38" rx="3"/>
+          <rect class="nest-cell nest-cell-a" x="9" y="13" width="38" height="26" rx="2"/>
+          <rect class="nest-cell nest-cell-b" x="53" y="13" width="58" height="12" rx="2"/>
+          <rect class="nest-cell nest-cell-c" x="53" y="29" width="58" height="10" rx="2"/>
+          <rect class="nest-cell nest-cell-d" x="117" y="13" width="52" height="26" rx="2"/>
+          <path class="nest-scan" pathLength="1" d="M8 41H172"/>
+        </svg>
+      </div>
+      <div class="sidebar-foot">BellenneOne · Nest</div>
+    </aside>
+    <div class="main-shell">
+      <header class="topbar">
+        <button class="button button-secondary button-small sidebar-toggle" type="button" data-sidebar-toggle>{{ icon('menu', 18) }}<span>Меню</span></button>
+        <span class="product-context">BellenneNest</span>
+        <div class="topbar-spacer"></div>
+        <div class="user-menu" data-user-menu>
+          <button class="user-menu-trigger" type="button" aria-haspopup="menu" aria-expanded="false" data-user-menu-trigger><span class="user-avatar">{{ icon('user', 18) }}</span><span class="user-menu-label">{{ username }}</span>{{ icon('chevron', 16) }}</button>
+          <div class="user-menu-panel" role="menu" data-user-menu-panel hidden>
+            <div class="user-menu-identity"><span class="user-avatar">{{ icon('user', 18) }}</span><div><span class="field-label">Единый аккаунт</span><strong>{{ username }}</strong></div></div>
+            <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ platform_csrf_token }}"><button class="user-menu-action" type="submit" role="menuitem">{{ icon('logout', 18) }}<span>Выйти</span></button></form>
+          </div>
+        </div>
+      </header>
+      <main class="main-content module-content">{% block content %}{% endblock %}</main>
+    </div>
+  </div>
+  <script src="{{ module_prefix }}/static/app.js" defer></script>
+</body>
+</html>

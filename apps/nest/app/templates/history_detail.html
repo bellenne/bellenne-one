@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header"><div><p class="eyebrow">Запрос {{ log.id[:8] }}</p><h1 class="page-title">Результат расчёта</h1><p class="page-subtitle">{{ log.created_at.strftime('%d.%m.%Y %H:%M:%S') }} · пользователь MES: {{ log.username }}</p></div><a class="button button-secondary" href="{{ module_prefix }}/history">Назад к истории</a></div>
+
+<section class="nest-status-grid">
+  <article class="card status-card"><span class="field-label">HTTP status</span><strong>{{ log.status_code }}</strong><span class="badge {{ 'badge-positive' if log.status_code == 200 else 'badge-negative' }}">{{ 'Выполнен' if log.status_code == 200 else 'Ошибка' }}</span></article>
+  <article class="card status-card"><span class="field-label">Входные позиции</span><strong>{{ log.item_count }}</strong><span class="muted">элементов запроса</span></article>
+  <article class="card status-card"><span class="field-label">Длительность</span><strong>{{ log.duration_ms|round(2) }} мс</strong><span class="muted">серверный расчёт</span></article>
+</section>
+
+{% if log.error_message %}<div class="alert alert-error" role="alert"><div><strong>Расчёт не выполнен</strong><small>{{ log.error_message }}</small></div></div>{% endif %}
+
+{% if log.status_code == 200 %}
+<section class="card section-card">
+  <div class="card-header"><div><h2 class="section-title">Использование рулонов</h2><p class="section-copy">Фактическое число повторов раскладок и свободная длина на задействованных рулонах.</p></div><span class="badge {{ 'badge-positive' if calculation_usage.remaining_units == 0 else 'badge-warning' }}">{{ 'Без остатка позиций' if calculation_usage.remaining_units == 0 else 'Остаток: ' ~ calculation_usage.remaining_units ~ ' ед.' }}</span></div>
+  <dl class="result-summary">
+    <div><dt>Затрачено рулонов</dt><dd>{{ calculation_usage.rolls_used }}</dd></div>
+    <div><dt>Эффективных рулонов</dt><dd>{{ calculation_usage.efficient_rolls }}</dd></div>
+    <div><dt>Остаточных рулонов</dt><dd>{{ calculation_usage.remainder_rolls }}</dd></div>
+    <div><dt>Материала в раскладках</dt><dd>{{ calculation_usage.material_used_m }} м</dd></div>
+    <div><dt>Остаток материала</dt><dd>{{ calculation_usage.material_remaining_m }} м</dd></div>
+    <div><dt>Остаток позиций</dt><dd>{{ calculation_usage.remaining_units }} ед.</dd></div>
+  </dl>
+  {% if calculation_usage.unplaced_units %}<div class="alert alert-warning" role="alert"><div><strong>Не все позиции размещены</strong><small>{{ calculation_usage.unplaced_units }} ед. не вошли даже в остаточные раскладки.</small></div></div>{% endif %}
+</section>
+
+<section class="card section-card">
+  <div class="card-header"><div><h2 class="section-title">Сводка результата</h2><p class="section-copy">Показатели, возвращённые Nest Engine.</p></div><span class="badge {{ 'badge-positive' if response_body.is_ideal else 'badge-warning' }}">{{ 'Идеальная раскладка' if response_body.is_ideal else 'Есть неэффективный остаток' }}</span></div>
+  <dl class="result-summary">
+    <div><dt>Всего единиц</dt><dd>{{ response_body.summary.input_units }}</dd></div>
+    <div><dt>Эффективно</dt><dd>{{ response_body.summary.efficient_units }}</dd></div>
+    <div><dt>Неэффективно</dt><dd>{{ response_body.summary.inefficient_units }}</dd></div>
+    <div><dt>Не размещено</dt><dd>{{ response_body.summary.unplaced_units }}</dd></div>
+    <div><dt>Общая длина</dt><dd>{{ response_body.grand_total_m }} м</dd></div>
+    <div><dt>Рабочий диапазон</dt><dd>{{ response_body.range_m[0] }}–{{ response_body.range_m[1] }} м</dd></div>
+  </dl>
+</section>
+
+<section class="card section-card">
+  <div class="card-header"><div><h2 class="section-title">Эффективные раскладки</h2><p class="section-copy">Состав каждой группы и число повторов.</p></div></div>
+  {% if response_body.impositions %}<div class="table-scroll"><table class="data-table"><thead><tr><th>Группа</th><th>Состав</th><th>Повторы</th><th>Единиц</th><th>Полотен</th><th class="number">Длина</th></tr></thead><tbody>{% for item in response_body.impositions %}<tr><td class="technical-value">{{ item.label }}</td><td>{% for article, count in item.item_counts.items() %}<span class="composition-item">{{ article }} × {{ count }}</span>{% endfor %}</td><td>{{ item.repeat }}</td><td>{{ item.total_units }}</td><td>{{ item.total_panels }}</td><td class="number">{{ item.total_m }} м</td></tr>{% endfor %}</tbody></table></div>{% else %}<div class="empty-state">Эффективных раскладок в заданном диапазоне нет.</div>{% endif %}
+</section>
+
+{% if response_body.leftover_impositions or response_body.leftover_items %}<section class="card section-card"><div class="card-header"><div><h2 class="section-title">Остаток</h2><p class="section-copy">Неэффективные группы и неразмещённые позиции.</p></div></div><div class="leftover-list">{% for item in response_body.leftover_impositions %}<div><strong>{{ item.label }}</strong><span>{{ item.total_units }} ед. · {{ item.total_m }} м</span></div>{% endfor %}{% for item in response_body.leftover_items %}<div><strong>{{ item.article }}</strong><span>{{ item.qty }} ед. · {{ item.width_cm }}×{{ item.height_cm }} см</span></div>{% endfor %}</div></section>{% endif %}
+{% endif %}
+
+<section class="raw-grid">
+  <details class="card raw-panel"><summary>JSON запроса</summary><pre class="code-block"><code>{{ request_pretty }}</code></pre></details>
+  <details class="card raw-panel"><summary>JSON ответа</summary><pre class="code-block"><code>{{ response_pretty }}</code></pre></details>
+</section>
+{% endblock %}

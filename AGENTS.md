@@ -502,3 +502,48 @@ Consistency over novelty.
 Function over decoration.
 
 Reuse over reinvention.
+
+# BellenneNest
+
+When working on BellenneNest UI, API configuration, optimization settings, presets, jobs or calculation results:
+
+READ:
+
+`docs/products/NEST.md`
+
+before making changes.
+
+BellenneNest is an API-first optimization engine.
+
+Do not treat it as an analytics dashboard.
+
+Do not invent:
+
+* algorithm settings;
+* optimization parameters;
+* configuration defaults;
+* KPIs;
+* charts;
+* reports;
+* job states;
+* API functionality
+
+that are not supported by the actual application or backend.
+
+The frontend must represent the real Nest API and configuration model.
+
+Use the shared Bellenne Design System.
+
+Nest Product Accent:
+
+`#A855F7`
+
+Preserve semantic colors defined by the Bellenne Design System.
+
+When a design pattern already exists in Pulse, Echo, Vector or shared Bellenne components, prefer reuse over creating a Nest-specific alternative.
+
+Nest must be compatible with:
+
+Bellenne Shell → Nest → Page
+
+Do not create an independent Nest visual system.

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+  <div><p class="eyebrow">Optimization engine</p><h1 class="page-title">BellenneNest</h1><p class="page-subtitle">Настройка и контроль API раскладки без изменения производственного алгоритма.</p></div>
+  <a class="button button-product" href="{{ module_prefix }}/configuration">Настроить алгоритм</a>
+</div>
+
+<section class="nest-status-grid" aria-label="Состояние сервиса">
+  <article class="card status-card"><span class="field-label">Nest Engine</span><strong>Работает</strong><span class="badge badge-positive">Operational</span></article>
+  <article class="card status-card"><span class="field-label">API</span><strong>{{ 'Настроен' if api_configured else 'Нужен токен' }}</strong><span class="badge {{ 'badge-positive' if api_configured else 'badge-warning' }}">{{ 'Доступен' if api_configured else 'Конфигурация' }}</span></article>
+  <article class="card status-card"><span class="field-label">Версия алгоритма</span><strong class="technical-value">{{ version }}</strong><span class="muted">Синхронный расчёт</span></article>
+</section>
+
+<section class="card section-card">
+  <div class="card-header"><div><h2 class="section-title">Активность API</h2><p class="section-copy">Расчёты по персональному токену аккаунта с указанием пользователя MES.</p></div><a class="button button-secondary button-small" href="{{ module_prefix }}/history">Вся история</a></div>
+  <div class="compact-facts"><span><strong>{{ total_requests }}</strong> запросов</span><span><strong>{{ successful_requests }}</strong> выполнено</span><span><strong>{{ last_log.duration_ms|round(2) if last_log else '—' }}</strong> {{ 'мс последний расчёт' if last_log else 'нет расчётов' }}</span></div>
+  {% if recent_logs %}
+  <div class="table-scroll"><table class="data-table nest-history-table"><thead><tr><th>Время</th><th>Пользователь MES</th><th>Запрос</th><th class="number">Рулонов</th><th class="number">Остаток материала</th><th>Результат</th><th class="number">Время</th></tr></thead><tbody>
+    {% for item in recent_logs %}{% set result_usage = usage.get(item.id) %}<tr><td>{{ item.created_at.strftime('%d.%m.%Y %H:%M:%S') }}</td><td>{{ item.username }}</td><td><a class="technical-link" href="{{ module_prefix }}/history/{{ item.id }}">{{ item.id[:8] }}</a><small>{{ item.item_count }} позиций</small></td><td class="number">{{ result_usage.rolls_used if result_usage else '—' }}</td><td class="number">{{ (result_usage.material_remaining_m ~ ' м') if result_usage else '—' }}</td><td><span class="badge {{ 'badge-positive' if item.status_code == 200 and item.is_ideal else ('badge-warning' if item.status_code == 200 else 'badge-negative') }}">{{ 'Все позиции размещены' if item.status_code == 200 and item.is_ideal else ('Остаток: ' ~ result_usage.remaining_units ~ ' ед.' if result_usage else 'HTTP ' ~ item.status_code) }}</span></td><td class="number">{{ item.duration_ms|round(2) }} мс</td></tr>{% endfor %}
+  </tbody></table></div>
+  {% else %}<div class="empty-state">Запросов пока нет. После первого обращения к API здесь появится результат.</div>{% endif %}
+</section>
+{% endblock %}

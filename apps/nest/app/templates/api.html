@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header"><div><p class="eyebrow">API-first</p><h1 class="page-title">Nest API</h1><p class="page-subtitle">Синхронный расчёт раскладки с персональным API-токеном аккаунта BellenneOne.</p></div><span class="badge {{ 'badge-positive' if api_configured else 'badge-warning' }}">{{ 'API доступен' if api_configured else 'Создайте токен' }}</span></div>
+
+{% if generated_token %}
+<div class="alert alert-warning" role="alert">
+  <div><strong>Сохраните новый токен сейчас</strong><small>После ухода с этой страницы полный токен больше не отобразится.{% if token_replaced %} Предыдущий токен уже недействителен.{% endif %}</small></div>
+</div>
+<section class="card section-card">
+  <div class="card-header"><div><h2 class="section-title">Новый API-токен</h2><p class="section-copy">Передайте его в защищённую конфигурацию MES.</p></div><span class="badge badge-warning">Показывается один раз</span></div>
+  <pre class="code-block"><code>{{ generated_token }}</code></pre>
+</section>
+{% endif %}
+
+<section class="api-layout">
+  <article class="card section-card">
+    <div class="card-header"><div><h2 class="section-title">API-токен аккаунта</h2><p class="section-copy">Токен принадлежит аккаунту {{ username }} и определяет используемую конфигурацию Nest.</p></div></div>
+    <dl class="technical-list">
+      <div><dt>Состояние</dt><dd><span class="badge {{ 'badge-positive' if api_token else 'badge-warning' }}">{{ 'Активен' if api_token else 'Не создан' }}</span></dd></div>
+      <div><dt>Токен</dt><dd class="technical-value">{{ token_mask }}</dd></div>
+      {% if api_token %}
+      <div><dt>Создан</dt><dd>{{ api_token.created_at.strftime('%d.%m.%Y %H:%M') }}</dd></div>
+      <div><dt>Последнее использование</dt><dd>{{ api_token.last_used_at.strftime('%d.%m.%Y %H:%M') if api_token.last_used_at else 'Ещё не использовался' }}</dd></div>
+      {% endif %}
+    </dl>
+    <form method="post" action="{{ module_prefix }}/api-token/generate"{% if api_token %} data-confirm="Создать новый токен? Текущий токен сразу перестанет работать."{% endif %}>
+      <input type="hidden" name="csrf_token" value="{{ platform_csrf_token }}">
+      <button class="button {{ 'button-secondary' if api_token else 'button-product' }}" type="submit">{{ 'Заменить токен' if api_token else 'Создать токен' }}</button>
+    </form>
+  </article>
+
+  <article class="card section-card">
+    <div class="card-header"><div><h2 class="section-title">Подключение</h2><p class="section-copy">Внешний адрес через единый gateway BellenneOne.</p></div></div>
+    <dl class="technical-list">
+      <div><dt>Метод</dt><dd><span class="method-badge">POST</span></dd></div>
+      <div><dt>Endpoint</dt><dd class="technical-value">/nest/api/v1/calculate</dd></div>
+      <div><dt>Авторизация</dt><dd class="technical-value">AUTH-TOKEN</dd></div>
+      <div><dt>Версия</dt><dd class="technical-value">{{ version }}</dd></div>
+    </dl>
+  </article>
+</section>
+
+<section class="card section-card">
+  <div class="card-header"><div><h2 class="section-title">Пользователь из MES</h2><p class="section-copy">Токен определяет аккаунт BellenneOne, а заголовок запроса — сотрудника, запустившего расчёт в MES.</p></div></div>
+  <dl class="technical-list">
+    <div><dt>Обязательный заголовок</dt><dd class="technical-value">X-MES-User</dd></div>
+    <div><dt>Значение</dt><dd>Логин или отображаемое имя пользователя из авторизации MES</dd></div>
+    <div><dt>Совместимый alias</dt><dd class="technical-value">X-Bellenne-Username</dd></div>
+  </dl>
+  <p class="note">Передавать ID аккаунта BellenneOne больше не нужно: владелец, настройки и доступная ему история определяются по персональному токену. В журнале сохраняется именно значение <span class="technical-value">X-MES-User</span>.</p>
+</section>
+
+<section class="card section-card">
+  <div class="card-header"><div><h2 class="section-title">Пример запроса</h2><p class="section-copy">MES передаёт персональный токен аккаунта и пользователя, инициировавшего расчёт.</p></div></div>
+  <pre class="code-block"><code>curl -X POST "https://your-host/nest/api/v1/calculate" \
+  -H "Content-Type: application/json" \
+  -H "AUTH-TOKEN: &lt;API_TOKEN_ИЗ_NEST&gt;" \
+  -H "X-MES-User: ivan.petrov" \
+  -d '{"items":[{"article":"ONE_100x270","width_cm":100,"height_cm":270,"quantity":17}]}'</code></pre>
+</section>
+{% endblock %}

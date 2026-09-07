@@ -5,5 +5,7 @@
 **/__pycache__
 **/*.pyc
 **/tests
+!apps/nest/tests
+!apps/nest/tests/**
 **/data
 **/outputs

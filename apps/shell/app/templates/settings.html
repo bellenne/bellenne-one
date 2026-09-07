@@ -15,11 +15,14 @@
     <div class="settings-card-head"><span class="product-icon">{{ icon('vector', 22) }}</span><div><h2 class="section-title">Vector</h2><p class="section-copy">API-ключ продвижения и расписание сбора рекламных данных.</p></div></div>
     <div class="settings-actions"><a class="button button-secondary" href="/vector/cabinet">Кабинет Vector</a><a class="button button-secondary" href="/vector/scheduler">Автосбор</a></div>
   </article>
+  <article class="card settings-card product-nest">
+    <div class="settings-card-head"><span class="product-icon">{{ icon('nest', 22) }}</span><div><h2 class="section-title">Nest</h2><p class="section-copy">Параметры алгоритма раскладки, API и журнал расчётов.</p></div></div>
+    <div class="settings-actions"><a class="button button-secondary" href="/nest/configuration">Конфигурация Nest</a><a class="button button-secondary" href="/nest/api-info">API</a></div>
+  </article>
 </section>
 
 <section class="card account-card shell-enter">
-  <div><span class="badge badge-positive">Единая авторизация активна</span><h2 class="section-title">Аккаунт {{ username }}</h2><p class="section-copy">Сессия действует для BellenneOne, Pulse, Echo и Vector. Повторный вход между модулями не требуется.</p></div>
+  <div><span class="badge badge-positive">Единая авторизация активна</span><h2 class="section-title">Аккаунт {{ username }}</h2><p class="section-copy">Сессия действует для BellenneOne, Pulse, Echo, Vector и Nest. Повторный вход между модулями не требуется.</p></div>
   <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ platform_csrf_token }}"><button class="button button-secondary" type="submit">{{ icon('logout', 18) }}<span>Выйти из BellenneOne</span></button></form>
 </section>
 {% endblock %}
-
