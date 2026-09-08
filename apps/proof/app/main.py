@@ -686,7 +686,6 @@ def configure_mattermost_ui(
     webhook_url: str = Form(""),
     channel: str = Form(""),
     enabled: str | None = Form(None),
-    action: str = Form("save"),
     session: Session = Depends(get_db),
 ) -> HTMLResponse:
     owner_id, _ = require_ui_identity(request)
@@ -735,50 +734,80 @@ def configure_mattermost_ui(
         message="Mattermost error notifications configured.",
     )
     session.commit()
-
-    notice = "Настройки Mattermost сохранены."
-    error = ""
-    if action == "test":
-        try:
-            post_mattermost_message(
-                settings,
-                configured_url,
-                channel.strip()[:120],
-                "#### BellenneProof\nТестовое уведомление доставлено. Интеграция Mattermost работает.",
-            )
-        except Exception as exc:
-            error = sanitized_message(str(exc).replace(configured_url, "[REDACTED_URL]"))[:2000]
-            integration.last_error_at = utc_now()
-            integration.last_error_message = error
-            add_event(
-                session,
-                owner_external_user_id=owner_id,
-                integration_id=integration.id,
-                event_type="mattermost.test.failed",
-                source="integration",
-                level="error",
-                message="Mattermost test notification failed.",
-                error_code="MATTERMOST_TEST_FAILED",
-                details={"error": error},
-                queue_notification=False,
-            )
-        else:
-            integration.last_delivery_at = utc_now()
-            integration.last_error_message = None
-            notice = "Настройки сохранены, тестовое уведомление доставлено."
-            add_event(
-                session,
-                owner_external_user_id=owner_id,
-                integration_id=integration.id,
-                event_type="mattermost.test.sent",
-                source="integration",
-                message="Mattermost test notification delivered.",
-            )
-        session.commit()
     return render_integrations_page(
         request, session, owner_id,
-        mattermost_notice=notice if not error else "",
-        mattermost_error=error,
+        mattermost_notice="Настройки Mattermost сохранены.",
+    )
+
+
+@app.post("/integrations/mattermost/test")
+def test_mattermost_ui(
+    request: Request,
+    csrf_token: str = Form(...),
+    session: Session = Depends(get_db),
+) -> HTMLResponse:
+    owner_id, _ = require_ui_identity(request)
+    verify_csrf(request, csrf_token)
+    integration = session.scalar(select(ProofIntegration).where(
+        ProofIntegration.owner_external_user_id == owner_id,
+        ProofIntegration.kind == "mattermost",
+    ))
+    configured_url, channel = (
+        mattermost_settings(integration, settings) if integration else ("", "")
+    )
+    if not configured_url:
+        return render_integrations_page(
+            request,
+            session,
+            owner_id,
+            mattermost_error="Сначала сохраните Incoming Webhook URL Mattermost.",
+        )
+
+    try:
+        post_mattermost_message(
+            settings,
+            configured_url,
+            channel,
+            "#### BellenneProof\nТестовое уведомление доставлено. Интеграция Mattermost работает.",
+        )
+    except Exception as exc:
+        error = sanitized_message(str(exc).replace(configured_url, "[REDACTED_URL]"))[:2000]
+        integration.last_error_at = utc_now()
+        integration.last_error_message = error
+        add_event(
+            session,
+            owner_external_user_id=owner_id,
+            integration_id=integration.id,
+            event_type="mattermost.test.failed",
+            source="integration",
+            level="error",
+            message="Mattermost test notification failed.",
+            error_code="MATTERMOST_TEST_FAILED",
+            details={"error": error},
+            queue_notification=False,
+        )
+        session.commit()
+        return render_integrations_page(
+            request, session, owner_id, mattermost_error=error
+        )
+
+    integration.last_delivery_at = utc_now()
+    integration.last_error_at = None
+    integration.last_error_message = None
+    add_event(
+        session,
+        owner_external_user_id=owner_id,
+        integration_id=integration.id,
+        event_type="mattermost.test.sent",
+        source="integration",
+        message="Mattermost test notification delivered.",
+    )
+    session.commit()
+    return render_integrations_page(
+        request,
+        session,
+        owner_id,
+        mattermost_notice="Тестовое уведомление Mattermost доставлено.",
     )
 
 

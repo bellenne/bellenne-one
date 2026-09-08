@@ -47,4 +47,5 @@ Every persisted Proof event with level `error` or `critical` creates one durable
 notification outbox item. Delivery happens after the business transaction is
 committed, so an unavailable Mattermost server cannot roll back a Job or Worker
 state change. Successful events are intentionally not sent to avoid chat noise.
-Use **Сохранить и проверить** to send a test post before enabling notifications.
+After saving the webhook, use **Отправить тестовое уведомление** to verify delivery.
+The test uses the saved settings and does not save edits currently entered in the form.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import httpx
+import app.main as main_module
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -51,11 +52,11 @@ def test_mattermost_configuration_encrypts_webhook_and_never_renders_it(
             "webhook_url": MATTERMOST_URL,
             "channel": "production-alerts",
             "enabled": "on",
-            "action": "save",
         },
     )
     assert response.status_code == 200
     assert "Настройки Mattermost сохранены" in response.text
+    assert "Отправить тестовое уведомление" in response.text
     assert MATTERMOST_URL not in response.text
     assert "private-webhook-value" not in response.text
     with session_factory() as session:
@@ -68,6 +69,53 @@ def test_mattermost_configuration_encrypts_webhook_and_never_renders_it(
             credential_cipher_for_settings(settings), integration.credentials_encrypted
         )
         assert stored["webhook_url"] == MATTERMOST_URL
+
+
+def test_standalone_mattermost_test_uses_saved_configuration(
+    client: TestClient, identity_headers: dict[str, str], monkeypatch
+) -> None:
+    add_mattermost()
+    delivered: dict[str, str] = {}
+
+    def fake_post(_settings, webhook_url: str, channel: str, text: str) -> None:
+        delivered.update(webhook_url=webhook_url, channel=channel, text=text)
+
+    monkeypatch.setattr(main_module, "post_mattermost_message", fake_post)
+    response = client.post(
+        "/integrations/mattermost/test",
+        headers=identity_headers,
+        data={"csrf_token": "proof-csrf"},
+    )
+
+    assert response.status_code == 200
+    assert "Тестовое уведомление Mattermost доставлено" in response.text
+    assert delivered["webhook_url"] == MATTERMOST_URL
+    assert delivered["channel"] == "production-alerts"
+    assert "BellenneProof" in delivered["text"]
+    assert MATTERMOST_URL not in response.text
+    with session_factory() as session:
+        integration = session.scalar(select(ProofIntegration).where(
+            ProofIntegration.kind == "mattermost"
+        ))
+        assert integration.last_delivery_at is not None
+        assert integration.last_error_message is None
+        event = session.scalar(select(ProofEvent).where(
+            ProofEvent.event_type == "mattermost.test.sent"
+        ))
+        assert event is not None
+
+
+def test_mattermost_test_requires_saved_webhook(
+    client: TestClient, identity_headers: dict[str, str]
+) -> None:
+    response = client.post(
+        "/integrations/mattermost/test",
+        headers=identity_headers,
+        data={"csrf_token": "proof-csrf"},
+    )
+
+    assert response.status_code == 200
+    assert "Сначала сохраните Incoming Webhook URL Mattermost" in response.text
 
 
 def test_error_event_is_delivered_once_to_configured_mattermost(client: TestClient) -> None:
