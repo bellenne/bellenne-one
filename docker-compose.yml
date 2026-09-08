@@ -21,6 +21,8 @@ services:
         condition: service_healthy
       nest:
         condition: service_healthy
+      proof:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1/gateway-health"]
       interval: 30s
@@ -117,8 +119,31 @@ services:
     expose:
       - "8000"
 
+  proof:
+    build:
+      context: .
+      dockerfile: apps/proof/Dockerfile
+    container_name: bellenneone-proof
+    restart: unless-stopped
+    init: true
+    environment:
+      DATA_DIR: /data
+      PROOF_RESULT_DIR: /data/results
+      DATABASE_URL: sqlite:////data/bellenneproof.db
+      MODULE_PREFIX: /proof
+      APP_SECRET_KEY: "${APP_SECRET_KEY:-replace-this-secret-before-production}"
+      CREDENTIALS_ENCRYPTION_KEY: "${CREDENTIALS_ENCRYPTION_KEY:-}"
+      PROOF_API_DOCS_ENABLED: "${PROOF_API_DOCS_ENABLED:-false}"
+      PROOF_NOTIFICATION_ASYNC: "${PROOF_NOTIFICATION_ASYNC:-true}"
+      MATTERMOST_HTTP_TIMEOUT_SECONDS: "${MATTERMOST_HTTP_TIMEOUT_SECONDS:-10}"
+    volumes:
+      - proof_data:/data
+    expose:
+      - "8000"
+
 volumes:
   pulse_data:
   echo_data:
   vector_data:
   nest_data:
+  proof_data:

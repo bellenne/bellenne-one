@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 120" role="img" aria-labelledby="title desc">
+  <title id="title">BellenneProof</title><desc id="desc">BellenneProof production orchestration</desc>
+  <defs><linearGradient id="proofMark" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#E94D8A"/><stop offset="1" stop-color="#7B3CFF"/></linearGradient></defs>
+  <g fill="none" stroke="url(#proofMark)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 30h35l10 11h47v52H9z"/><path d="M25 59h60M25 75h39"/><circle cx="22" cy="20" r="6"/><circle cx="89" cy="20" r="6"/><path d="M28 20h55"/></g>
+  <text x="128" y="77" fill="#F8FAFC" font-family="Inter,Segoe UI,sans-serif" font-size="58" font-weight="600">Bellenne<tspan fill="#E94D8A">Proof</tspan></text>
+</svg>

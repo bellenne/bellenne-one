@@ -7,5 +7,7 @@
 **/tests
 !apps/nest/tests
 !apps/nest/tests/**
+!apps/proof/tests
+!apps/proof/tests/**
 **/data
 **/outputs

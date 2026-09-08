@@ -1,13 +1,13 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="page-header shell-enter">
-  <div><p class="shell-eyebrow">Единая экосистема</p><h1 class="page-title">BellenneOne</h1><p class="page-subtitle">Четыре рабочих модуля, один аккаунт и единый адрес.</p></div>
+  <div><p class="shell-eyebrow">Единая экосистема</p><h1 class="page-title">BellenneOne</h1><p class="page-subtitle">Пять рабочих модулей, один аккаунт и единый адрес.</p></div>
   <a class="button button-secondary" href="/settings">{{ icon('settings', 18) }}<span>Настройки модулей</span></a>
 </div>
 
 <section class="platform-summary card shell-enter" aria-label="Состояние платформы">
   <div><span class="badge badge-positive">Доступ подтверждён</span><h2 class="section-title">Добро пожаловать, {{ username }}</h2><p class="section-copy">Выберите модуль. Переходы не требуют повторного входа.</p></div>
-  <div class="platform-facts"><span><strong>4</strong> модуля</span><span><strong>1</strong> аккаунт</span><span><strong>1</strong> порт</span></div>
+  <div class="platform-facts"><span><strong>5</strong> модулей</span><span><strong>1</strong> аккаунт</span><span><strong>1</strong> порт</span></div>
 </section>
 
 <section class="product-grid shell-enter" aria-label="Модули BellenneOne">
@@ -30,6 +30,11 @@
     <div class="product-card-head"><span class="product-icon">{{ icon('nest', 22) }}</span><span class="badge badge-neutral">Оптимизация раскладки</span></div>
     <div><h2 class="section-title">BellenneNest</h2><p class="section-copy">API расчёта раскладки, конфигурация алгоритма и история запросов.</p></div>
     <a class="button button-secondary" href="/nest/">Открыть Nest</a>
+  </article>
+  <article class="card product-card product-proof">
+    <div class="product-card-head"><span class="product-icon">{{ icon('proof', 22) }}</span><span class="badge badge-neutral">Production control</span></div>
+    <div><h2 class="section-title">BellenneProof</h2><p class="section-copy">Очередь цветопроб, Workers, результаты и доставка в amoCRM.</p></div>
+    <a class="button button-secondary" href="/proof/">Открыть Proof</a>
   </article>
 </section>
 {% endblock %}

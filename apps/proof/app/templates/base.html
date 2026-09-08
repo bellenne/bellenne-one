@@ -1,0 +1,60 @@
+{% from "icons.html" import icon %}
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>{{ title }} · BellenneProof</title>
+  <link rel="icon" href="{{ module_prefix }}/static/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ module_prefix }}/static/theme.css">
+  <link rel="stylesheet" href="{{ module_prefix }}/static/app.css">
+  <link rel="stylesheet" href="{{ module_prefix }}/static/proof.css">
+</head>
+<body{% if active in ('overview','jobs','queue','workers','results','logs') %} data-proof-live{% endif %}>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Навигация BellenneProof">
+      <a class="module-brand" href="{{ module_prefix }}/" aria-label="BellenneProof — обзор"><img class="module-brand-logo" src="{{ module_prefix }}/static/logo.svg" alt="BellenneProof"><small>Production orchestration</small></a>
+      <nav class="sidebar-nav">
+        <a class="sidebar-item" href="/">{{ icon('dashboard') }}<span>BellenneOne</span></a>
+        <a class="sidebar-item" href="/pulse/">{{ icon('pulse') }}<span>BellennePulse</span></a>
+        <a class="sidebar-item" href="/echo/">{{ icon('echo') }}<span>BellenneEcho</span></a>
+        <a class="sidebar-item" href="/vector/">{{ icon('vector') }}<span>BellenneVector</span></a>
+        <a class="sidebar-item" href="/nest/">{{ icon('nest') }}<span>BellenneNest</span></a>
+        <a class="sidebar-item product-current" href="{{ module_prefix }}/">{{ icon('proof') }}<span>BellenneProof</span></a>
+        <a class="sidebar-item" href="/settings">{{ icon('settings') }}<span>Настройки One</span></a>
+        <span class="sidebar-divider" aria-hidden="true"></span>
+        <a class="sidebar-item {{ 'is-active' if active == 'overview' else '' }}" href="{{ module_prefix }}/">{{ icon('dashboard') }}<span>Обзор</span></a>
+        <a class="sidebar-item {{ 'is-active' if active == 'jobs' else '' }}" href="{{ module_prefix }}/jobs">{{ icon('jobs') }}<span>Задания</span></a>
+        <a class="sidebar-item {{ 'is-active' if active == 'queue' else '' }}" href="{{ module_prefix }}/queue">{{ icon('queue') }}<span>Очередь</span></a>
+        <a class="sidebar-item {{ 'is-active' if active == 'workers' else '' }}" href="{{ module_prefix }}/workers">{{ icon('workers') }}<span>Workers</span></a>
+        <a class="sidebar-item {{ 'is-active' if active == 'results' else '' }}" href="{{ module_prefix }}/results">{{ icon('results') }}<span>Результаты</span></a>
+        <a class="sidebar-item {{ 'is-active' if active == 'presets' else '' }}" href="{{ module_prefix }}/presets">{{ icon('presets') }}<span>Presets</span></a>
+        <a class="sidebar-item {{ 'is-active' if active == 'integrations' else '' }}" href="{{ module_prefix }}/integrations">{{ icon('integrations') }}<span>Интеграции</span></a>
+        <a class="sidebar-item {{ 'is-active' if active == 'logs' else '' }}" href="{{ module_prefix }}/logs">{{ icon('logs') }}<span>Логи</span></a>
+        <a class="sidebar-item {{ 'is-active' if active == 'settings' else '' }}" href="{{ module_prefix }}/settings">{{ icon('settings') }}<span>Настройки</span></a>
+      </nav>
+      <div class="sidebar-pulse" aria-label="Состояние Proof Core">
+        <div class="pulse-copy"><span class="pulse-status-dot"></span><span>Proof Core активен</span></div>
+        <svg class="proof-signal" viewBox="0 0 180 52" role="img" aria-label="Поток Job, Worker и Result">
+          <path class="proof-track" d="M8 26H172"/><circle class="proof-node" cx="18" cy="26" r="5"/><circle class="proof-node" cx="90" cy="26" r="5"/><circle class="proof-node" cx="162" cy="26" r="5"/><path class="proof-flow" pathLength="1" d="M18 26H162"/>
+        </svg>
+      </div>
+      <div class="sidebar-foot">BellenneOne · Proof</div>
+    </aside>
+    <div class="main-shell">
+      <header class="topbar">
+        <button class="button button-secondary button-small sidebar-toggle" type="button" data-sidebar-toggle>{{ icon('menu', 18) }}<span>Меню</span></button>
+        <span class="product-context">BellenneProof</span><div class="topbar-spacer"></div>
+        <div class="user-menu" data-user-menu>
+          <button class="user-menu-trigger" type="button" aria-haspopup="menu" aria-expanded="false" data-user-menu-trigger><span class="user-avatar">{{ icon('user', 18) }}</span><span class="user-menu-label">{{ username }}</span>{{ icon('chevron', 16) }}</button>
+          <div class="user-menu-panel" role="menu" data-user-menu-panel hidden><div class="user-menu-identity"><span class="user-avatar">{{ icon('user', 18) }}</span><div><span class="field-label">Единый аккаунт</span><strong>{{ username }}</strong></div></div><form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ platform_csrf_token }}"><button class="user-menu-action" type="submit" role="menuitem">{{ icon('logout', 18) }}<span>Выйти</span></button></form></div>
+        </div>
+      </header>
+      <main class="main-content module-content">{% block content %}{% endblock %}</main>
+    </div>
+  </div>
+  <script src="{{ module_prefix }}/static/app.js" defer></script>
+  <script src="{{ module_prefix }}/static/proof.js" defer></script>
+</body>
+</html>

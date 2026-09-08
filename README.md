@@ -1,6 +1,6 @@
 # BellenneOne
 
-BellenneOne объединяет четыре самостоятельных продукта за одним адресом и одной авторизацией:
+BellenneOne объединяет пять самостоятельных продуктов за одним адресом и одной авторизацией:
 
 - `/` — отдельная оболочка BellenneOne с описанием модулей;
 - `/settings` — общий центр настроек;
@@ -8,8 +8,9 @@ BellenneOne объединяет четыре самостоятельных п�
 - `/echo/` — BellenneEcho;
 - `/vector/` — BellenneVector;
 - `/nest/` — BellenneNest, конфигурация и аудит API раскладки.
+- `/proof/` — BellenneProof, оркестрация производственных заданий, Workers и доставки результатов.
 
-Снаружи публикуется только nginx-шлюз. Shell и четыре продуктовых контейнера доступны только во внутренней Docker-сети.
+Снаружи публикуется только nginx-шлюз. Shell и пять продуктовых контейнеров доступны только во внутренней Docker-сети.
 
 ## Запуск
 
@@ -34,6 +35,7 @@ docker compose up -d --build
 - `echo_data` — кабинеты, шаблоны, очередь и журнал Echo;
 - `vector_data` — рекламная статистика и ключ шифрования Vector.
 - `nest_data` — пользовательские конфигурации Nest и история API-запросов.
+- `proof_data` — очередь, события, настройки интеграций и неизменяемые результаты Proof.
 
 Идентификатор единого аккаунта передаётся модулям через доверенные заголовки nginx. Прямой внешний доступ к контейнерам модулей не публикуется.
 
@@ -43,10 +45,24 @@ docker compose up -d --build
 
 ```powershell
 docker compose ps
-docker compose logs --tail 100 gateway shell pulse echo vector nest
+docker compose logs --tail 100 gateway shell pulse echo vector nest proof
 ```
 
-Все шесть сервисов должны иметь состояние `healthy`. Проверка шлюза доступна на `/gateway-health`.
+Все семь сервисов должны иметь состояние `healthy`. Проверка шлюза доступна на `/gateway-health`.
+
+## BellenneProof
+
+Панель Proof находится по адресу `/proof/`. Входящие webhook amoCRM и Worker API доступны через gateway, но защищены отдельными секретами и не используют браузерную сессию:
+
+```text
+POST /proof/webhooks/amocrm/<индивидуальный webhook secret>
+POST /proof/api/v1/workers/heartbeat
+POST /proof/api/v1/jobs/claim
+```
+
+Каждый Worker получает собственный токен в Proof → Workers. Полное значение показывается один раз. Точные контракты и пример цикла mock Worker описаны в [apps/proof/README.md](apps/proof/README.md).
+
+В Proof → Интеграции можно подключить Mattermost Incoming Webhook. Бот отправляет в выбранный канал только ошибки уровней Error и Critical; URL webhook хранится в зашифрованном виде.
 
 ## BellenneNest API
 

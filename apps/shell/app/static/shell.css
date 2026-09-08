@@ -204,6 +204,10 @@
   --module-accent: var(--bp-violet-secondary);
 }
 
+.product-proof {
+  --module-accent: var(--bp-proof);
+}
+
 .product-card-head,
 .settings-card-head,
 .settings-actions {
