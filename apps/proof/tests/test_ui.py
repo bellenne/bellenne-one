@@ -41,8 +41,27 @@ def test_worker_registration_shows_one_time_connection_configuration(
     assert response.status_code == 200
     assert "PROOF_CORE_URL=http://proof:8000" in response.text
     assert "PROOF_WORKER_TOKEN=proof_worker_" in response.text
+    assert "data-proof-token-reveal" in response.text
+    assert "data-proof-live" not in response.text
     refresh = client.get("/workers", headers=identity_headers)
     assert "PROOF_WORKER_TOKEN=proof_worker_" not in refresh.text
+    assert "data-proof-live" in refresh.text
+
+
+def test_token_rotation_reveal_cannot_live_refresh_the_post_route(
+    client: TestClient, identity_headers: dict[str, str]
+) -> None:
+    setup = bootstrap()
+    response = client.post(
+        f"/workers/{setup['worker_id']}/rotate-token",
+        headers=identity_headers,
+        data={"csrf_token": "proof-csrf"},
+    )
+
+    assert response.status_code == 200
+    assert "PROOF_WORKER_TOKEN=proof_worker_" in response.text
+    assert "data-proof-token-reveal" in response.text
+    assert "data-proof-live" not in response.text
 
 
 def test_job_details_show_processing_delivery_worker_and_timeline(

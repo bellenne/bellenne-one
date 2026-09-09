@@ -11,7 +11,7 @@
   <link rel="stylesheet" href="{{ module_prefix }}/static/app.css">
   <link rel="stylesheet" href="{{ module_prefix }}/static/proof.css">
 </head>
-<body{% if active in ('overview','jobs','queue','workers','results','logs') %} data-proof-live{% endif %}>
+<body{% if generated_token|default('') %} data-proof-token-reveal{% elif active in ('overview','jobs','queue','workers','results','logs') %} data-proof-live{% endif %}>
   <div class="app-shell">
     <aside class="sidebar" aria-label="Навигация BellenneProof">
       <a class="module-brand" href="{{ module_prefix }}/" aria-label="BellenneProof — обзор"><img class="module-brand-logo" src="{{ module_prefix }}/static/logo.svg" alt="BellenneProof"><small>Production orchestration</small></a>

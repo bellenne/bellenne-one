@@ -1,7 +1,11 @@
 (() => {
   const root = document.body;
-  if (!root.hasAttribute("data-proof-live") || document.visibilityState === "hidden") return;
   const prefix = window.location.pathname.startsWith("/proof") ? "/proof" : "";
+  if (root.hasAttribute("data-proof-token-reveal")) {
+    window.history.replaceState(null, "", `${prefix}/workers`);
+    return;
+  }
+  if (!root.hasAttribute("data-proof-live") || document.visibilityState === "hidden") return;
   let knownVersion = null;
   const check = async () => {
     if (document.visibilityState === "hidden") return;
