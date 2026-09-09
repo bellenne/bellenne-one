@@ -145,6 +145,15 @@ def test_ui_saves_exactly_three_selected_amocrm_fields(
     identity_headers: dict[str, str],
 ) -> None:
     setup = bootstrap()
+    with session_factory() as session:
+        integration = session.get(ProofIntegration, int(setup["integration_id"]))
+        configuration = AmoIntegrationConfiguration(fields_cache=[
+            {"id": 1001, "name": "Путь к папке заказа", "type": "text"},
+            {"id": 1002, "name": "Номер макета", "type": "numeric"},
+            {"id": 1003, "name": "Номер заказа", "type": "text"},
+        ])
+        integration.configuration_json = json_dump(configuration.model_dump(mode="json"))
+        session.commit()
     response = client.post(
         "/integrations/amocrm/webhook",
         headers=identity_headers,
@@ -159,6 +168,8 @@ def test_ui_saves_exactly_three_selected_amocrm_fields(
         },
     )
     assert response.status_code == 200
+    assert '<select class="select" id="source-path-field"' in response.text
+    assert "Путь к папке заказа · ID 1001 · text" in response.text
     with session_factory() as session:
         integration = session.get(ProofIntegration, int(setup["integration_id"]))
         configuration = AmoIntegrationConfiguration.model_validate(

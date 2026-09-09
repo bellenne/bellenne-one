@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-
 TEST_DATA_DIR = Path(tempfile.mkdtemp(prefix="bellenneproof-tests-"))
 os.environ["DATA_DIR"] = str(TEST_DATA_DIR)
 os.environ["PROOF_RESULT_DIR"] = str(TEST_DATA_DIR / "results")
