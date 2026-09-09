@@ -124,6 +124,13 @@ textarea { min-height: calc(var(--bp-space-12) * 3); resize: vertical; }
 
 .preset-form,
 .integration-form { padding: var(--bp-space-5); display: grid; gap: var(--bp-space-4); }
+.integration-form > .card-header {
+  padding: var(--bp-space-4) 0 var(--bp-space-3);
+  border-top: 1px solid var(--bp-border);
+  border-bottom: 1px solid var(--bp-border);
+}
+.integration-form > .detail-actions { margin-bottom: 0; align-items: center; }
+.integration-form > .detail-actions small { color: var(--bp-text-muted); }
 .preset-grid,
 .settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--bp-space-4); }
 .preset-card { overflow: hidden; }

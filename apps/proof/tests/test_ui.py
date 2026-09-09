@@ -25,6 +25,26 @@ def test_all_sections_render_inside_bellenne_shell(
         assert "/pulse/" in response.text and "/nest/" in response.text
 
 
+def test_worker_registration_shows_one_time_connection_configuration(
+    client: TestClient, identity_headers: dict[str, str]
+) -> None:
+    response = client.post(
+        "/workers/register",
+        headers=identity_headers,
+        data={
+            "csrf_token": "proof-csrf",
+            "name": "PRODUCTION-WORKER",
+            "heartbeat_timeout_seconds": "120",
+        },
+    )
+
+    assert response.status_code == 200
+    assert "PROOF_CORE_URL=http://proof:8000" in response.text
+    assert "PROOF_WORKER_TOKEN=proof_worker_" in response.text
+    refresh = client.get("/workers", headers=identity_headers)
+    assert "PROOF_WORKER_TOKEN=proof_worker_" not in refresh.text
+
+
 def test_job_details_show_processing_delivery_worker_and_timeline(
     client: TestClient, identity_headers: dict[str, str]
 ) -> None:

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+import httpx
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -21,6 +22,14 @@ from sqlalchemy import event as sqlalchemy_event, func, or_, select
 from sqlalchemy.orm import Session
 
 from .config import AppSettings
+from .amocrm import (
+    AmoClient,
+    AmoFieldMapping,
+    AmoIntegrationConfiguration,
+    build_job_input,
+    parse_optional_id,
+    trigger_matches,
+)
 from .database import build_engine, build_session_factory, init_database
 from .models import (
     ProofEvent,
@@ -53,6 +62,7 @@ from .services import (
     credential_cipher_for_settings,
     deliver_result,
     dispatch_pending_mattermost,
+    dispatch_worker_wakeups,
     json_dump,
     json_load,
     latest_active_presets,
@@ -67,6 +77,8 @@ from .services import (
     sanitized_message,
     store_result,
     transition_processing,
+    update_worker_configuration,
+    worker_configuration,
     worker_is_online,
 )
 
@@ -76,12 +88,20 @@ settings = AppSettings.from_env()
 engine = build_engine(settings)
 session_factory = build_session_factory(engine)
 templates = Jinja2Templates(directory="app/templates")
-notification_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="proof-mattermost")
+notification_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="proof-integrations")
 
 
 def schedule_notifications_after_commit(session: Session) -> None:
     if session.info.pop("proof_notification_pending", False) and settings.notification_async_enabled:
         notification_executor.submit(dispatch_pending_mattermost, session_factory, settings)
+    wake_request = session.info.pop("proof_worker_wake_pending", None)
+    if wake_request:
+        notification_executor.submit(
+            dispatch_worker_wakeups,
+            session_factory,
+            wake_request["owner_id"],
+            wake_request["job_id"],
+        )
 
 
 sqlalchemy_event.listen(session_factory.class_, "after_commit", schedule_notifications_after_commit)
@@ -208,6 +228,8 @@ def worker_payload(worker: ProofWorker) -> dict[str, Any]:
         "last_heartbeat_at": worker.last_heartbeat_at,
         "heartbeat_timeout_seconds": worker.heartbeat_timeout_seconds,
         "capabilities": json_load(worker.capabilities_json, []),
+        "configuration_version": worker.configuration_version,
+        "configuration": worker_configuration(worker),
     }
 
 
@@ -243,7 +265,6 @@ def parse_amocrm_form_payload(raw_payload: dict[str, Any]) -> WebhookRequest:
     entity_type = ""
     action = ""
     entity_id = ""
-    event_time = ""
     for key, value in raw_payload.items():
         match = re.match(r"^([a-z_]+)\[([a-z_]+)]\[\d+]\[([a-z_]+)]$", key)
         if not match:
@@ -251,12 +272,13 @@ def parse_amocrm_form_payload(raw_payload: dict[str, Any]) -> WebhookRequest:
         candidate_entity, candidate_action, field = match.groups()
         if field == "id" and not entity_id:
             entity_type, action, entity_id = candidate_entity, candidate_action, str(value)
-        if field in {"datetime", "last_modified", "updated_at"} and not event_time:
-            event_time = str(value)
     if not entity_type or not action or not entity_id:
         raise ValueError("Unsupported amoCRM form payload: entity, action, and id were not found.")
-    account_id = str(raw_payload.get("account[id]", ""))
-    idempotency_source = "|".join((account_id, entity_type, action, entity_id, event_time))
+    idempotency_source = json.dumps(
+        sorted((str(key), str(value)) for key, value in raw_payload.items()),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     event_id = hashlib.sha256(idempotency_source.encode("utf-8")).hexdigest()
     return WebhookRequest(
         event_id=event_id,
@@ -394,7 +416,9 @@ def retry_job_ui(job_id: str, request: Request, csrf_token: str = Form(...), ses
 def retry_delivery_ui(job_id: str, request: Request, csrf_token: str = Form(...), session: Session = Depends(get_db)):
     owner_id, _ = require_ui_identity(request)
     verify_csrf(request, csrf_token)
-    retry_delivery(session, settings, owned_job(session, owner_id, job_id))
+    job = owned_job(session, owner_id, job_id)
+    delivered = retry_delivery(session, settings, job)
+    update_amocrm_after_delivery(session, job, delivered=delivered)
     session.commit()
     return RedirectResponse(f"{settings.module_prefix}/jobs/{job_id}", status_code=303)
 
@@ -438,6 +462,7 @@ def workers_page(request: Request, session: Session = Depends(get_db)) -> HTMLRe
     return render(
         request, "workers.html", active="workers", title="Workers", workers=workers,
         generated_token=generated_token,
+        worker_configs={worker.id: worker_configuration(worker) for worker in workers},
     )
 
 
@@ -457,9 +482,69 @@ def register_worker_ui(
         request, "workers.html", active="workers", title="Workers",
         workers=list(session.scalars(select(ProofWorker).where(ProofWorker.owner_external_user_id == owner_id))),
         generated_token=raw_token, generated_worker=worker,
+        worker_configs={row.id: worker_configuration(row) for row in session.scalars(
+            select(ProofWorker).where(ProofWorker.owner_external_user_id == owner_id)
+        )},
     )
     response.headers["Cache-Control"] = "no-store"
     return response
+
+
+@app.post("/workers/{worker_id}/settings")
+def configure_worker_ui(
+    worker_id: str,
+    request: Request,
+    csrf_token: str = Form(...),
+    callback_url: str = Form(""),
+    unc_prefix: str = Form(""),
+    local_root: str = Form(""),
+    heartbeat_interval: float = Form(...),
+    poll_interval: float = Form(...),
+    retry_initial_seconds: float = Form(...),
+    retry_max_seconds: float = Form(...),
+    storage_retry_limit: int = Form(...),
+    file_not_found_retry_limit: int = Form(...),
+    health_interval: float = Form(...),
+    health_max_age: float = Form(...),
+    wake_timeout_seconds: float = Form(...),
+    session: Session = Depends(get_db),
+) -> HTMLResponse:
+    owner_id, _ = require_ui_identity(request)
+    verify_csrf(request, csrf_token)
+    worker = session.get(ProofWorker, worker_id)
+    if worker is None or worker.owner_external_user_id != owner_id:
+        raise HTTPException(status_code=404, detail="Worker not found.")
+    if callback_url.strip():
+        valid_webhook_url(callback_url)
+    try:
+        update_worker_configuration(
+            worker,
+            callback_url=callback_url,
+            unc_prefix=unc_prefix,
+            local_root=local_root,
+            heartbeat_interval=heartbeat_interval,
+            poll_interval=poll_interval,
+            retry_initial_seconds=retry_initial_seconds,
+            retry_max_seconds=retry_max_seconds,
+            storage_retry_limit=storage_retry_limit,
+            file_not_found_retry_limit=file_not_found_retry_limit,
+            health_interval=health_interval,
+            health_max_age=health_max_age,
+            wake_timeout_seconds=wake_timeout_seconds,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    add_event(
+        session,
+        owner_external_user_id=owner_id,
+        worker_id=worker.id,
+        event_type="worker.configuration.updated",
+        source="ui",
+        message=f"Runtime configuration updated for Worker {worker.name}.",
+        details={"configuration_version": worker.configuration_version},
+    )
+    session.commit()
+    return RedirectResponse(f"{settings.module_prefix}/workers", status_code=303)
 
 
 @app.post("/workers/{worker_id}/rotate-token")
@@ -481,6 +566,9 @@ def rotate_worker_token_ui(
         request, "workers.html", active="workers", title="Workers",
         workers=list(session.scalars(select(ProofWorker).where(ProofWorker.owner_external_user_id == owner_id))),
         generated_token=raw_token, generated_worker=worker,
+        worker_configs={row.id: worker_configuration(row) for row in session.scalars(
+            select(ProofWorker).where(ProofWorker.owner_external_user_id == owner_id)
+        )},
     )
     response.headers["Cache-Control"] = "no-store"
     return response
@@ -587,6 +675,8 @@ def render_integrations_page(
     webhook_secret: str = "",
     mattermost_notice: str = "",
     mattermost_error: str = "",
+    integration_notice: str = "",
+    integration_error: str = "",
 ) -> HTMLResponse:
     integration = session.scalar(select(ProofIntegration).where(
         ProofIntegration.owner_external_user_id == owner_id,
@@ -599,6 +689,12 @@ def render_integrations_page(
     mattermost_webhook_url, mattermost_channel = (
         mattermost_settings(mattermost, settings) if mattermost else ("", "")
     )
+    try:
+        amo_config = AmoIntegrationConfiguration.model_validate(
+            json_load(integration.configuration_json, {}) if integration else {}
+        )
+    except ValidationError:
+        amo_config = AmoIntegrationConfiguration()
     response = render(
         request, "integrations.html", active="integrations", title="Интеграции",
         integration=integration, presets=latest_active_presets(session, owner_id),
@@ -610,6 +706,11 @@ def render_integrations_page(
         mattermost_webhook_saved=bool(mattermost_webhook_url),
         mattermost_notice=mattermost_notice,
         mattermost_error=mattermost_error,
+        integration_notice=integration_notice,
+        integration_error=integration_error,
+        amo_config=amo_config,
+        amo_fields=amo_config.fields_cache,
+        amo_statuses=amo_config.statuses_cache,
     )
     response.headers["Cache-Control"] = "no-store"
     return response
@@ -629,7 +730,22 @@ def configure_amocrm_ui(
     csrf_token: str = Form(...),
     trigger_events: str = Form(...),
     default_preset_id: int = Form(...),
-    delivery_url: str = Form(...),
+    delivery_url: str = Form(""),
+    api_base_url: str = Form(""),
+    api_timeout_seconds: str = Form(""),
+    incoming_pipeline_id: str = Form(""),
+    incoming_status_id: str = Form(""),
+    queued_status_id: str = Form(""),
+    completed_status_id: str = Form(""),
+    failed_status_id: str = Form(""),
+    delivery_mode: str = Form("amocrm_attachment"),
+    source_path_field_id: str = Form(""),
+    layout_number_field_id: str = Form(""),
+    third_field_id: str = Form(""),
+    third_target: str = Form("order_number"),
+    clear_field_one_id: str = Form(""),
+    clear_field_two_id: str = Form(""),
+    clear_field_ids: str = Form(""),
     access_token: str = Form(""),
     enabled: str | None = Form(None),
     rotate_webhook_secret: str | None = Form(None),
@@ -668,6 +784,62 @@ def configure_amocrm_ui(
         integration.credentials_encrypted = encrypt_secret(
             credential_cipher_for_settings(settings), {"access_token": access_token}
         )
+    previous_config = json_load(integration.configuration_json, {})
+    try:
+        timeout_value = float(api_timeout_seconds) if api_timeout_seconds.strip() else None
+        mappings = []
+        for target, raw_field_id in (
+            ("source_path", source_path_field_id),
+            ("layout_number", layout_number_field_id),
+            (third_target, third_field_id),
+        ):
+            field_id = parse_optional_id(raw_field_id)
+            if field_id:
+                mappings.append(AmoFieldMapping(target=target, field_id=field_id))
+        raw_clear_fields = (
+            [clear_field_one_id, clear_field_two_id]
+            if clear_field_one_id.strip() or clear_field_two_id.strip()
+            else clear_field_ids.split(",")
+        )
+        cleared = [parse_optional_id(item) for item in raw_clear_fields]
+        amo_config = AmoIntegrationConfiguration(
+            api_base_url=api_base_url,
+            api_timeout_seconds=timeout_value,
+            incoming_pipeline_id=parse_optional_id(incoming_pipeline_id),
+            incoming_status_id=parse_optional_id(incoming_status_id),
+            queued_status_id=parse_optional_id(queued_status_id),
+            completed_status_id=parse_optional_id(completed_status_id),
+            failed_status_id=parse_optional_id(failed_status_id),
+            delivery_mode=delivery_mode,
+            mappings=mappings,
+            clear_field_ids=[item for item in cleared if item is not None],
+            fields_cache=previous_config.get("fields_cache", []),
+            statuses_cache=previous_config.get("statuses_cache", []),
+        )
+        if enabled == "on":
+            if not amo_config.api_base_url or amo_config.api_timeout_seconds is None:
+                raise ValueError("Для включения интеграции укажите URL и HTTP timeout amoCRM.")
+            if not amo_config.has_required_mappings():
+                raise ValueError(
+                    "Для включения интеграции выберите ровно три разных поля amoCRM: "
+                    "путь заказа, номер макета и третье поле."
+                )
+            if amo_config.queued_status_id is None or amo_config.completed_status_id is None:
+                raise ValueError(
+                    "Для включения интеграции выберите статусы очереди и завершения."
+                )
+            if amo_config.delivery_mode == "amocrm_attachment":
+                if len(amo_config.clear_field_ids) != 2:
+                    raise ValueError(
+                        "Для прямой доставки выберите два из трёх полей для очистки."
+                    )
+            elif not integration.delivery_url:
+                raise ValueError("Для webhook-доставки укажите endpoint adapter.")
+            if not access_token and not integration.credentials_encrypted:
+                raise ValueError("Для включения интеграции сохраните Access token amoCRM.")
+    except (ValueError, ValidationError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    integration.configuration_json = json_dump(amo_config.model_dump(mode="json"))
     session.flush()
     add_event(
         session, owner_external_user_id=owner_id, integration_id=integration.id,
@@ -676,6 +848,61 @@ def configure_amocrm_ui(
     session.commit()
     return render_integrations_page(
         request, session, owner_id, webhook_secret=raw_secret
+    )
+
+
+@app.post("/integrations/amocrm/catalog")
+def load_amocrm_catalog_ui(
+    request: Request,
+    csrf_token: str = Form(...),
+    session: Session = Depends(get_db),
+) -> HTMLResponse:
+    owner_id, _ = require_ui_identity(request)
+    verify_csrf(request, csrf_token)
+    integration = session.scalar(select(ProofIntegration).where(
+        ProofIntegration.owner_external_user_id == owner_id,
+        ProofIntegration.kind == "amocrm",
+    ))
+    if integration is None:
+        return render_integrations_page(
+            request, session, owner_id,
+            integration_error="Сначала сохраните подключение amoCRM.",
+        )
+    try:
+        configuration = AmoIntegrationConfiguration.model_validate(
+            json_load(integration.configuration_json, {})
+        )
+        credentials = decrypt_secret(
+            credential_cipher_for_settings(settings), integration.credentials_encrypted
+        )
+        with AmoClient(
+            configuration.api_base_url,
+            credentials.get("access_token", ""),
+            timeout_seconds=configuration.api_timeout_seconds,
+        ) as client:
+            fields, statuses = client.load_catalog()
+    except (ValueError, ValidationError, RuntimeError, httpx.HTTPError) as exc:
+        return render_integrations_page(
+            request, session, owner_id,
+            integration_error=sanitized_message(str(exc)),
+        )
+    configuration.fields_cache = fields
+    configuration.statuses_cache = statuses
+    integration.configuration_json = json_dump(configuration.model_dump(mode="json"))
+    integration.last_incoming_at = utc_now()
+    add_event(
+        session,
+        owner_external_user_id=owner_id,
+        integration_id=integration.id,
+        event_type="amocrm.catalog.loaded",
+        source="integration",
+        message="amoCRM custom fields and pipeline statuses loaded.",
+        details={"fields": len(fields), "statuses": len(statuses)},
+    )
+    session.commit()
+    return render_integrations_page(
+        request, session, owner_id,
+        integration_notice=f"Загружено полей: {len(fields)}, статусов: {len(statuses)}.",
     )
 
 
@@ -869,6 +1096,115 @@ def settings_page(request: Request, session: Session = Depends(get_db)) -> HTMLR
     )
 
 
+def amocrm_configuration(integration: ProofIntegration) -> AmoIntegrationConfiguration:
+    return AmoIntegrationConfiguration.model_validate(
+        json_load(integration.configuration_json, {})
+    )
+
+
+def amocrm_access_token(integration: ProofIntegration) -> str:
+    credentials = decrypt_secret(
+        credential_cipher_for_settings(settings), integration.credentials_encrypted
+    )
+    return credentials.get("access_token", "")
+
+
+def amocrm_status_payload(
+    configuration: AmoIntegrationConfiguration,
+    status_id: int,
+) -> dict[str, int]:
+    payload = {"status_id": status_id}
+    matching_status = next(
+        (item for item in configuration.statuses_cache if item.get("id") == status_id),
+        None,
+    )
+    if matching_status and isinstance(matching_status.get("pipeline_id"), int):
+        payload["pipeline_id"] = matching_status["pipeline_id"]
+    return payload
+
+
+def update_amocrm_job_status(
+    session: Session,
+    integration: ProofIntegration,
+    job: ProofJob,
+    configuration: AmoIntegrationConfiguration,
+    status_id: int | None,
+    *,
+    event_type: str,
+    message: str,
+) -> bool:
+    if status_id is None or job.crm_entity_type != "leads":
+        return True
+    try:
+        with AmoClient(
+            configuration.api_base_url,
+            amocrm_access_token(integration),
+            timeout_seconds=configuration.api_timeout_seconds,
+        ) as client:
+            client.update_lead(job.crm_entity_id, amocrm_status_payload(configuration, status_id))
+    except (ValueError, ValidationError, RuntimeError, httpx.HTTPError) as exc:
+        safe_error = sanitized_message(str(exc))
+        integration.last_error_at = utc_now()
+        integration.last_error_message = safe_error[:2000]
+        add_event(
+            session,
+            owner_external_user_id=job.owner_external_user_id,
+            job_id=job.id,
+            integration_id=integration.id,
+            event_type=f"{event_type}.failed",
+            source="integration",
+            level="error",
+            message=f"{message} Не удалось обновить amoCRM.",
+            error_code="AMOCRM_STATUS_UPDATE_FAILED",
+            details={"status_id": status_id, "error": safe_error},
+        )
+        return False
+    add_event(
+        session,
+        owner_external_user_id=job.owner_external_user_id,
+        job_id=job.id,
+        integration_id=integration.id,
+        event_type=event_type,
+        source="integration",
+        message=message,
+        details={"status_id": status_id},
+    )
+    return True
+
+
+def update_amocrm_after_delivery(
+    session: Session,
+    job: ProofJob,
+    *,
+    delivered: bool,
+) -> None:
+    integration = session.scalar(select(ProofIntegration).where(
+        ProofIntegration.owner_external_user_id == job.owner_external_user_id,
+        ProofIntegration.kind == "amocrm",
+    ))
+    if integration is None:
+        return
+    try:
+        configuration = amocrm_configuration(integration)
+    except ValidationError:
+        return
+    if delivered and configuration.delivery_mode == "amocrm_attachment":
+        return
+    update_amocrm_job_status(
+        session,
+        integration,
+        job,
+        configuration,
+        configuration.completed_status_id if delivered else configuration.failed_status_id,
+        event_type=("amocrm.lead.completed" if delivered else "amocrm.lead.delivery_failed"),
+        message=(
+            "Lead moved to the configured completed status."
+            if delivered
+            else "Lead moved to the configured failed status after delivery failure."
+        ),
+    )
+
+
 @app.post("/webhooks/amocrm/{webhook_secret}")
 async def amocrm_webhook(webhook_secret: str, request: Request, session: Session = Depends(get_db)) -> JSONResponse:
     integration = next((row for row in session.scalars(select(ProofIntegration).where(
@@ -877,7 +1213,8 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
     if integration is None:
         raise HTTPException(status_code=401, detail="Invalid webhook credential.")
     content_type = request.headers.get("content-type", "")
-    if "application/json" in content_type:
+    is_json_webhook = "application/json" in content_type
+    if is_json_webhook:
         raw_payload = await request.json()
     else:
         form = await request.form()
@@ -885,7 +1222,7 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
     try:
         payload = (
             WebhookRequest.model_validate(raw_payload)
-            if "application/json" in content_type
+            if is_json_webhook
             else parse_amocrm_form_payload(raw_payload)
         )
     except (ValidationError, ValueError) as exc:
@@ -909,13 +1246,74 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
     preset = session.get(ProofPreset, preset_id) if preset_id else None
     if preset is None or preset.owner_external_user_id != integration.owner_external_user_id:
         raise HTTPException(status_code=422, detail="Webhook has no valid Proof Preset.")
+    accepted_override: bool | None = None
+    ignored_message: str | None = None
+    input_payload = payload.input
+    crm_order_id = payload.crm_order_id
+    try:
+        configuration = amocrm_configuration(integration)
+        if not is_json_webhook:
+            if not configuration.has_required_mappings():
+                raise ValueError(
+                    "Для webhook amoCRM должны быть настроены ровно три поля сделки."
+                )
+            with AmoClient(
+                configuration.api_base_url,
+                amocrm_access_token(integration),
+                timeout_seconds=configuration.api_timeout_seconds,
+            ) as client:
+                lead = client.get_lead(payload.crm_entity_id)
+            accepted_override = trigger_matches(lead, configuration)
+            if accepted_override:
+                input_payload = build_job_input(lead, configuration)
+                crm_order_id = str(input_payload.get("order_number") or crm_order_id)
+            else:
+                ignored_message = (
+                    "Webhook amoCRM ignored: current lead pipeline/status does not match "
+                    "the configured trigger."
+                )
+    except (ValueError, ValidationError, RuntimeError, httpx.HTTPError) as exc:
+        safe_error = sanitized_message(str(exc))
+        integration.last_incoming_at = utc_now()
+        integration.last_error_at = utc_now()
+        integration.last_error_message = safe_error[:2000]
+        add_event(
+            session,
+            owner_external_user_id=integration.owner_external_user_id,
+            integration_id=integration.id,
+            event_type="amocrm.lead.read_failed",
+            source="integration",
+            level="error",
+            message="amoCRM lead could not be read for Job creation.",
+            error_code="AMOCRM_LEAD_READ_FAILED",
+            details={"crm_entity_id": payload.crm_entity_id, "error": safe_error},
+        )
+        session.commit()
+        raise HTTPException(status_code=502, detail="Не удалось получить данные сделки amoCRM.") from exc
     job, duplicate, accepted = create_job_from_webhook(
         session, integration, idempotency_key=payload.event_id, event_type=payload.event_type,
         crm_entity_type=payload.crm_entity_type, crm_entity_id=payload.crm_entity_id,
-        crm_order_id=payload.crm_order_id, preset=preset,
-        input_payload=payload.input, original_payload=raw_payload,
+        crm_order_id=crm_order_id, preset=preset,
+        input_payload=input_payload, original_payload=raw_payload,
+        accepted_override=accepted_override, ignored_message=ignored_message,
     )
+    if accepted and not duplicate and job is not None:
+        session.info["proof_worker_wake_pending"] = {
+            "owner_id": integration.owner_external_user_id,
+            "job_id": job.id,
+        }
     session.commit()
+    if accepted and not duplicate and job is not None:
+        update_amocrm_job_status(
+            session,
+            integration,
+            job,
+            configuration,
+            configuration.queued_status_id,
+            event_type="amocrm.lead.queued",
+            message="Lead moved to the configured queued status.",
+        )
+        session.commit()
     return JSONResponse(
         {"accepted": accepted, "duplicate": duplicate, "job_id": job.id if job else None},
         status_code=200 if duplicate or not accepted else 202,
@@ -1060,6 +1458,13 @@ def worker_complete(
 ) -> dict[str, Any]:
     job = require_owned_job(session, worker, job_id)
     if job.processing_status == "completed":
+        if job.delivery_status != "delivered":
+            if job.delivery_status == "failed":
+                delivered = retry_delivery(session, settings, job)
+            else:
+                delivered = deliver_result(session, settings, job)
+            update_amocrm_after_delivery(session, job, delivered=delivered)
+            session.commit()
         return job_payload(job)
     if not job.current_result_id:
         raise HTTPException(status_code=409, detail="Upload a Result before completing the Job.")
@@ -1068,7 +1473,8 @@ def worker_complete(
     job.progress = 100
     job.completed_at = utc_now()
     release_worker(worker)
-    deliver_result(session, settings, job)
+    delivered = deliver_result(session, settings, job)
+    update_amocrm_after_delivery(session, job, delivered=delivered)
     session.commit()
     return job_payload(job)
 
@@ -1092,5 +1498,24 @@ def worker_fail(
     worker.last_error_code = payload.error_code
     worker.last_error_message = sanitized_message(payload.message)
     release_worker(worker)
+    integration = session.scalar(select(ProofIntegration).where(
+        ProofIntegration.owner_external_user_id == job.owner_external_user_id,
+        ProofIntegration.kind == "amocrm",
+    ))
+    if integration is not None:
+        try:
+            configuration = amocrm_configuration(integration)
+        except ValidationError:
+            configuration = None
+        if configuration is not None:
+            update_amocrm_job_status(
+                session,
+                integration,
+                job,
+                configuration,
+                configuration.failed_status_id,
+                event_type="amocrm.lead.processing_failed",
+                message="Lead moved to the configured failed status after processing failure.",
+            )
     session.commit()
     return job_payload(job)

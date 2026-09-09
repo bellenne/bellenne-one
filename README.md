@@ -62,6 +62,10 @@ POST /proof/api/v1/jobs/claim
 
 Каждый Worker получает собственный токен в Proof → Workers. Полное значение показывается один раз. Точные контракты и пример цикла mock Worker описаны в [apps/proof/README.md](apps/proof/README.md).
 
+Для `BellenneProofWorker` на том же Docker-хосте используйте общую сеть `bellenneone_default` и адрес Core `http://proof:8000`. В репозитории Worker предусмотрен overlay `docker-compose.bellenne.yml`; внешний Worker подключается через публичный адрес вида `https://example.com/proof`. Суффикс `/api/v1` Worker добавляет самостоятельно.
+
+В Proof → Интеграции выбираются ровно три custom field amoCRM: полный UNC-путь заказа, номер макета и дополнительный идентификатор. Core получает webhook перехода статуса, заново читает сделку через API и не переносит в Job остальные custom fields. Соответствие UNC-префикса read-only mount настраивается отдельно для каждого Worker в Proof → Workers.
+
 В Proof → Интеграции можно подключить Mattermost Incoming Webhook. Бот отправляет в выбранный канал только ошибки уровней Error и Critical; URL webhook хранится в зашифрованном виде.
 
 ## BellenneNest API

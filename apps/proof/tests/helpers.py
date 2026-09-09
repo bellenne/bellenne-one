@@ -9,7 +9,7 @@ from app.main import settings
 
 def bootstrap(owner_id: int = 17, *, delivery_url: str = "mock://delivered") -> dict[str, object]:
     with session_factory() as session:
-        preset = create_preset(session, owner_id, "Production", {"contract": "worker-v1"})
+        preset = create_preset(session, owner_id, "Production", {})
         worker, worker_token = register_worker(session, owner_id, "WORKER-01", 60)
         webhook_secret = new_secret("proof_hook")
         prefix, last_four = secret_parts(webhook_secret)
@@ -18,6 +18,7 @@ def bootstrap(owner_id: int = 17, *, delivery_url: str = "mock://delivered") -> 
             kind="amocrm",
             enabled=True,
             trigger_events_json='["proof.requested","leads.status"]',
+            configuration_json='{"delivery_mode":"webhook"}',
             default_preset_id=preset.id,
             delivery_url=delivery_url,
             credentials_encrypted=encrypt_secret(
@@ -50,5 +51,11 @@ def webhook_payload(preset_id: int | None = None) -> dict[str, object]:
         "crm_entity_id": "7654321",
         "crm_order_id": "ORDER-42",
         "preset_id": preset_id,
-        "input": {"source_file": "design.tif"},
+        "input": {
+            "source_path": "orders/ORDER-42",
+            "layout_number": 3,
+            "order_number": "ORDER-42",
+            "public_id": "CRM-7654321",
+            "metadata": {},
+        },
     }

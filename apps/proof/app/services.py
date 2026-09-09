@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import os
 import re
+import shutil
+import time
+import zipfile
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -13,6 +18,7 @@ from fastapi import HTTPException, UploadFile, status
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
 
+from .amocrm import AmoClient, AmoIntegrationConfiguration
 from .config import AppSettings
 from .models import (
     ProofEvent,
@@ -21,6 +27,7 @@ from .models import (
     ProofNotificationDelivery,
     ProofPreset,
     ProofResult,
+    ProofResultDelivery,
     ProofWorker,
     WebhookReceipt,
     utc_now,
@@ -43,6 +50,18 @@ PROCESSING_LABELS = {
 DELIVERY_LABELS = {
     "pending": "Ожидает доставки", "delivering": "Доставляется",
     "delivered": "Доставлено", "failed": "Ошибка доставки", "retrying": "Повторная доставка",
+}
+
+WORKER_RUNTIME_DEFAULTS = {
+    "heartbeat_interval": 30,
+    "poll_interval": 5,
+    "retry_initial_seconds": 1,
+    "retry_max_seconds": 30,
+    "storage_retry_limit": 5,
+    "file_not_found_retry_limit": 0,
+    "health_interval": 5,
+    "health_max_age": 90,
+    "path_mappings": [],
 }
 
 ALLOWED_PROCESSING_TRANSITIONS = {
@@ -391,6 +410,7 @@ def register_worker(session: Session, owner_id: int, name: str, heartbeat_timeou
         owner_external_user_id=owner_id,
         name=name.strip()[:160],
         heartbeat_timeout_seconds=heartbeat_timeout_seconds,
+        configuration_json=json_dump(WORKER_RUNTIME_DEFAULTS),
         token_digest=token_digest(raw_token),
         token_prefix=prefix,
         token_last_four=last_four,
@@ -406,6 +426,124 @@ def register_worker(session: Session, owner_id: int, name: str, heartbeat_timeou
         message=f"Worker {worker.name} registered.",
     )
     return worker, raw_token
+
+
+def worker_configuration(worker: ProofWorker) -> dict[str, Any]:
+    stored = json_load(worker.configuration_json, {})
+    return {**WORKER_RUNTIME_DEFAULTS, **stored} if isinstance(stored, dict) else dict(WORKER_RUNTIME_DEFAULTS)
+
+
+def update_worker_configuration(
+    worker: ProofWorker,
+    *,
+    callback_url: str,
+    unc_prefix: str,
+    local_root: str,
+    heartbeat_interval: float,
+    poll_interval: float,
+    retry_initial_seconds: float,
+    retry_max_seconds: float,
+    storage_retry_limit: int,
+    file_not_found_retry_limit: int,
+    health_interval: float,
+    health_max_age: float,
+    wake_timeout_seconds: float,
+) -> None:
+    if heartbeat_interval <= 0 or poll_interval <= 0 or retry_initial_seconds <= 0:
+        raise ValueError("Интервалы Worker должны быть больше нуля.")
+    if retry_max_seconds < retry_initial_seconds:
+        raise ValueError("Максимальная задержка повтора не может быть меньше начальной.")
+    if storage_retry_limit < 0 or file_not_found_retry_limit < 0:
+        raise ValueError("Количество повторов не может быть отрицательным.")
+    if health_interval <= 0 or health_max_age <= health_interval:
+        raise ValueError("Health max age должен быть больше интервала healthcheck.")
+    if wake_timeout_seconds <= 0:
+        raise ValueError("Timeout webhook Worker должен быть больше нуля.")
+    mappings = []
+    normalized_prefix = unc_prefix.strip().rstrip("\\/")
+    normalized_root = local_root.strip().rstrip("/")
+    if normalized_prefix or normalized_root:
+        if not normalized_prefix.startswith("\\\\"):
+            raise ValueError("UNC-префикс должен начинаться с \\\\.")
+        if not normalized_root.startswith("/"):
+            raise ValueError("Путь mount внутри Worker должен быть абсолютным Linux-путём.")
+        mappings.append({"source_prefix": normalized_prefix, "local_root": normalized_root})
+    worker.callback_url = callback_url.strip()[:1000]
+    worker.configuration_json = json_dump({
+        "heartbeat_interval": heartbeat_interval,
+        "poll_interval": poll_interval,
+        "retry_initial_seconds": retry_initial_seconds,
+        "retry_max_seconds": retry_max_seconds,
+        "storage_retry_limit": storage_retry_limit,
+        "file_not_found_retry_limit": file_not_found_retry_limit,
+        "health_interval": health_interval,
+        "health_max_age": health_max_age,
+        "wake_timeout_seconds": wake_timeout_seconds,
+        "path_mappings": mappings,
+    })
+    worker.configuration_version += 1
+    worker.updated_at = utc_now()
+
+
+def dispatch_worker_wakeups(
+    session_factory: sessionmaker[Session],
+    owner_id: int,
+    job_id: str,
+    *,
+    client: httpx.Client | None = None,
+) -> int:
+    sent = 0
+    owns_client = client is None
+    http_client = client or httpx.Client()
+    try:
+        with session_factory() as session:
+            workers = list(session.scalars(select(ProofWorker).where(
+                ProofWorker.owner_external_user_id == owner_id,
+                ProofWorker.callback_url != "",
+            )))
+            for worker in workers:
+                configuration = worker_configuration(worker)
+                timeout = configuration.get("wake_timeout_seconds")
+                if not isinstance(timeout, (int, float)) or timeout <= 0:
+                    continue
+                timestamp = str(int(time.time()))
+                body = json_dump({"event": "queue.changed", "job_id": job_id}).encode("utf-8")
+                signature = hmac.new(
+                    bytes.fromhex(worker.token_digest),
+                    timestamp.encode("ascii") + b"." + body,
+                    hashlib.sha256,
+                ).hexdigest()
+                try:
+                    response = http_client.post(
+                        worker.callback_url,
+                        content=body,
+                        headers={
+                            "Content-Type": "application/json",
+                            "X-Proof-Timestamp": timestamp,
+                            "X-Proof-Signature": signature,
+                        },
+                        timeout=float(timeout),
+                    )
+                    response.raise_for_status()
+                    sent += 1
+                except (httpx.HTTPError, ValueError) as exc:
+                    add_event(
+                        session,
+                        owner_external_user_id=owner_id,
+                        worker_id=worker.id,
+                        job_id=job_id,
+                        event_type="worker.wake.failed",
+                        source="core",
+                        level="warning",
+                        message=f"Worker {worker.name} wake webhook failed; polling remains active.",
+                        details={"error": sanitized_message(str(exc))},
+                        queue_notification=False,
+                    )
+            session.commit()
+    finally:
+        if owns_client:
+            http_client.close()
+    return sent
 
 
 def authenticate_worker(session: Session, raw_token: str) -> ProofWorker | None:
@@ -472,6 +610,8 @@ def create_job_from_webhook(
     preset: ProofPreset,
     input_payload: dict[str, Any],
     original_payload: dict[str, Any],
+    accepted_override: bool | None = None,
+    ignored_message: str | None = None,
 ) -> tuple[ProofJob | None, bool, bool]:
     # SQLite has no row-level locks. Upgrade the transaction before checking the
     # receipt so two simultaneous deliveries cannot both pass the lookup.
@@ -486,6 +626,8 @@ def create_job_from_webhook(
 
     accepted_events = set(json_load(integration.trigger_events_json, []))
     accepted = event_type in accepted_events
+    if accepted_override is not None:
+        accepted = accepted and accepted_override
     receipt = WebhookReceipt(
         id=str(uuid4()), integration_id=integration.id, idempotency_key=idempotency_key,
         event_type=event_type, payload_json=json_dump(sanitized_details(original_payload)), accepted=accepted,
@@ -496,7 +638,7 @@ def create_job_from_webhook(
         add_event(
             session, owner_external_user_id=integration.owner_external_user_id,
             integration_id=integration.id, event_type="webhook.ignored", source="integration",
-            message=f"Webhook event {event_type} ignored by integration filter.",
+            message=ignored_message or f"Webhook event {event_type} ignored by integration filter.",
         )
         session.flush()
         return None, False, False
@@ -674,6 +816,187 @@ def result_for_job(session: Session, job: ProofJob) -> ProofResult:
     return result
 
 
+def _result_path(settings: AppSettings, result: ProofResult) -> Path:
+    result_root = settings.result_dir.resolve()
+    file_path = (result_root / result.file_path).resolve()
+    if result_root not in file_path.parents or not file_path.is_file():
+        raise RuntimeError("Result file is unavailable.")
+    return file_path
+
+
+def _delivery_record(
+    session: Session,
+    job: ProofJob,
+    result: ProofResult,
+    integration: ProofIntegration,
+) -> ProofResultDelivery:
+    delivery = session.scalar(select(ProofResultDelivery).where(
+        ProofResultDelivery.result_id == result.id,
+        ProofResultDelivery.integration_id == integration.id,
+    ))
+    if delivery is None:
+        delivery = ProofResultDelivery(
+            id=str(uuid4()),
+            owner_external_user_id=job.owner_external_user_id,
+            job_id=job.id,
+            result_id=result.id,
+            integration_id=integration.id,
+            archive_filename=f"BellenneProof-{job.id}.zip",
+        )
+        session.add(delivery)
+        session.flush()
+    return delivery
+
+
+def _result_archive(
+    settings: AppSettings,
+    result: ProofResult,
+    delivery: ProofResultDelivery,
+) -> Path:
+    source_path = _result_path(settings, result)
+    archive_path = source_path.parent / f"{result.id}-amocrm.zip"
+    if not archive_path.is_file():
+        temporary_path = source_path.parent / f".{archive_path.name}.{uuid4().hex}.tmp"
+        try:
+            info = zipfile.ZipInfo(result.filename, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o600 << 16
+            with zipfile.ZipFile(
+                temporary_path,
+                mode="w",
+                compression=zipfile.ZIP_DEFLATED,
+                compresslevel=6,
+            ) as archive:
+                with source_path.open("rb") as source, archive.open(info, "w") as target:
+                    shutil.copyfileobj(source, target, length=1024 * 1024)
+            os.replace(temporary_path, archive_path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+    digest = hashlib.sha256()
+    with archive_path.open("rb") as archive_file:
+        for block in iter(lambda: archive_file.read(1024 * 1024), b""):
+            digest.update(block)
+    delivery.archive_sha256 = digest.hexdigest()
+    return archive_path
+
+
+def _deliver_directly_to_amocrm(
+    session: Session,
+    settings: AppSettings,
+    job: ProofJob,
+    result: ProofResult,
+    integration: ProofIntegration,
+    configuration: AmoIntegrationConfiguration,
+    *,
+    client: httpx.Client | None,
+) -> None:
+    if not configuration.api_base_url or configuration.api_timeout_seconds is None:
+        raise RuntimeError("amoCRM API connection is not configured.")
+    if configuration.completed_status_id is None:
+        raise RuntimeError("The completed amoCRM lead status is not configured.")
+    if len(configuration.clear_field_ids) != 2:
+        raise RuntimeError("Exactly two amoCRM fields must be selected for clearing.")
+    if job.crm_entity_type not in {"lead", "leads"} or not job.crm_entity_id.isdecimal():
+        raise RuntimeError("Job is not linked to a valid amoCRM lead.")
+
+    delivery = _delivery_record(session, job, result, integration)
+    archive_path = _result_archive(settings, result, delivery)
+    credentials = decrypt_secret(
+        credential_cipher_for_settings(settings), integration.credentials_encrypted
+    )
+    with AmoClient(
+        configuration.api_base_url,
+        credentials.get("access_token", ""),
+        timeout_seconds=configuration.api_timeout_seconds,
+        client=client,
+    ) as amo:
+        if not delivery.amo_file_uuid or not delivery.amo_version_uuid:
+            with archive_path.open("rb") as archive_file:
+                uploaded = amo.upload_file(
+                    archive_file,
+                    file_name=delivery.archive_filename,
+                    file_size=archive_path.stat().st_size,
+                    content_type="application/zip",
+                )
+            delivery.amo_file_uuid = uploaded["uuid"]
+            delivery.amo_version_uuid = uploaded["version_uuid"]
+            add_event(
+                session,
+                owner_external_user_id=job.owner_external_user_id,
+                job_id=job.id,
+                integration_id=integration.id,
+                event_type="amocrm.archive.uploaded",
+                source="integration",
+                message="Result archive uploaded to amoCRM file storage.",
+                details={
+                    "result_id": result.id,
+                    "archive_sha256": delivery.archive_sha256,
+                    "file_uuid": delivery.amo_file_uuid,
+                },
+            )
+            session.commit()
+
+        if delivery.amo_note_id is None:
+            note = amo.find_attachment_note(job.crm_entity_id, delivery.amo_file_uuid)
+            if note is None:
+                note = amo.create_attachment_note(
+                    job.crm_entity_id,
+                    file_uuid=delivery.amo_file_uuid,
+                    version_uuid=delivery.amo_version_uuid,
+                    file_name=delivery.archive_filename,
+                )
+            try:
+                delivery.amo_note_id = int(note["id"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RuntimeError("amoCRM did not return the attachment note ID.") from exc
+            add_event(
+                session,
+                owner_external_user_id=job.owner_external_user_id,
+                job_id=job.id,
+                integration_id=integration.id,
+                event_type="amocrm.archive.attached",
+                source="integration",
+                message="Result archive attached to the amoCRM lead.",
+                details={"result_id": result.id, "note_id": delivery.amo_note_id},
+            )
+            session.commit()
+
+        if delivery.finalized_at is None:
+            status_payload: dict[str, Any] = {
+                "status_id": configuration.completed_status_id,
+                "custom_fields_values": [
+                    {"field_id": field_id, "values": None}
+                    for field_id in configuration.clear_field_ids
+                ],
+            }
+            matching_status = next(
+                (
+                    item
+                    for item in configuration.statuses_cache
+                    if item.get("id") == configuration.completed_status_id
+                ),
+                None,
+            )
+            if matching_status and matching_status.get("pipeline_id"):
+                status_payload["pipeline_id"] = matching_status["pipeline_id"]
+            amo.update_lead(job.crm_entity_id, status_payload)
+            delivery.finalized_at = utc_now()
+            add_event(
+                session,
+                owner_external_user_id=job.owner_external_user_id,
+                job_id=job.id,
+                integration_id=integration.id,
+                event_type="amocrm.lead.finalized",
+                source="integration",
+                message="amoCRM lead fields were cleared and the completed status was applied.",
+                details={
+                    "status_id": configuration.completed_status_id,
+                    "cleared_field_ids": configuration.clear_field_ids,
+                    "note_id": delivery.amo_note_id,
+                },
+            )
+
+
 def deliver_result(
     session: Session,
     settings: AppSettings,
@@ -696,7 +1019,64 @@ def deliver_result(
             integration_id=integration.id if integration else None,
         )
         return False
-    transition_delivery(session, job, "delivering", message="Delivery to amoCRM started.", integration_id=integration.id)
+    if job.delivery_status != "delivering":
+        transition_delivery(
+            session,
+            job,
+            "delivering",
+            message="Delivery to amoCRM started.",
+            integration_id=integration.id,
+        )
+    try:
+        configuration = AmoIntegrationConfiguration.model_validate(
+            json_load(integration.configuration_json, {})
+        )
+    except Exception as exc:
+        transition_delivery(
+            session,
+            job,
+            "failed",
+            message="Delivery to amoCRM failed.",
+            integration_id=integration.id,
+            details={"error": sanitized_message(str(exc))},
+        )
+        integration.last_error_at = utc_now()
+        integration.last_error_message = sanitized_message(str(exc))[:2000]
+        return False
+    if configuration.delivery_mode == "amocrm_attachment":
+        try:
+            _deliver_directly_to_amocrm(
+                session,
+                settings,
+                job,
+                result,
+                integration,
+                configuration,
+                client=client,
+            )
+        except Exception as exc:
+            safe_error = sanitized_message(str(exc))
+            transition_delivery(
+                session,
+                job,
+                "failed",
+                message="Delivery to amoCRM failed.",
+                integration_id=integration.id,
+                details={"error": safe_error},
+            )
+            integration.last_error_at = utc_now()
+            integration.last_error_message = safe_error[:2000]
+            return False
+        transition_delivery(
+            session,
+            job,
+            "delivered",
+            message="Result archive delivered to the amoCRM lead.",
+            integration_id=integration.id,
+        )
+        integration.last_delivery_at = utc_now()
+        integration.last_error_message = None
+        return True
     payload = {
         "job_id": job.id,
         "crm_entity_type": job.crm_entity_type,
@@ -711,20 +1091,12 @@ def deliver_result(
             "download_path": f"{settings.module_prefix}/results/{result.id}/download",
         },
     }
-    credentials = decrypt_secret(
-        credential_cipher_for_settings(settings), integration.credentials_encrypted
-    )
-    headers: dict[str, str] = {}
-    if credentials.get("access_token"):
-        headers["Authorization"] = f"Bearer {credentials['access_token']}"
     try:
         if integration.delivery_url == "mock://delivered":
             response_status = 200
         elif integration.delivery_url:
             owns_client = client is None
-            file_path = (settings.result_dir / result.file_path).resolve()
-            if settings.result_dir not in file_path.parents or not file_path.is_file():
-                raise RuntimeError("Result file is unavailable.")
+            file_path = _result_path(settings, result)
             http_client = client or httpx.Client()
             try:
                 with file_path.open("rb") as result_file:
@@ -732,7 +1104,6 @@ def deliver_result(
                         integration.delivery_url,
                         data={"payload_json": json_dump(payload)},
                         files={"file": (result.filename, result_file, result.content_type)},
-                        headers=headers,
                     ).status_code
             finally:
                 if owns_client:

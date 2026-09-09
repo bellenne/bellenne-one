@@ -40,6 +40,9 @@ class ProofWorker(Base):
     current_job_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     heartbeat_timeout_seconds: Mapped[int] = mapped_column(Integer)
+    callback_url: Mapped[str] = mapped_column(String(1000), default="")
+    configuration_json: Mapped[str] = mapped_column(Text, default="{}")
+    configuration_version: Mapped[int] = mapped_column(Integer, default=1)
     last_error_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
     last_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     token_digest: Mapped[str] = mapped_column(String(64), unique=True, index=True)
@@ -58,6 +61,7 @@ class ProofIntegration(Base):
     kind: Mapped[str] = mapped_column(String(40), default="amocrm")
     enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     trigger_events_json: Mapped[str] = mapped_column(Text, default="[]")
+    configuration_json: Mapped[str] = mapped_column(Text, default="{}")
     default_preset_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     delivery_url: Mapped[str] = mapped_column(String(1000), default="")
     credentials_encrypted: Mapped[str] = mapped_column(Text, default="")
@@ -151,6 +155,29 @@ class ProofResult(Base):
 
     job: Mapped[ProofJob] = relationship(foreign_keys=[job_id])
     worker: Mapped[ProofWorker] = relationship(foreign_keys=[worker_id])
+
+
+class ProofResultDelivery(Base):
+    __tablename__ = "proof_result_deliveries"
+    __table_args__ = (UniqueConstraint("result_id", "integration_id"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    owner_external_user_id: Mapped[int] = mapped_column(Integer, index=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("proof_jobs.id"), index=True)
+    result_id: Mapped[str] = mapped_column(ForeignKey("proof_results.id"), index=True)
+    integration_id: Mapped[int] = mapped_column(ForeignKey("proof_integrations.id"), index=True)
+    archive_filename: Mapped[str] = mapped_column(String(255))
+    archive_sha256: Mapped[str] = mapped_column(String(64), default="")
+    amo_file_uuid: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    amo_version_uuid: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    amo_note_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    finalized_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
+
+    job: Mapped[ProofJob] = relationship(foreign_keys=[job_id])
+    result: Mapped[ProofResult] = relationship(foreign_keys=[result_id])
+    integration: Mapped[ProofIntegration] = relationship(foreign_keys=[integration_id])
 
 
 class ProofEvent(Base):

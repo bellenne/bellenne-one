@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import timedelta
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from app.main import session_factory
+from app.main import parse_amocrm_form_payload, session_factory
 from app.models import ProofEvent, ProofIntegration, ProofJob, ProofResult, ProofWorker, utc_now
 from app.services import register_worker
 from tests.helpers import bootstrap, webhook_payload, worker_headers
@@ -36,7 +38,9 @@ def test_end_to_end_mock_worker_and_delivery(client: TestClient) -> None:
     claim = client.post("/api/v1/jobs/claim", headers=headers)
     assert claim.status_code == 200
     assert claim.json()["id"] == job_id
-    assert claim.json()["preset"]["parameters"] == {"contract": "worker-v1"}
+    assert claim.json()["preset"]["parameters"] == {}
+    assert claim.json()["input"]["source_path"] == "orders/ORDER-42"
+    assert claim.json()["input"]["layout_number"] == 3
 
     assert client.post(f"/api/v1/jobs/{job_id}/start", headers=headers).status_code == 200
     progress = client.post(
@@ -50,18 +54,25 @@ def test_end_to_end_mock_worker_and_delivery(client: TestClient) -> None:
     )
     assert event.status_code == 200
 
+    result_bytes = b"\xff\xd8synthetic-proof-jpeg\xff\xd9"
+    result_sha256 = hashlib.sha256(result_bytes).hexdigest()
+    idempotency_key = hashlib.sha256(
+        f"proof-worker-v1:{job_id}:1:{result_sha256}".encode()
+    ).hexdigest()
+    result_metadata = json.dumps({"sha256": result_sha256, "attempt": 1, "width": 120})
     upload = client.post(
         f"/api/v1/jobs/{job_id}/result",
-        headers={**headers, "Idempotency-Key": "result-upload-001"},
-        data={"metadata_json": '{"width": 120}'},
-        files={"file": ("proof.png", b"fake-png-result", "image/png")},
+        headers={**headers, "Idempotency-Key": idempotency_key},
+        data={"metadata_json": result_metadata},
+        files={"file": ("result.jpg", result_bytes, "image/jpeg")},
     )
     assert upload.status_code == 201
+    assert upload.json()["sha256"] == result_sha256
     duplicate = client.post(
         f"/api/v1/jobs/{job_id}/result",
-        headers={**headers, "Idempotency-Key": "result-upload-001"},
-        data={"metadata_json": "{}"},
-        files={"file": ("proof.png", b"fake-png-result", "image/png")},
+        headers={**headers, "Idempotency-Key": idempotency_key},
+        data={"metadata_json": result_metadata},
+        files={"file": ("result.jpg", result_bytes, "image/jpeg")},
     )
     assert duplicate.status_code == 200
     assert duplicate.json()["duplicate"] is True
@@ -91,19 +102,33 @@ def test_webhook_and_result_are_idempotent(client: TestClient) -> None:
         assert session.query(ProofJob).count() == 1
 
 
-def test_official_amocrm_form_shape_is_accepted(client: TestClient) -> None:
-    setup = bootstrap()
+def test_official_amocrm_form_shape_is_accepted() -> None:
     payload = {
         "account[id]": "1234",
         "leads[status][0][id]": "7654321",
         "leads[status][0][last_modified]": "1788700000",
         "leads[status][0][status_id]": "999",
     }
-    first = client.post(f"/webhooks/amocrm/{setup['webhook_secret']}", data=payload)
-    duplicate = client.post(f"/webhooks/amocrm/{setup['webhook_secret']}", data=payload)
-    assert first.status_code == 202
-    assert duplicate.status_code == 200
-    assert duplicate.json()["duplicate"] is True
+    parsed = parse_amocrm_form_payload(payload)
+
+    assert parsed.event_type == "leads.status"
+    assert parsed.crm_entity_id == "7654321"
+    expected_source = json.dumps(
+        sorted(payload.items()), ensure_ascii=False, separators=(",", ":")
+    )
+    assert parsed.event_id == hashlib.sha256(expected_source.encode()).hexdigest()
+
+
+def test_official_amocrm_event_id_covers_the_whole_form_payload() -> None:
+    first = {
+        "account[id]": "1234",
+        "leads[status][0][id]": "7654321",
+        "leads[status][0][last_modified]": "1788700000",
+        "leads[status][0][status_id]": "88",
+    }
+    second = {**first, "leads[status][0][status_id]": "89"}
+
+    assert parse_amocrm_form_payload(first).event_id != parse_amocrm_form_payload(second).event_id
 
 
 def test_processing_failure_and_delivery_failure_are_independent(client: TestClient) -> None:

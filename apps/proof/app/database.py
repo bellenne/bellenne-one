@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -36,6 +36,25 @@ def build_session_factory(engine: Engine) -> sessionmaker[Session]:
 def init_database(engine: Engine) -> None:
     from . import models  # noqa: F401
     Base.metadata.create_all(engine)
+    if engine.dialect.name == "sqlite":
+        additions = {
+            "proof_workers": {
+                "callback_url": "VARCHAR(1000) NOT NULL DEFAULT ''",
+                "configuration_json": "TEXT NOT NULL DEFAULT '{}'",
+                "configuration_version": "INTEGER NOT NULL DEFAULT 1",
+            },
+            "proof_integrations": {
+                "configuration_json": "TEXT NOT NULL DEFAULT '{}'",
+            },
+        }
+        with engine.begin() as connection:
+            for table_name, columns in additions.items():
+                existing = {column["name"] for column in inspect(connection).get_columns(table_name)}
+                for column_name, declaration in columns.items():
+                    if column_name not in existing:
+                        connection.execute(text(
+                            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {declaration}"
+                        ))
 
 
 def session_scope(session_factory: sessionmaker[Session]) -> Iterator[Session]:
