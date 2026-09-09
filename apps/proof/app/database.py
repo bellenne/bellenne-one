@@ -45,6 +45,8 @@ def init_database(engine: Engine) -> None:
             },
             "proof_integrations": {
                 "configuration_json": "TEXT NOT NULL DEFAULT '{}'",
+                "oauth_state_digest": "VARCHAR(64) NOT NULL DEFAULT ''",
+                "oauth_state_expires_at": "DATETIME",
             },
         }
         with engine.begin() as connection:

@@ -37,20 +37,40 @@ reference production parameters live in `BellenneProofWorker/examples/preset.jso
 
 ## amoCRM adapter contract
 
-The incoming webhook accepts both the JSON contract shown in the Integrations
-page and the standard amoCRM form webhook. For the amoCRM form, the webhook is
-only a wake-up/event envelope: Core fetches the current lead by ID, rechecks its
-pipeline/status and extracts exactly three custom fields selected in the UI:
-the order UNC path, layout number and one additional identifier. Other lead
-custom fields are not copied into the Job. `event_id` is the idempotency key.
-Only explicitly configured `event_type` values create Jobs.
+Configure amoCRM on the Integrations page in four independent steps: OAuth,
+webhook field mapping, lead statuses, then the Worker preset and activation.
+Register these public endpoints in the amoCRM integration:
+
+```text
+Redirect URI: https://one.customcraft-mes.ru/proof/integrations/amocrm/oauth/callback
+Revocation hook: https://one.customcraft-mes.ru/proof/integrations/amocrm/oauth/revoked
+```
+
+The integration needs access to account/CRM data and the file scope. Core stores
+the OAuth client secret, access token and rotating refresh token encrypted. It
+validates the one-time OAuth state, confirms the returned account, and refreshes
+the token before expiry. `PROOF_PUBLIC_BASE_URL` must contain the public HTTPS
+origin and the redirect URI registered in amoCRM must match the displayed value
+exactly.
+
+The standard amoCRM form webhook is only a wake-up/event envelope. All business
+conditions belong to the amoCRM automation that sends it; Core deliberately does
+not duplicate a source pipeline/status filter. Core fetches the current lead by
+ID and extracts exactly three custom fields selected in the UI: the order UNC
+path, layout number and one additional identifier. Other lead custom fields are
+not copied into the Job. The derived event ID is the idempotency key.
 
 The Integrations page also stores the queued, completed and failed status IDs.
-Status changes are separate integration events and cannot roll back an already
-persisted Job. Direct delivery wraps the immutable Worker Result in a ZIP,
-uploads it through the amoCRM file-service session API, and adds an `attachment`
-note to the lead. It then clears exactly two configured fields from the same
-three-field mapping and applies the completed status in one lead PATCH.
+After persisting a new Job as `received`, Core clears the selected one, two, or
+three fields and applies the queued status in one lead PATCH. Only after that
+acknowledgement succeeds does the Job enter the Worker queue. If the PATCH fails,
+the Job remains `received`; a duplicate delivery retries the acknowledgement
+without creating another Job or rereading the fields that may already be empty.
+
+Direct delivery wraps the immutable Worker Result in a ZIP, uploads it through
+the amoCRM file-service session API, and adds an `attachment` note to the lead.
+After the attachment exists, Core applies the completed status. The final step
+does not clear the source fields again.
 
 The uploaded file UUID, version UUID and note ID are persisted separately from
 the immutable Result. If creating the note or finalizing the lead fails, Retry
@@ -58,7 +78,8 @@ Delivery resumes from the last durable stage rather than re-running Worker or
 uploading the same archive again. Before creating a note, Core also searches for
 an existing attachment with that file UUID to tolerate a lost API response.
 
-The optional legacy webhook-adapter mode posts multipart form-data to the
+The internal JSON webhook contract and legacy webhook delivery mode remain
+available for compatibility. Legacy delivery posts multipart form-data to the
 configured integration endpoint:
 
 - `payload_json`: Job, CRM entity, Result metadata, and authenticated download path;

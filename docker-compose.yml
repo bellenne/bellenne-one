@@ -136,6 +136,7 @@ services:
       PROOF_API_DOCS_ENABLED: "${PROOF_API_DOCS_ENABLED:-false}"
       PROOF_NOTIFICATION_ASYNC: "${PROOF_NOTIFICATION_ASYNC:-true}"
       MATTERMOST_HTTP_TIMEOUT_SECONDS: "${MATTERMOST_HTTP_TIMEOUT_SECONDS:-10}"
+      PROOF_PUBLIC_BASE_URL: "${PROOF_PUBLIC_BASE_URL:-https://one.customcraft-mes.ru}"
     volumes:
       - proof_data:/data
     expose:

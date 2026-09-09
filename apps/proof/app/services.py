@@ -10,6 +10,7 @@ import time
 import zipfile
 from datetime import timedelta
 from pathlib import Path
+from threading import Lock
 from typing import Any
 from uuid import uuid4
 
@@ -18,7 +19,12 @@ from fastapi import HTTPException, UploadFile, status
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
 
-from .amocrm import AmoClient, AmoIntegrationConfiguration
+from .amocrm import (
+    AmoClient,
+    AmoIntegrationConfiguration,
+    AmoOAuthTokenSet,
+    exchange_amocrm_oauth_token,
+)
 from .config import AppSettings
 from .models import (
     ProofEvent,
@@ -32,8 +38,14 @@ from .models import (
     WebhookReceipt,
     utc_now,
 )
-from .security import constant_time_matches, decrypt_secret, new_secret, secret_parts, token_digest
-
+from .security import (
+    constant_time_matches,
+    decrypt_secret,
+    encrypt_secret,
+    new_secret,
+    secret_parts,
+    token_digest,
+)
 
 PROCESSING_STATUSES = (
     "received", "queued", "assigned", "running", "completed", "failed", "cancelled", "retrying"
@@ -51,6 +63,9 @@ DELIVERY_LABELS = {
     "pending": "Ожидает доставки", "delivering": "Доставляется",
     "delivered": "Доставлено", "failed": "Ошибка доставки", "retrying": "Повторная доставка",
 }
+
+AMOCRM_TOKEN_REFRESH_MARGIN_SECONDS = 60
+AMOCRM_TOKEN_REFRESH_LOCK = Lock()
 
 WORKER_RUNTIME_DEFAULTS = {
     "heartbeat_interval": 30,
@@ -94,6 +109,104 @@ def json_load(value: str | None, fallback: Any) -> Any:
         return json.loads(value)
     except (TypeError, ValueError):
         return fallback
+
+
+def amocrm_credentials(integration: ProofIntegration, settings: AppSettings) -> dict[str, Any]:
+    return decrypt_secret(
+        credential_cipher_for_settings(settings), integration.credentials_encrypted
+    )
+
+
+def amocrm_is_connected(integration: ProofIntegration, settings: AppSettings) -> bool:
+    credentials = amocrm_credentials(integration, settings)
+    return bool(
+        credentials.get("client_id")
+        and credentials.get("client_secret")
+        and credentials.get("access_token")
+        and credentials.get("refresh_token")
+        and credentials.get("expires_at")
+    )
+
+
+def store_amocrm_token_set(
+    integration: ProofIntegration,
+    settings: AppSettings,
+    credentials: dict[str, Any],
+    token_set: AmoOAuthTokenSet,
+) -> None:
+    updated = {
+        "client_id": credentials["client_id"],
+        "client_secret": credentials["client_secret"],
+        "access_token": token_set.access_token,
+        "refresh_token": token_set.refresh_token,
+        "expires_at": token_set.expires_at,
+    }
+    integration.credentials_encrypted = encrypt_secret(
+        credential_cipher_for_settings(settings), updated
+    )
+
+
+def get_amocrm_access_token(
+    session: Session,
+    settings: AppSettings,
+    integration: ProofIntegration,
+    *,
+    client: httpx.Client | None = None,
+) -> str:
+    credentials = amocrm_credentials(integration, settings)
+    access_token = str(credentials.get("access_token") or "")
+    refresh_token = str(credentials.get("refresh_token") or "")
+    expires_at = credentials.get("expires_at")
+    if access_token and (not refresh_token or not isinstance(expires_at, (int, float))):
+        return access_token
+    if access_token and float(expires_at) > time.time() + AMOCRM_TOKEN_REFRESH_MARGIN_SECONDS:
+        return access_token
+    if not refresh_token:
+        raise RuntimeError("Подключение amoCRM не авторизовано.")
+
+    with AMOCRM_TOKEN_REFRESH_LOCK:
+        session.refresh(integration)
+        credentials = amocrm_credentials(integration, settings)
+        access_token = str(credentials.get("access_token") or "")
+        expires_at = credentials.get("expires_at")
+        if access_token and isinstance(expires_at, (int, float)) and (
+            float(expires_at) > time.time() + AMOCRM_TOKEN_REFRESH_MARGIN_SECONDS
+        ):
+            return access_token
+        configuration = AmoIntegrationConfiguration.model_validate(
+            json_load(integration.configuration_json, {})
+        )
+        client_id = str(credentials.get("client_id") or "")
+        client_secret = str(credentials.get("client_secret") or "")
+        refresh_token = str(credentials.get("refresh_token") or "")
+        if not all((client_id, client_secret, refresh_token)):
+            raise RuntimeError("OAuth credentials amoCRM are incomplete.")
+        if not settings.public_base_url:
+            raise RuntimeError("PROOF_PUBLIC_BASE_URL is not configured.")
+        token_set = exchange_amocrm_oauth_token(
+            configuration.api_base_url,
+            client_id=client_id,
+            client_secret=client_secret,
+            redirect_uri=settings.amocrm_redirect_uri,
+            grant_type="refresh_token",
+            refresh_token=refresh_token,
+            timeout_seconds=configuration.api_timeout_seconds or 0,
+            client=client,
+        )
+        store_amocrm_token_set(integration, settings, credentials, token_set)
+        integration.last_error_message = None
+        add_event(
+            session,
+            owner_external_user_id=integration.owner_external_user_id,
+            integration_id=integration.id,
+            event_type="amocrm.oauth.refreshed",
+            source="integration",
+            message="amoCRM OAuth tokens refreshed.",
+        )
+        # A refresh token is single-use. Persist the replacement before any
+        # subsequent API call can fail and roll the transaction back.
+        session.commit()
+        return token_set.access_token
 
 
 def sanitized_details(value: Any) -> Any:
@@ -612,6 +725,7 @@ def create_job_from_webhook(
     original_payload: dict[str, Any],
     accepted_override: bool | None = None,
     ignored_message: str | None = None,
+    enqueue: bool = True,
 ) -> tuple[ProofJob | None, bool, bool]:
     # SQLite has no row-level locks. Upgrade the transaction before checking the
     # receipt so two simultaneous deliveries cannot both pass the lookup.
@@ -661,9 +775,18 @@ def create_job_from_webhook(
         message="amoCRM webhook received and linked to Job.",
         details={"event_type": event_type, "crm_entity_type": crm_entity_type, "crm_entity_id": crm_entity_id},
     )
+    if enqueue:
+        queue_received_job(session, job)
+    return job, False, True
+
+
+def queue_received_job(session: Session, job: ProofJob) -> None:
+    if job.processing_status == "queued":
+        return
+    if job.processing_status != "received":
+        raise HTTPException(status_code=409, detail="Only a received Job can enter the queue.")
     transition_processing(session, job, "queued", source="core", message="Job added to processing queue.")
     job.queued_at = utc_now()
-    return job, False, True
 
 
 def claim_next_job(session: Session, worker: ProofWorker) -> ProofJob | None:
@@ -894,19 +1017,17 @@ def _deliver_directly_to_amocrm(
         raise RuntimeError("amoCRM API connection is not configured.")
     if configuration.completed_status_id is None:
         raise RuntimeError("The completed amoCRM lead status is not configured.")
-    if len(configuration.clear_field_ids) != 2:
-        raise RuntimeError("Exactly two amoCRM fields must be selected for clearing.")
     if job.crm_entity_type not in {"lead", "leads"} or not job.crm_entity_id.isdecimal():
         raise RuntimeError("Job is not linked to a valid amoCRM lead.")
 
     delivery = _delivery_record(session, job, result, integration)
     archive_path = _result_archive(settings, result, delivery)
-    credentials = decrypt_secret(
-        credential_cipher_for_settings(settings), integration.credentials_encrypted
+    access_token = get_amocrm_access_token(
+        session, settings, integration, client=client
     )
     with AmoClient(
         configuration.api_base_url,
-        credentials.get("access_token", ""),
+        access_token,
         timeout_seconds=configuration.api_timeout_seconds,
         client=client,
     ) as amo:
@@ -964,10 +1085,6 @@ def _deliver_directly_to_amocrm(
         if delivery.finalized_at is None:
             status_payload: dict[str, Any] = {
                 "status_id": configuration.completed_status_id,
-                "custom_fields_values": [
-                    {"field_id": field_id, "values": None}
-                    for field_id in configuration.clear_field_ids
-                ],
             }
             matching_status = next(
                 (
@@ -988,10 +1105,9 @@ def _deliver_directly_to_amocrm(
                 integration_id=integration.id,
                 event_type="amocrm.lead.finalized",
                 source="integration",
-                message="amoCRM lead fields were cleared and the completed status was applied.",
+                message="Result archive was attached and the completed amoCRM status was applied.",
                 details={
                     "status_id": configuration.completed_status_id,
-                    "cleared_field_ids": configuration.clear_field_ids,
                     "note_id": delivery.amo_note_id,
                 },
             )

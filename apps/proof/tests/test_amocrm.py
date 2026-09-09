@@ -1,26 +1,34 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import io
+import json
+import time
 import zipfile
 from typing import Any
-
-import httpx
-import pytest
-from fastapi.testclient import TestClient
-from pydantic import ValidationError
+from urllib.parse import parse_qs, urlparse
 
 import app.main as main_module
 import app.services as services_module
-from app.amocrm import AmoFieldMapping, AmoIntegrationConfiguration
-from app.main import session_factory
-from app.models import ProofIntegration, ProofJob, ProofResultDelivery
-from app.services import json_dump, json_load
+import httpx
+import pytest
+from app.amocrm import AmoFieldMapping, AmoIntegrationConfiguration, AmoOAuthTokenSet
+from app.main import session_factory, settings
+from app.models import ProofEvent, ProofIntegration, ProofJob, ProofResultDelivery
+from app.security import encrypt_secret, token_digest
+from app.services import credential_cipher_for_settings, json_dump, json_load
+from fastapi.testclient import TestClient
+from pydantic import ValidationError
+
 from tests.helpers import bootstrap
 
 
 class FakeAmoClient:
     lead: dict[str, Any] = {}
     updates: list[tuple[str, dict[str, Any]]] = []
+    get_calls = 0
+    fail_update = False
 
     def __init__(self, *_args: Any, **_kwargs: Any) -> None:
         pass
@@ -32,11 +40,28 @@ class FakeAmoClient:
         pass
 
     def get_lead(self, _lead_id: str) -> dict[str, Any]:
+        type(self).get_calls += 1
         return self.lead
 
     def update_lead(self, lead_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if type(self).fail_update:
+            raise RuntimeError("temporary update failure")
         self.updates.append((lead_id, payload))
         return {"id": int(lead_id)}
+
+
+class FakeOAuthAccountClient:
+    def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args: Any) -> None:
+        pass
+
+    def get_account(self) -> dict[str, Any]:
+        return {"id": 1234, "name": "CustomCraft"}
 
 
 class FakeDirectAmoClient:
@@ -81,14 +106,14 @@ def configured_amocrm() -> AmoIntegrationConfiguration:
     return AmoIntegrationConfiguration(
         api_base_url="https://company.amocrm.ru",
         api_timeout_seconds=8,
-        incoming_pipeline_id=77,
-        incoming_status_id=88,
         queued_status_id=89,
+        completed_status_id=90,
         mappings=[
             AmoFieldMapping(target="source_path", field_id=1001),
             AmoFieldMapping(target="layout_number", field_id=1002),
             AmoFieldMapping(target="order_number", field_id=1003),
         ],
+        clear_field_ids=[1001, 1002],
         statuses_cache=[{
             "id": 89,
             "name": "В очереди Proof",
@@ -121,24 +146,16 @@ def test_ui_saves_exactly_three_selected_amocrm_fields(
 ) -> None:
     setup = bootstrap()
     response = client.post(
-        "/integrations/amocrm",
+        "/integrations/amocrm/webhook",
         headers=identity_headers,
         data={
             "csrf_token": "proof-csrf",
-            "trigger_events": "leads.status",
-            "default_preset_id": str(setup["preset_id"]),
-            "api_base_url": "https://company.amocrm.ru",
-            "api_timeout_seconds": "8",
-            "queued_status_id": "89",
-            "completed_status_id": "90",
             "source_path_field_id": "1001",
             "layout_number_field_id": "1002",
             "third_field_id": "1003",
             "third_target": "order_number",
-            "clear_field_one_id": "1001",
-            "clear_field_two_id": "1002",
-            "delivery_mode": "amocrm_attachment",
-            "enabled": "on",
+            "clear_source_path": "on",
+            "clear_layout_number": "on",
         },
     )
     assert response.status_code == 200
@@ -153,7 +170,6 @@ def test_ui_saves_exactly_three_selected_amocrm_fields(
             ("order_number", 1003),
         ]
         assert configuration.clear_field_ids == [1001, 1002]
-        assert configuration.delivery_mode == "amocrm_attachment"
 
 
 def test_official_webhook_reads_only_selected_fields_and_moves_lead_to_queue(
@@ -178,6 +194,8 @@ def test_official_webhook_reads_only_selected_fields_and_moves_lead_to_queue(
         ],
     }
     FakeAmoClient.updates = []
+    FakeAmoClient.get_calls = 0
+    FakeAmoClient.fail_update = False
     monkeypatch.setattr(main_module, "AmoClient", FakeAmoClient)
 
     response = client.post(
@@ -192,10 +210,66 @@ def test_official_webhook_reads_only_selected_fields_and_moves_lead_to_queue(
         assert payload["layout_number"] == 4
         assert payload["order_number"] == "33860843"
         assert "must-not-enter-job" not in job.input_json
-    assert FakeAmoClient.updates == [("7654321", {"status_id": 89, "pipeline_id": 77})]
+        assert job.processing_status == "queued"
+    assert FakeAmoClient.updates == [(
+        "7654321",
+        {
+            "status_id": 89,
+            "pipeline_id": 77,
+            "custom_fields_values": [
+                {"field_id": 1001, "values": None},
+                {"field_id": 1002, "values": None},
+            ],
+        },
+    )]
 
 
-def test_official_webhook_is_ignored_when_current_status_no_longer_matches(
+def test_official_webhook_is_queued_only_after_amo_ack_and_duplicate_resumes_ack(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    setup = bootstrap()
+    with session_factory() as session:
+        integration = session.get(ProofIntegration, int(setup["integration_id"]))
+        integration.configuration_json = json_dump(configured_amocrm().model_dump(mode="json"))
+        session.commit()
+    FakeAmoClient.lead = {
+        "id": 7654321,
+        "custom_fields_values": [
+            {"field_id": 1001, "values": [{"value": r"\\ip\orders\33860843"}]},
+            {"field_id": 1002, "values": [{"value": "4"}]},
+            {"field_id": 1003, "values": [{"value": "33860843"}]},
+        ],
+    }
+    FakeAmoClient.updates = []
+    FakeAmoClient.get_calls = 0
+    FakeAmoClient.fail_update = True
+    monkeypatch.setattr(main_module, "AmoClient", FakeAmoClient)
+
+    first = client.post(
+        f"/webhooks/amocrm/{setup['webhook_secret']}",
+        data=official_webhook(),
+    )
+    assert first.status_code == 502
+    with session_factory() as session:
+        job = session.query(ProofJob).one()
+        assert job.processing_status == "received"
+
+    FakeAmoClient.fail_update = False
+    retry = client.post(
+        f"/webhooks/amocrm/{setup['webhook_secret']}",
+        data=official_webhook(),
+    )
+    assert retry.status_code == 200
+    assert retry.json()["duplicate"] is True
+    with session_factory() as session:
+        job = session.query(ProofJob).one()
+        assert job.processing_status == "queued"
+    assert FakeAmoClient.get_calls == 1
+    assert len(FakeAmoClient.updates) == 1
+
+
+def test_official_webhook_does_not_repeat_amo_conditions_inside_core(
     client: TestClient,
     monkeypatch,
 ) -> None:
@@ -208,7 +282,11 @@ def test_official_webhook_is_ignored_when_current_status_no_longer_matches(
         "id": 7654321,
         "pipeline_id": 77,
         "status_id": 999,
-        "custom_fields_values": [],
+        "custom_fields_values": [
+            {"field_id": 1001, "values": [{"value": r"\\ip\orders\33860843"}]},
+            {"field_id": 1002, "values": [{"value": "4"}]},
+            {"field_id": 1003, "values": [{"value": "33860843"}]},
+        ],
     }
     FakeAmoClient.updates = []
     monkeypatch.setattr(main_module, "AmoClient", FakeAmoClient)
@@ -217,11 +295,11 @@ def test_official_webhook_is_ignored_when_current_status_no_longer_matches(
         f"/webhooks/amocrm/{setup['webhook_secret']}",
         data=official_webhook(),
     )
-    assert response.status_code == 200
-    assert response.json() == {"accepted": False, "duplicate": False, "job_id": None}
+    assert response.status_code == 202
+    assert response.json()["accepted"] is True
     with session_factory() as session:
-        assert session.query(ProofJob).count() == 0
-    assert FakeAmoClient.updates == []
+        assert session.query(ProofJob).count() == 1
+    assert len(FakeAmoClient.updates) == 1
 
 
 def test_official_webhook_rejects_incomplete_field_mapping(
@@ -249,8 +327,10 @@ def test_official_webhook_rejects_incomplete_field_mapping(
         data=official_webhook(),
     )
 
-    assert response.status_code == 502
-    assert response.json() == {"detail": "Не удалось получить данные сделки amoCRM."}
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": "Для webhook amoCRM настройте ровно три поля и поля для очистки."
+    }
     with session_factory() as session:
         assert session.query(ProofJob).count() == 0
     assert FakeAmoClient.updates == []
@@ -404,10 +484,6 @@ def test_duplicate_worker_complete_recovers_direct_delivery_without_duplicate_at
         {
             "status_id": 90,
             "pipeline_id": 77,
-            "custom_fields_values": [
-                {"field_id": 1001, "values": None},
-                {"field_id": 1002, "values": None},
-            ],
         },
     )]
     with session_factory() as session:
@@ -417,3 +493,199 @@ def test_duplicate_worker_complete_recovers_direct_delivery_without_duplicate_at
         assert job.delivery_status == "delivered"
         assert delivery.amo_note_id == 4321
         assert delivery.finalized_at is not None
+
+
+def test_oauth_settings_start_and_callback_store_rotating_tokens_encrypted(
+    client: TestClient,
+    identity_headers: dict[str, str],
+    monkeypatch,
+) -> None:
+    setup = bootstrap()
+    settings_response = client.post(
+        "/integrations/amocrm/oauth/settings",
+        headers=identity_headers,
+        data={
+            "csrf_token": "proof-csrf",
+            "api_base_url": "https://company.amocrm.ru",
+            "api_timeout_seconds": "8",
+            "client_id": "oauth-client-id",
+            "client_secret": "oauth-client-secret",
+        },
+    )
+    assert settings_response.status_code == 200
+    assert "https://one.customcraft-mes.ru/proof/integrations/amocrm/oauth/callback" in settings_response.text
+
+    start = client.post(
+        "/integrations/amocrm/oauth/start",
+        headers=identity_headers,
+        data={"csrf_token": "proof-csrf"},
+        follow_redirects=False,
+    )
+    assert start.status_code == 303
+    location = start.headers["location"]
+    parsed = urlparse(location)
+    query = parse_qs(parsed.query)
+    assert f"{parsed.scheme}://{parsed.netloc}{parsed.path}" == "https://www.amocrm.ru/oauth"
+    assert query["client_id"] == ["oauth-client-id"]
+    state = query["state"][0]
+    with session_factory() as session:
+        integration = session.get(ProofIntegration, int(setup["integration_id"]))
+        assert integration.oauth_state_digest == token_digest(state)
+        assert state not in integration.oauth_state_digest
+
+    monkeypatch.setattr(
+        main_module,
+        "exchange_amocrm_oauth_token",
+        lambda *_args, **_kwargs: AmoOAuthTokenSet(
+            token_type="Bearer",
+            expires_in=86400,
+            server_time=int(time.time()),
+            access_token="oauth-access-token",
+            refresh_token="oauth-refresh-token",
+        ),
+    )
+    monkeypatch.setattr(main_module, "AmoClient", FakeOAuthAccountClient)
+    callback = client.get(
+        "/integrations/amocrm/oauth/callback",
+        params={
+            "state": state,
+            "code": "short-lived-code",
+            "referer": "company.amocrm.ru",
+        },
+        follow_redirects=False,
+    )
+    assert callback.status_code == 303
+    assert callback.headers["location"] == "/proof/integrations?amocrm=connected"
+    with session_factory() as session:
+        integration = session.get(ProofIntegration, int(setup["integration_id"]))
+        credentials = services_module.amocrm_credentials(integration, settings)
+        configuration = AmoIntegrationConfiguration.model_validate(
+            json_load(integration.configuration_json, {})
+        )
+        assert credentials["access_token"] == "oauth-access-token"
+        assert credentials["refresh_token"] == "oauth-refresh-token"
+        assert "oauth-access-token" not in integration.credentials_encrypted
+        assert configuration.account_id == 1234
+        assert configuration.account_name == "CustomCraft"
+        assert integration.oauth_state_digest == ""
+
+
+def test_oauth_callback_rejects_unknown_state(client: TestClient) -> None:
+    response = client.get(
+        "/integrations/amocrm/oauth/callback",
+        params={"state": "unknown", "code": "code", "referer": "company.amocrm.ru"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 400
+
+
+def test_public_amocrm_oauth_endpoints_are_discoverable_without_secrets(
+    client: TestClient,
+) -> None:
+    assert client.get("/integrations/amocrm/oauth/callback").json() == {"status": "ready"}
+    assert client.get("/integrations/amocrm/oauth/revoked").json() == {"status": "ready"}
+
+
+def test_expired_oauth_access_token_is_refreshed_and_replacement_is_persisted() -> None:
+    setup = bootstrap()
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={
+            "token_type": "Bearer",
+            "expires_in": 86400,
+            "server_time": int(time.time()),
+            "access_token": "new-access-token",
+            "refresh_token": "new-refresh-token",
+        })
+
+    with session_factory() as session:
+        integration = session.get(ProofIntegration, int(setup["integration_id"]))
+        integration.configuration_json = json_dump(configured_amocrm().model_dump(mode="json"))
+        integration.credentials_encrypted = encrypt_secret(
+            credential_cipher_for_settings(settings),
+            {
+                "client_id": "oauth-client-id",
+                "client_secret": "oauth-client-secret",
+                "access_token": "expired-access-token",
+                "refresh_token": "old-refresh-token",
+                "expires_at": int(time.time()) - 10,
+            },
+        )
+        session.commit()
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
+            token = services_module.get_amocrm_access_token(
+                session, settings, integration, client=http_client
+            )
+        session.refresh(integration)
+        credentials = services_module.amocrm_credentials(integration, settings)
+        assert token == "new-access-token"
+        assert credentials["refresh_token"] == "new-refresh-token"
+        assert session.query(ProofEvent).filter_by(
+            event_type="amocrm.oauth.refreshed"
+        ).count() == 1
+
+    assert len(requests) == 1
+    assert requests[0].url == "https://company.amocrm.ru/oauth2/access_token"
+    payload = json.loads(requests[0].content)
+    assert payload["grant_type"] == "refresh_token"
+    assert payload["refresh_token"] == "old-refresh-token"
+    assert payload["redirect_uri"] == (
+        "https://one.customcraft-mes.ru/proof/integrations/amocrm/oauth/callback"
+    )
+
+
+def test_signed_amocrm_revocation_hook_disconnects_the_matching_account(
+    client: TestClient,
+) -> None:
+    setup = bootstrap()
+    client_id = "oauth-client-id"
+    client_secret = "oauth-client-secret"
+    account_id = "1234"
+    with session_factory() as session:
+        integration = session.get(ProofIntegration, int(setup["integration_id"]))
+        configuration = configured_amocrm().model_copy(update={
+            "account_id": int(account_id),
+            "account_name": "CustomCraft",
+            "connected_at": "2026-09-09T12:00:00",
+        })
+        integration.configuration_json = json_dump(configuration.model_dump(mode="json"))
+        integration.credentials_encrypted = encrypt_secret(
+            credential_cipher_for_settings(settings),
+            {
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "access_token": "access-token",
+                "refresh_token": "refresh-token",
+                "expires_at": int(time.time()) + 3600,
+            },
+        )
+        session.commit()
+    signature = hmac.new(
+        client_secret.encode(),
+        f"{client_id}|{account_id}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+    response = client.get(
+        "/integrations/amocrm/oauth/revoked",
+        params={
+            "client_uuid": client_id,
+            "account_id": account_id,
+            "signature": signature,
+        },
+    )
+    assert response.status_code == 200
+    with session_factory() as session:
+        integration = session.get(ProofIntegration, int(setup["integration_id"]))
+        credentials = services_module.amocrm_credentials(integration, settings)
+        configuration = AmoIntegrationConfiguration.model_validate(
+            json_load(integration.configuration_json, {})
+        )
+        assert credentials == {
+            "client_id": client_id,
+            "client_secret": client_secret,
+        }
+        assert integration.enabled is False
+        assert configuration.account_id is None

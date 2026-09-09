@@ -16,6 +16,7 @@ os.environ["DATABASE_URL"] = f"sqlite:///{(TEST_DATA_DIR / 'test.db').as_posix()
 os.environ["MODULE_PREFIX"] = "/proof"
 os.environ["APP_SECRET_KEY"] = "proof-test-secret"
 os.environ["PROOF_NOTIFICATION_ASYNC"] = "false"
+os.environ["PROOF_PUBLIC_BASE_URL"] = "https://one.customcraft-mes.ru"
 
 from app.main import app, session_factory  # noqa: E402
 from app.models import (  # noqa: E402

@@ -68,6 +68,8 @@ class ProofIntegration(Base):
     webhook_secret_digest: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     webhook_secret_prefix: Mapped[str] = mapped_column(String(16))
     webhook_secret_last_four: Mapped[str] = mapped_column(String(4))
+    oauth_state_digest: Mapped[str] = mapped_column(String(64), default="")
+    oauth_state_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_incoming_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_delivery_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_error_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

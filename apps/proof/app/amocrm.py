@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 from typing import Any, BinaryIO, Literal
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-
 
 MappingTarget = Literal["source_path", "layout_number", "order_number", "public_id"]
 DeliveryMode = Literal["amocrm_attachment", "webhook"]
@@ -22,16 +21,17 @@ class AmoIntegrationConfiguration(BaseModel):
     model_config = ConfigDict(extra="ignore")
     api_base_url: str = ""
     api_timeout_seconds: float | None = Field(default=None, gt=0, le=120)
-    incoming_pipeline_id: int | None = Field(default=None, gt=0)
-    incoming_status_id: int | None = Field(default=None, gt=0)
     queued_status_id: int | None = Field(default=None, gt=0)
     completed_status_id: int | None = Field(default=None, gt=0)
     failed_status_id: int | None = Field(default=None, gt=0)
     delivery_mode: DeliveryMode = "amocrm_attachment"
     mappings: list[AmoFieldMapping] = Field(default_factory=list, max_length=3)
-    clear_field_ids: list[int] = Field(default_factory=list, max_length=2)
+    clear_field_ids: list[int] = Field(default_factory=list, max_length=3)
     fields_cache: list[dict[str, Any]] = Field(default_factory=list)
     statuses_cache: list[dict[str, Any]] = Field(default_factory=list)
+    account_id: int | None = Field(default=None, gt=0)
+    account_name: str = Field(default="", max_length=255)
+    connected_at: str = Field(default="", max_length=64)
 
     @field_validator("api_base_url")
     @classmethod
@@ -61,8 +61,6 @@ class AmoIntegrationConfiguration(BaseModel):
         field_ids = [mapping.field_id for mapping in self.mappings]
         if len(field_ids) != len(set(field_ids)):
             raise ValueError("Одно поле amoCRM нельзя использовать в нескольких назначениях.")
-        if len(self.clear_field_ids) not in {0, 2}:
-            raise ValueError("Для очистки выберите либо два поля, либо ни одного.")
         if len(self.clear_field_ids) != len(set(self.clear_field_ids)):
             raise ValueError("Поля для очистки не должны повторяться.")
         if any(field_id not in field_ids for field_id in self.clear_field_ids):
@@ -80,6 +78,73 @@ class AmoIntegrationConfiguration(BaseModel):
             "source_path",
             "layout_number",
         }.issubset({mapping.target for mapping in self.mappings})
+
+
+class AmoOAuthTokenSet(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    token_type: str
+    expires_in: int = Field(gt=0)
+    server_time: int = Field(gt=0)
+    access_token: str = Field(min_length=1)
+    refresh_token: str = Field(min_length=1)
+
+    @property
+    def expires_at(self) -> int:
+        return self.server_time + self.expires_in
+
+
+def amocrm_authorization_url(client_id: str, api_base_url: str, state: str) -> str:
+    host = urlsplit(api_base_url).hostname or ""
+    oauth_host = "www.amocrm.ru" if host.endswith(".amocrm.ru") else "www.amocrm.com"
+    return f"https://{oauth_host}/oauth?{urlencode({
+        'client_id': client_id,
+        'state': state,
+        'mode': 'popup',
+    })}"
+
+
+def normalize_amocrm_referer(value: str) -> str:
+    normalized = value.strip().rstrip("/")
+    if "://" not in normalized:
+        normalized = f"https://{normalized}"
+    return AmoIntegrationConfiguration(api_base_url=normalized).api_base_url
+
+
+def exchange_amocrm_oauth_token(
+    api_base_url: str,
+    *,
+    client_id: str,
+    client_secret: str,
+    redirect_uri: str,
+    grant_type: Literal["authorization_code", "refresh_token"],
+    code: str = "",
+    refresh_token: str = "",
+    timeout_seconds: float,
+    client: httpx.Client | None = None,
+) -> AmoOAuthTokenSet:
+    payload = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "grant_type": grant_type,
+        "redirect_uri": redirect_uri,
+    }
+    if grant_type == "authorization_code":
+        payload["code"] = code
+    else:
+        payload["refresh_token"] = refresh_token
+    owns_client = client is None
+    http_client = client or httpx.Client(timeout=timeout_seconds, follow_redirects=False)
+    try:
+        response = http_client.post(f"{api_base_url}/oauth2/access_token", json=payload)
+    finally:
+        if owns_client:
+            http_client.close()
+    if response.status_code != 200:
+        raise RuntimeError(f"amoCRM OAuth returned HTTP {response.status_code}.")
+    try:
+        return AmoOAuthTokenSet.model_validate(response.json())
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError("amoCRM OAuth returned an invalid token response.") from exc
 
 
 def parse_optional_id(value: str) -> int | None:
@@ -121,16 +186,6 @@ def build_job_input(lead: dict[str, Any], configuration: AmoIntegrationConfigura
     if not isinstance(result.get("layout_number"), int) or not 1 <= result["layout_number"] <= 999999:
         raise ValueError("В сделке отсутствует корректный номер макета.")
     return result
-
-
-def trigger_matches(lead: dict[str, Any], configuration: AmoIntegrationConfiguration) -> bool:
-    return not (
-        configuration.incoming_pipeline_id
-        and lead.get("pipeline_id") != configuration.incoming_pipeline_id
-    ) and not (
-        configuration.incoming_status_id
-        and lead.get("status_id") != configuration.incoming_status_id
-    )
 
 
 class AmoClient:
@@ -226,6 +281,9 @@ class AmoClient:
         if not lead_id.isdecimal():
             raise ValueError("Webhook amoCRM не содержит корректный ID сделки.")
         return self._request("GET", f"/api/v4/leads/{lead_id}")
+
+    def get_account(self) -> dict[str, Any]:
+        return self._request("GET", "/api/v4/account")
 
     def get_drive_url(self) -> str:
         account = self._request("GET", "/api/v4/account?with=drive_url")

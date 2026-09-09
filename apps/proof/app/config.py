@@ -23,6 +23,15 @@ class AppSettings:
     docs_enabled: bool
     notification_async_enabled: bool
     mattermost_http_timeout_seconds: float
+    public_base_url: str
+
+    @property
+    def amocrm_redirect_uri(self) -> str:
+        return f"{self.public_base_url}{self.module_prefix}/integrations/amocrm/oauth/callback"
+
+    @property
+    def amocrm_revoked_uri(self) -> str:
+        return f"{self.public_base_url}{self.module_prefix}/integrations/amocrm/oauth/revoked"
 
     @classmethod
     def from_env(cls) -> "AppSettings":
@@ -40,4 +49,5 @@ class AppSettings:
             docs_enabled=env_flag("PROOF_API_DOCS_ENABLED"),
             notification_async_enabled=env_flag("PROOF_NOTIFICATION_ASYNC", True),
             mattermost_http_timeout_seconds=float(os.getenv("MATTERMOST_HTTP_TIMEOUT_SECONDS", "10")),
+            public_base_url=os.getenv("PROOF_PUBLIC_BASE_URL", "").strip().rstrip("/"),
         )
