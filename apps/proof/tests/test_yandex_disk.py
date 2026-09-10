@@ -21,7 +21,15 @@ def test_upload_and_publish_creates_folders_and_returns_file_link() -> None:
         if request.url.host == "uploader.disk.yandex.net":
             return httpx.Response(201)
         if request.url.path.endswith("/resources/publish"):
-            return httpx.Response(200, json={})
+            return httpx.Response(200, json={
+                "href": (
+                    "https://cloud-api.yandex.net/v1/disk/resources"
+                    "?path=disk%3A%2FamoCRM%2F%D0%A1%D0%B4%D0%B5%D0%BB%D0%BA%D0%B8"
+                    "%2F31095815%2F31095815_4.zip"
+                ),
+                "method": "GET",
+                "templated": False,
+            })
         if request.method == "GET" and request.url.path.endswith("/resources"):
             return httpx.Response(200, json={"public_url": "https://disk.yandex.ru/d/abc"})
         if request.method == "PUT" and request.url.path.endswith("/resources"):
@@ -48,6 +56,12 @@ def test_upload_and_publish_creates_folders_and_returns_file_link() -> None:
     ]
     upload = next(request for request in requests if request.url.host == "uploader.disk.yandex.net")
     assert upload.content == b"archive"
+    metadata_request = next(
+        request
+        for request in requests
+        if request.method == "GET" and request.url.path.endswith("/resources")
+    )
+    assert metadata_request.url.params["path"].endswith("31095815_4.zip")
 
 
 def test_disk_root_is_normalized_without_allowing_parent_segments() -> None:

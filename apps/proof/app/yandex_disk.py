@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 import httpx
 
 YANDEX_DISK_API_URL = "https://cloud-api.yandex.net/v1/disk"
+YANDEX_DISK_API_HOST = "cloud-api.yandex.net"
 YANDEX_UPLOAD_HOST_SUFFIXES = (".yandex.net", ".yandex.ru", ".yandex.com")
 YANDEX_DEALS_ROOT = "amoCRM/Сделки"
 
@@ -139,6 +140,26 @@ class YandexDiskClient:
             raise RuntimeError("Яндекс.Диск вернул небезопасный URL загрузки.")
         return value
 
+    @staticmethod
+    def _safe_api_link(payload: dict[str, Any], operation: str) -> str:
+        value = payload.get("href")
+        if not isinstance(value, str):
+            raise RuntimeError(f"Яндекс.Диск: {operation} не вернула ссылку на ресурс.")
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme != "https"
+            or (parsed.hostname or "").casefold() != YANDEX_DISK_API_HOST
+            or parsed.username
+            or parsed.password
+            or parsed.fragment
+            or payload.get("templated") is True
+        ):
+            raise RuntimeError(f"Яндекс.Диск: {operation} вернула небезопасную ссылку.")
+        method = str(payload.get("method") or "GET").upper()
+        if method != "GET":
+            raise RuntimeError(f"Яндекс.Диск: {operation} вернула неподдерживаемый метод {method}.")
+        return value
+
     def upload(self, path: str, file_obj: BinaryIO) -> None:
         response = self.client.get(
             f"{YANDEX_DISK_API_URL}/resources/upload",
@@ -165,24 +186,29 @@ class YandexDiskClient:
     def publish(self, path: str) -> str:
         response = self.client.put(
             f"{YANDEX_DISK_API_URL}/resources/publish",
-            headers=self.headers,
+            headers={**self.headers, "Content-Type": "application/json"},
             params={"path": path},
         )
-        if response.status_code not in {200, 201, 202}:
-            detail = self._error_detail(response)
-            suffix = f": {detail}" if detail else ""
+        payload = self._json(response, "публикация файла")
+        if response.status_code != 200:
             raise RuntimeError(
-                f"Яндекс.Диск: публикация файла вернула HTTP {response.status_code}{suffix}."
+                "Яндекс.Диск: публикация файла вернула "
+                f"HTTP {response.status_code}, ожидался HTTP 200."
             )
-        metadata = self.client.get(
-            f"{YANDEX_DISK_API_URL}/resources",
-            headers=self.headers,
-            params={"path": path, "fields": "public_url"},
-        )
+        metadata_url = self._safe_api_link(payload, "публикация файла")
+        metadata = self.client.get(metadata_url, headers=self.headers)
         payload = self._json(metadata, "получение публичной ссылки")
         public_url = payload.get("public_url")
         if not isinstance(public_url, str) or not public_url.startswith("https://"):
-            raise RuntimeError("Яндекс.Диск не вернул публичную ссылку на файл.")
+            public_key = payload.get("public_key")
+            attributes = ", ".join(
+                name for name, value in (("public_key", public_key), ("public_url", public_url))
+                if value not in (None, "")
+            ) or "отсутствуют"
+            raise RuntimeError(
+                "Яндекс.Диск: ресурс опубликован, но в его метаданных нет корректного "
+                f"public_url (публичные атрибуты: {attributes})."
+            )
         return public_url
 
     def upload_and_publish(self, path: str, file_obj: BinaryIO) -> str:
