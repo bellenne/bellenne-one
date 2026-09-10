@@ -927,7 +927,7 @@ def configure_amocrm_webhook_ui(
     clear_field_ids = [
         mapping.field_id
         for mapping, selected in zip(
-            mappings,
+            mappings[:3],
             (clear_source_path, clear_layout_number, "on"),
             strict=True,
         )
