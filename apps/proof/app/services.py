@@ -331,20 +331,17 @@ def mattermost_error_message(event: ProofEvent) -> str:
     def safe(value: str) -> str:
         return value.replace("@", "@\u200b").replace("`", "'").strip()
 
-    lines = [
-        "#### BellenneProof: зафиксирована ошибка",
-        f"**Сообщение:** {safe(event.message)}",
-        f"**Источник:** `{safe(event.source)}`",
-        f"**Событие:** `{safe(event.event_type)}`",
-    ]
-    if event.job_id:
-        lines.append(f"**Job:** `{safe(event.job_id)}`")
-    if event.worker_id:
-        lines.append(f"**Worker:** `{safe(event.worker_id)}`")
-    if event.error_code:
-        lines.append(f"**Код:** `{safe(event.error_code)}`")
-    lines.append(f"**Время:** `{event.created_at.isoformat(timespec='seconds')} UTC`")
-    return "\n".join(lines)
+    details = json_load(event.details_json, {})
+    detailed_error = details.get("error") if isinstance(details, dict) else None
+    message = detailed_error if isinstance(detailed_error, str) and detailed_error.strip() else event.message
+    translations = {
+        "Source file was not found.": "Исходный файл не найден.",
+        "Output disk is unavailable.": "Диск для сохранения результата недоступен.",
+        "A controlled test error occurred.": "Произошла тестовая ошибка.",
+    }
+    message = translations.get(message.strip(), message.strip())
+    message = re.sub(r"^amoCRM API returned HTTP", "amoCRM API вернул HTTP", message)
+    return safe(message)
 
 
 def post_mattermost_message(

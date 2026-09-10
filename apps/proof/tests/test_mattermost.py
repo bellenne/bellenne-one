@@ -91,7 +91,7 @@ def test_standalone_mattermost_test_uses_saved_configuration(
     assert "Тестовое уведомление Mattermost доставлено" in response.text
     assert delivered["webhook_url"] == MATTERMOST_URL
     assert delivered["channel"] == "production-alerts"
-    assert "BellenneProof" in delivered["text"]
+    assert delivered["text"] == "Тестовое уведомление доставлено. Интеграция Mattermost работает."
     assert MATTERMOST_URL not in response.text
     with session_factory() as session:
         integration = session.scalar(select(ProofIntegration).where(
@@ -146,8 +146,9 @@ def test_error_event_is_delivered_once_to_configured_mattermost(client: TestClie
     payload = requests[0].read().decode("utf-8")
     assert requests[0].url == MATTERMOST_URL
     assert "production-alerts" in payload
-    assert "SOURCE_NOT_FOUND" in payload
-    assert job_id in payload
+    assert "Исходный файл не найден." in payload
+    assert "SOURCE_NOT_FOUND" not in payload
+    assert job_id not in payload
     with session_factory() as session:
         delivery = session.scalar(select(ProofNotificationDelivery))
         assert delivery.status == "sent"

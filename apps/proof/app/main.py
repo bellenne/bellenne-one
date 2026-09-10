@@ -1477,7 +1477,7 @@ def test_mattermost_ui(
             settings,
             configured_url,
             channel,
-            "#### BellenneProof\nТестовое уведомление доставлено. Интеграция Mattermost работает.",
+            "Тестовое уведомление доставлено. Интеграция Mattermost работает.",
         )
     except Exception as exc:
         error = sanitized_message(str(exc).replace(configured_url, "[REDACTED_URL]"))[:2000]
