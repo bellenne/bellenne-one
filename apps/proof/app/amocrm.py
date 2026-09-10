@@ -6,8 +6,10 @@ from urllib.parse import urlencode, urlsplit
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .yandex_disk import YANDEX_DEALS_ROOT
+
 MappingTarget = Literal["source_path", "layout_number", "order_number", "public_id"]
-DeliveryMode = Literal["amocrm_attachment", "webhook"]
+DeliveryMode = Literal["amocrm_attachment", "yandex_disk_note", "webhook"]
 AMOCRM_HOST_SUFFIXES = (".amocrm.ru", ".amocrm.com", ".kommo.com")
 
 
@@ -32,6 +34,7 @@ class AmoIntegrationConfiguration(BaseModel):
     account_id: int | None = Field(default=None, gt=0)
     account_name: str = Field(default="", max_length=255)
     connected_at: str = Field(default="", max_length=64)
+    yandex_disk_root: str = Field(default=YANDEX_DEALS_ROOT, max_length=1000)
 
     @field_validator("api_base_url")
     @classmethod
@@ -52,6 +55,11 @@ class AmoIntegrationConfiguration(BaseModel):
         ):
             raise ValueError("Укажите HTTPS-адрес аккаунта amoCRM или Kommo без пути.")
         return value
+
+    @field_validator("yandex_disk_root")
+    @classmethod
+    def fixed_yandex_disk_root(cls, _value: str) -> str:
+        return YANDEX_DEALS_ROOT
 
     @model_validator(mode="after")
     def unique_targets(self):
@@ -320,7 +328,7 @@ class AmoClient:
         while uploaded < file_size:
             chunk = file_obj.read(min(max_part_size, file_size - uploaded))
             if not chunk:
-                raise RuntimeError("Result archive ended before the declared file size.")
+                raise RuntimeError("Result file ended before the declared file size.")
             final_payload = self._absolute_request(
                 "POST",
                 upload_url,
@@ -332,10 +340,10 @@ class AmoClient:
             if next_url:
                 upload_url = self._validate_upload_url(next_url, drive_url)
             elif uploaded != file_size:
-                raise RuntimeError("amoCRM ended the upload before receiving the whole archive.")
+                raise RuntimeError("amoCRM ended the upload before receiving the whole file.")
 
         if final_payload is None:
-            raise RuntimeError("An empty archive cannot be uploaded to amoCRM.")
+            raise RuntimeError("An empty file cannot be uploaded to amoCRM.")
         file_uuid = final_payload.get("uuid")
         version_uuid = final_payload.get("version_uuid")
         if not isinstance(file_uuid, str) or not file_uuid:
@@ -344,15 +352,75 @@ class AmoClient:
             raise RuntimeError("amoCRM did not return the uploaded file version UUID.")
         return final_payload
 
-    def find_attachment_note(self, lead_id: str, file_uuid: str) -> dict[str, Any] | None:
+    def is_file_linked(self, lead_id: str, file_uuid: str) -> bool:
+        if not lead_id.isdecimal():
+            raise ValueError("Job does not contain a valid amoCRM lead ID.")
+        before_id: int | None = None
+        for _page in range(100):
+            path = f"/api/v4/leads/{lead_id}/files?limit=250"
+            if before_id is not None:
+                path += f"&before_id={before_id}"
+            response = self.client.request(
+                "GET", f"{self.base_url}{path}", headers=self.headers
+            )
+            if response.status_code == 204:
+                return False
+            if not 200 <= response.status_code < 300:
+                raise RuntimeError(
+                    f"amoCRM API returned HTTP {response.status_code}."
+                )
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise RuntimeError("amoCRM API returned an invalid response.")
+            files = payload.get("_embedded", {}).get("files", [])
+            if not isinstance(files, list):
+                raise RuntimeError("amoCRM returned an invalid linked files response.")
+            if any(
+                isinstance(item, dict) and item.get("file_uuid") == file_uuid
+                for item in files
+            ):
+                return True
+            if len(files) < 250:
+                return False
+            relation_ids = [
+                item.get("id")
+                for item in files
+                if isinstance(item, dict) and isinstance(item.get("id"), int)
+            ]
+            if not relation_ids:
+                raise RuntimeError("amoCRM linked files page has no relation IDs.")
+            before_id = min(relation_ids)
+        raise RuntimeError("amoCRM linked files lookup exceeded the safe page limit.")
+
+    def link_file(self, lead_id: str, file_uuid: str) -> None:
+        if not lead_id.isdecimal():
+            raise ValueError("Job does not contain a valid amoCRM lead ID.")
+        response = self.client.request(
+            "PUT",
+            f"{self.base_url}/api/v4/leads/{lead_id}/files",
+            headers=self.headers,
+            json=[{"file_uuid": file_uuid}],
+        )
+        if response.status_code != 202:
+            raise RuntimeError(f"amoCRM API returned HTTP {response.status_code}.")
+
+    def find_common_note(self, lead_id: str, text: str) -> dict[str, Any] | None:
         if not lead_id.isdecimal():
             raise ValueError("Job does not contain a valid amoCRM lead ID.")
         for page in range(1, 101):
-            payload = self._request(
+            response = self.client.request(
                 "GET",
-                f"/api/v4/leads/{lead_id}/notes"
-                f"?filter[note_type]=attachment&limit=250&page={page}",
+                f"{self.base_url}/api/v4/leads/{lead_id}/notes"
+                f"?filter[note_type]=common&limit=250&page={page}",
+                headers=self.headers,
             )
+            if response.status_code == 204:
+                return None
+            if not 200 <= response.status_code < 300:
+                raise RuntimeError(f"amoCRM API returned HTTP {response.status_code}.")
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise RuntimeError("amoCRM returned an invalid notes response.")
             notes = payload.get("_embedded", {}).get("notes", [])
             if not isinstance(notes, list):
                 raise RuntimeError("amoCRM returned an invalid notes response.")
@@ -360,34 +428,20 @@ class AmoClient:
                 if (
                     isinstance(note, dict)
                     and isinstance(note.get("params"), dict)
-                    and note["params"].get("file_uuid") == file_uuid
+                    and note["params"].get("text") == text
                 ):
                     return note
             if len(notes) < 250:
                 return None
-        raise RuntimeError("amoCRM attachment lookup exceeded the safe page limit.")
+        raise RuntimeError("amoCRM note lookup exceeded the safe page limit.")
 
-    def create_attachment_note(
-        self,
-        lead_id: str,
-        *,
-        file_uuid: str,
-        version_uuid: str,
-        file_name: str,
-    ) -> dict[str, Any]:
+    def create_common_note(self, lead_id: str, text: str) -> dict[str, Any]:
         if not lead_id.isdecimal():
             raise ValueError("Job does not contain a valid amoCRM lead ID.")
         return self._request(
             "POST",
             f"/api/v4/leads/{lead_id}/notes",
-            json={
-                "note_type": "attachment",
-                "params": {
-                    "file_uuid": file_uuid,
-                    "version_uuid": version_uuid,
-                    "file_name": file_name,
-                },
-            },
+            json={"note_type": "common", "params": {"text": text}},
         )
 
     def load_catalog(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:

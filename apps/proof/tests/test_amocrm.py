@@ -9,18 +9,18 @@ import zipfile
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-import app.main as main_module
-import app.services as services_module
 import httpx
 import pytest
+from fastapi.testclient import TestClient
+from pydantic import ValidationError
+
+import app.main as main_module
+import app.services as services_module
 from app.amocrm import AmoFieldMapping, AmoIntegrationConfiguration, AmoOAuthTokenSet
 from app.main import session_factory, settings
 from app.models import ProofEvent, ProofIntegration, ProofJob, ProofResultDelivery
 from app.security import encrypt_secret, token_digest
 from app.services import credential_cipher_for_settings, json_dump, json_load
-from fastapi.testclient import TestClient
-from pydantic import ValidationError
-
 from tests.helpers import bootstrap
 
 
@@ -66,10 +66,11 @@ class FakeOAuthAccountClient:
 
 class FakeDirectAmoClient:
     upload_calls = 0
-    note_calls = 0
-    fail_note_once = True
-    remote_note_exists = False
-    archive_bytes = b""
+    link_calls = 0
+    fail_link_once = True
+    remote_link_exists = False
+    uploaded_bytes = b""
+    uploaded_options: dict[str, Any] = {}
     updates: list[tuple[str, dict[str, Any]]] = []
 
     def __init__(self, *_args: Any, **_kwargs: Any) -> None:
@@ -81,21 +82,76 @@ class FakeDirectAmoClient:
     def __exit__(self, *_args: Any) -> None:
         pass
 
-    def upload_file(self, file_obj, **_kwargs: Any) -> dict[str, Any]:
+    def upload_file(self, file_obj, **kwargs: Any) -> dict[str, Any]:
         type(self).upload_calls += 1
-        type(self).archive_bytes = file_obj.read()
+        type(self).uploaded_bytes = file_obj.read()
+        type(self).uploaded_options = kwargs
         return {"uuid": "file-uuid", "version_uuid": "version-uuid"}
 
-    def find_attachment_note(self, _lead_id: str, _file_uuid: str) -> dict[str, Any] | None:
-        return {"id": 4321} if type(self).remote_note_exists else None
+    def is_file_linked(self, _lead_id: str, _file_uuid: str) -> bool:
+        return type(self).remote_link_exists
 
-    def create_attachment_note(self, _lead_id: str, **_kwargs: Any) -> dict[str, Any]:
-        type(self).note_calls += 1
+    def link_file(self, _lead_id: str, _file_uuid: str) -> None:
+        type(self).link_calls += 1
+        type(self).remote_link_exists = True
+        if type(self).fail_link_once:
+            type(self).fail_link_once = False
+            raise RuntimeError("temporary link failure")
+
+    def update_lead(self, lead_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        type(self).updates.append((lead_id, payload))
+        return {"id": int(lead_id)}
+
+
+class FakeYandexDiskClient:
+    upload_calls = 0
+    uploaded_bytes = b""
+    uploaded_path = ""
+
+    def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args: Any) -> None:
+        pass
+
+    def account(self) -> dict[str, Any]:
+        return {"user": {"login": "production"}}
+
+    def upload_and_publish(self, path: str, file_obj) -> str:
+        type(self).upload_calls += 1
+        type(self).uploaded_path = path
+        type(self).uploaded_bytes = file_obj.read()
+        return "https://disk.yandex.ru/d/proof-archive"
+
+
+class FakeYandexAmoClient:
+    create_note_calls = 0
+    fail_note_once = True
+    remote_note_exists = False
+    updates: list[tuple[str, dict[str, Any]]] = []
+
+    def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args: Any) -> None:
+        pass
+
+    def find_common_note(self, _lead_id: str, _text: str) -> dict[str, Any] | None:
+        return {"id": 701} if type(self).remote_note_exists else None
+
+    def create_common_note(self, _lead_id: str, _text: str) -> dict[str, Any]:
+        type(self).create_note_calls += 1
+        type(self).remote_note_exists = True
         if type(self).fail_note_once:
             type(self).fail_note_once = False
-            type(self).remote_note_exists = True
             raise RuntimeError("temporary note failure")
-        return {"id": 4321}
+        return {"id": 701}
 
     def update_lead(self, lead_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         type(self).updates.append((lead_id, payload))
@@ -181,6 +237,43 @@ def test_ui_saves_exactly_three_selected_amocrm_fields(
             ("order_number", 1003),
         ]
         assert configuration.clear_field_ids == [1001, 1002]
+
+
+def test_ui_checks_and_saves_yandex_disk_token_encrypted(
+    client: TestClient,
+    identity_headers: dict[str, str],
+    monkeypatch,
+) -> None:
+    setup = bootstrap()
+    with session_factory() as session:
+        integration = session.get(ProofIntegration, int(setup["integration_id"]))
+        integration.configuration_json = json_dump(
+            configured_amocrm().model_dump(mode="json")
+        )
+        session.commit()
+    monkeypatch.setattr(main_module, "YandexDiskClient", FakeYandexDiskClient)
+
+    response = client.post(
+        "/integrations/amocrm/yandex-disk",
+        headers=identity_headers,
+        data={
+            "csrf_token": "proof-csrf",
+            "oauth_token": "yandex-secret-token",
+        },
+    )
+
+    assert response.status_code == 200
+    assert "Яндекс.Диск подключён." in response.text
+    with session_factory() as session:
+        integration = session.get(ProofIntegration, int(setup["integration_id"]))
+        configuration = AmoIntegrationConfiguration.model_validate(
+            json_load(integration.configuration_json, {})
+        )
+        credentials = services_module.amocrm_credentials(integration, settings)
+        assert configuration.yandex_disk_root == "amoCRM/Сделки"
+        assert configuration.delivery_mode == "yandex_disk_note"
+        assert credentials["yandex_disk_token"] == "yandex-secret-token"
+        assert "yandex-secret-token" not in integration.credentials_encrypted
 
 
 def test_official_webhook_reads_only_selected_fields_and_moves_lead_to_queue(
@@ -389,6 +482,62 @@ def test_amocrm_file_upload_uses_drive_session_and_chunks() -> None:
     assert all(request.headers["authorization"] == "Bearer secret-token" for request in requests)
 
 
+def test_amocrm_file_is_linked_to_lead_through_files_api() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(204)
+        if request.method == "PUT":
+            return httpx.Response(202)
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
+        with main_module.AmoClient(
+            "https://company.amocrm.ru",
+            "secret-token",
+            timeout_seconds=8,
+            client=http_client,
+        ) as amo:
+            assert not amo.is_file_linked("7654321", "file-uuid")
+            amo.link_file("7654321", "file-uuid")
+
+    assert requests[0].url.path == "/api/v4/leads/7654321/files"
+    assert requests[1].url.path == "/api/v4/leads/7654321/files"
+    assert json.loads(requests[1].content) == [{"file_uuid": "file-uuid"}]
+
+
+def test_amocrm_common_note_contains_only_yandex_file_link() -> None:
+    requests: list[httpx.Request] = []
+    link = "https://disk.yandex.ru/d/public-proof"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, json={"_embedded": {"notes": []}})
+        if request.method == "POST":
+            return httpx.Response(200, json={"id": 701})
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
+        with main_module.AmoClient(
+            "https://company.amocrm.ru",
+            "secret-token",
+            timeout_seconds=8,
+            client=http_client,
+        ) as amo:
+            assert amo.find_common_note("7654321", link) is None
+            assert amo.create_common_note("7654321", link) == {"id": 701}
+
+    assert requests[0].url.path == "/api/v4/leads/7654321/notes"
+    assert requests[0].url.params["filter[note_type]"] == "common"
+    assert json.loads(requests[1].content) == {
+        "note_type": "common",
+        "params": {"text": link},
+    }
+
+
 def test_amocrm_catalog_loads_all_custom_field_pages() -> None:
     requested_pages: list[str] = []
 
@@ -422,7 +571,7 @@ def test_amocrm_catalog_loads_all_custom_field_pages() -> None:
     assert any("custom_fields?limit=250&page=2" in url for url in requested_pages)
 
 
-def test_duplicate_worker_complete_recovers_direct_delivery_without_duplicate_attachment(
+def test_duplicate_worker_complete_recovers_direct_delivery_without_duplicate_file_link(
     client: TestClient,
     monkeypatch,
 ) -> None:
@@ -445,10 +594,11 @@ def test_duplicate_worker_complete_recovers_direct_delivery_without_duplicate_at
         session.commit()
 
     FakeDirectAmoClient.upload_calls = 0
-    FakeDirectAmoClient.note_calls = 0
-    FakeDirectAmoClient.fail_note_once = True
-    FakeDirectAmoClient.remote_note_exists = False
-    FakeDirectAmoClient.archive_bytes = b""
+    FakeDirectAmoClient.link_calls = 0
+    FakeDirectAmoClient.fail_link_once = True
+    FakeDirectAmoClient.remote_link_exists = False
+    FakeDirectAmoClient.uploaded_bytes = b""
+    FakeDirectAmoClient.uploaded_options = {}
     FakeDirectAmoClient.updates = []
     monkeypatch.setattr(services_module, "AmoClient", FakeDirectAmoClient)
 
@@ -470,6 +620,10 @@ def test_duplicate_worker_complete_recovers_direct_delivery_without_duplicate_at
     client.post(
         f"/api/v1/jobs/{job_id}/result",
         headers={**headers, "Idempotency-Key": "direct-result"},
+        data={"metadata_json": json.dumps({
+            "published_filename": "ЦП Макет 3 60х30.jpg",
+            "published_revision": 4,
+        })},
         files={"file": ("proof.jpg", b"proof-image", "image/jpeg")},
     )
 
@@ -479,17 +633,21 @@ def test_duplicate_worker_complete_recovers_direct_delivery_without_duplicate_at
     with session_factory() as session:
         delivery = session.query(ProofResultDelivery).one()
         assert delivery.amo_file_uuid == "file-uuid"
-        assert delivery.amo_note_id is None
 
     retry = client.post(f"/api/v1/jobs/{job_id}/complete", headers=headers)
     assert retry.status_code == 200
     assert retry.json()["delivery_status"] == "delivered"
 
     assert FakeDirectAmoClient.upload_calls == 1
-    assert FakeDirectAmoClient.note_calls == 1
-    with zipfile.ZipFile(io.BytesIO(FakeDirectAmoClient.archive_bytes)) as archive:
-        assert archive.namelist() == ["proof.jpg"]
-        assert archive.read("proof.jpg") == b"proof-image"
+    assert FakeDirectAmoClient.link_calls == 1
+    with zipfile.ZipFile(io.BytesIO(FakeDirectAmoClient.uploaded_bytes)) as archive:
+        assert archive.namelist() == ["ЦП Макет 3 60х30.jpg"]
+        assert archive.read("ЦП Макет 3 60х30.jpg") == b"proof-image"
+    assert FakeDirectAmoClient.uploaded_options == {
+        "file_name": "ORDER-42 4.zip",
+        "file_size": len(FakeDirectAmoClient.uploaded_bytes),
+        "content_type": "application/zip",
+    }
     assert FakeDirectAmoClient.updates == [(
         "7654321",
         {
@@ -502,7 +660,93 @@ def test_duplicate_worker_complete_recovers_direct_delivery_without_duplicate_at
         delivery = session.query(ProofResultDelivery).one()
         assert job.processing_status == "completed"
         assert job.delivery_status == "delivered"
-        assert delivery.amo_note_id == 4321
+        assert delivery.finalized_at is not None
+
+
+def test_yandex_delivery_uploads_zip_once_and_recovers_note_without_duplication(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    setup = bootstrap()
+    configuration = configured_amocrm().model_copy(update={
+        "completed_status_id": 90,
+        "delivery_mode": "yandex_disk_note",
+        "yandex_disk_root": "Производство/Цветопробы",
+        "clear_field_ids": [1001, 1002],
+        "statuses_cache": [{
+            "id": 90,
+            "name": "Proof completed",
+            "pipeline_id": 77,
+            "pipeline_name": "Production",
+        }],
+    })
+    with session_factory() as session:
+        integration = session.get(ProofIntegration, int(setup["integration_id"]))
+        integration.configuration_json = json_dump(configuration.model_dump(mode="json"))
+        credentials = services_module.amocrm_credentials(integration, settings)
+        credentials["yandex_disk_token"] = "yandex-secret"
+        integration.credentials_encrypted = encrypt_secret(
+            credential_cipher_for_settings(settings), credentials
+        )
+        integration.delivery_url = ""
+        session.commit()
+
+    FakeYandexDiskClient.upload_calls = 0
+    FakeYandexDiskClient.uploaded_bytes = b""
+    FakeYandexDiskClient.uploaded_path = ""
+    FakeYandexAmoClient.create_note_calls = 0
+    FakeYandexAmoClient.fail_note_once = True
+    FakeYandexAmoClient.remote_note_exists = False
+    FakeYandexAmoClient.updates = []
+    monkeypatch.setattr(services_module, "YandexDiskClient", FakeYandexDiskClient)
+    monkeypatch.setattr(services_module, "AmoClient", FakeYandexAmoClient)
+
+    job_response = client.post(
+        f"/webhooks/amocrm/{setup['webhook_secret']}",
+        json={
+            "event_id": "yandex-delivery",
+            "event_type": "proof.requested",
+            "crm_entity_type": "leads",
+            "crm_entity_id": "7654321",
+            "crm_order_id": "31095815",
+            "input": {"source_path": "orders/31095815", "layout_number": 3},
+        },
+    )
+    job_id = job_response.json()["job_id"]
+    headers = {"Authorization": f"Bearer {setup['worker_token']}"}
+    client.post("/api/v1/jobs/claim", headers=headers)
+    client.post(f"/api/v1/jobs/{job_id}/start", headers=headers)
+    client.post(
+        f"/api/v1/jobs/{job_id}/result",
+        headers={**headers, "Idempotency-Key": "yandex-result"},
+        data={"metadata_json": json.dumps({
+            "published_filename": "ЦП Макет 3 60х30.jpg",
+            "published_revision": 4,
+        })},
+        files={"file": ("proof.jpg", b"proof-image", "image/jpeg")},
+    )
+
+    first = client.post(f"/api/v1/jobs/{job_id}/complete", headers=headers)
+    assert first.json()["delivery_status"] == "failed"
+    retry = client.post(f"/api/v1/jobs/{job_id}/complete", headers=headers)
+    assert retry.json()["delivery_status"] == "delivered"
+
+    assert FakeYandexDiskClient.upload_calls == 1
+    assert FakeYandexDiskClient.uploaded_path == (
+        "disk:/amoCRM/Сделки/31095815/31095815 4.zip"
+    )
+    with zipfile.ZipFile(io.BytesIO(FakeYandexDiskClient.uploaded_bytes)) as archive:
+        assert archive.namelist() == ["ЦП Макет 3 60х30.jpg"]
+        assert archive.read("ЦП Макет 3 60х30.jpg") == b"proof-image"
+    assert FakeYandexAmoClient.create_note_calls == 1
+    assert FakeYandexAmoClient.updates == [(
+        "7654321",
+        {"status_id": 90, "pipeline_id": 77},
+    )]
+    with session_factory() as session:
+        delivery = session.query(ProofResultDelivery).one()
+        assert delivery.yandex_public_url == "https://disk.yandex.ru/d/proof-archive"
+        assert delivery.amo_note_id == 701
         assert delivery.finalized_at is not None
 
 

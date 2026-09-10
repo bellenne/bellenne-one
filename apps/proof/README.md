@@ -37,8 +37,8 @@ reference production parameters live in `BellenneProofWorker/examples/preset.jso
 
 ## amoCRM adapter contract
 
-Configure amoCRM on the Integrations page in four independent steps: OAuth,
-webhook field mapping, lead statuses, then the Worker preset and activation.
+Configure amoCRM on the Integrations page in five independent steps: OAuth,
+webhook field mapping, lead statuses, Yandex Disk, then the Worker preset and activation.
 Register these public endpoints in the amoCRM integration:
 
 ```text
@@ -46,7 +46,7 @@ Redirect URI: https://one.customcraft-mes.ru/proof/integrations/amocrm/oauth/cal
 Revocation hook: https://one.customcraft-mes.ru/proof/integrations/amocrm/oauth/revoked
 ```
 
-The integration needs access to account/CRM data and the file scope. Core stores
+The integration needs access to account/CRM data, including lead notes. Core stores
 the OAuth client secret, access token and rotating refresh token encrypted. It
 validates the one-time OAuth state, confirms the returned account, and refreshes
 the token before expiry. `PROOF_PUBLIC_BASE_URL` must contain the public HTTPS
@@ -67,16 +67,24 @@ acknowledgement succeeds does the Job enter the Worker queue. If the PATCH fails
 the Job remains `received`; a duplicate delivery retries the acknowledgement
 without creating another Job or rereading the fields that may already be empty.
 
-Direct delivery wraps the immutable Worker Result in a ZIP, uploads it through
-the amoCRM file-service session API, and adds an `attachment` note to the lead.
-After the attachment exists, Core applies the completed status. The final step
-does not clear the source fields again.
+Production delivery packs the immutable Worker JPEG into a ZIP and uploads it to
+`amoCRM/Сделки/<order number>/`. Core publishes that exact ZIP and
+adds its public URL as a `common` note on the amoCRM lead. Only after the note
+exists does Core apply the completed status. The final step does not clear the
+source fields again.
+The ZIP name is `<order number> <published revision>.zip`, for example
+`31095815 4.zip`; the archive contains the JPEG under its Worker filename.
 
-The uploaded file UUID, version UUID and note ID are persisted separately from
-the immutable Result. If creating the note or finalizing the lead fails, Retry
+The Yandex Disk path, public URL and amoCRM note ID are persisted separately from
+the immutable Result. If adding the note or finalizing the lead fails, Retry
 Delivery resumes from the last durable stage rather than re-running Worker or
-uploading the same archive again. Before creating a note, Core also searches for
-an existing attachment with that file UUID to tolerate a lost API response.
+uploading the same archive again. Before creating the note, Core searches for an
+existing common note with the exact URL to tolerate a lost API response. The
+filename comes from Worker result metadata when `published_filename` is present.
+
+The Yandex Disk OAuth token is checked against the Disk API when it is saved and
+is stored encrypted with the other integration credentials. The configured root
+is a path inside that Disk account and must not include `disk:/`.
 
 The internal JSON webhook contract and legacy webhook delivery mode remain
 available for compatibility. Legacy delivery posts multipart form-data to the

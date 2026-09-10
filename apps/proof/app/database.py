@@ -48,6 +48,10 @@ def init_database(engine: Engine) -> None:
                 "oauth_state_digest": "VARCHAR(64) NOT NULL DEFAULT ''",
                 "oauth_state_expires_at": "DATETIME",
             },
+            "proof_result_deliveries": {
+                "yandex_disk_path": "TEXT",
+                "yandex_public_url": "TEXT",
+            },
         }
         with engine.begin() as connection:
             for table_name, columns in additions.items():

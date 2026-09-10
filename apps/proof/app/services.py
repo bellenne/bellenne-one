@@ -46,6 +46,7 @@ from .security import (
     secret_parts,
     token_digest,
 )
+from .yandex_disk import YandexDiskClient, disk_path
 
 PROCESSING_STATUSES = (
     "received", "queued", "assigned", "running", "completed", "failed", "cancelled", "retrying"
@@ -135,6 +136,10 @@ def store_amocrm_token_set(
     token_set: AmoOAuthTokenSet,
 ) -> None:
     updated = {
+        key: value
+        for key, value in credentials.items()
+        if key == "yandex_disk_token"
+    } | {
         "client_id": credentials["client_id"],
         "client_secret": credentials["client_secret"],
         "access_token": token_set.access_token,
@@ -964,11 +969,40 @@ def _delivery_record(
             job_id=job.id,
             result_id=result.id,
             integration_id=integration.id,
-            archive_filename=f"BellenneProof-{job.id}.zip",
+            archive_filename=result.filename,
         )
         session.add(delivery)
         session.flush()
     return delivery
+
+
+def _amocrm_result_filename(result: ProofResult) -> str:
+    metadata = json_load(result.metadata_json, {})
+    published = metadata.get("published_filename")
+    if (
+        isinstance(published, str)
+        and 1 <= len(published) <= 255
+        and Path(published).name == published
+        and not any(character in published for character in "/\\\x00")
+        and published.casefold().endswith((".jpg", ".jpeg"))
+    ):
+        return published
+    return result.filename
+
+
+def _amocrm_archive_filename(job: ProofJob, result: ProofResult) -> str:
+    order_number = job.crm_order_id.strip()
+    metadata = json_load(result.metadata_json, {})
+    revision = metadata.get("published_revision")
+    if (
+        not order_number
+        or len(order_number) > 200
+        or any(character in order_number for character in '<>:"/\\|?*\x00')
+    ):
+        raise RuntimeError("Job does not contain a safe order number for the archive name.")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+        raise RuntimeError("Worker Result does not contain the published order revision.")
+    return f"{order_number} {revision}.zip"
 
 
 def _result_archive(
@@ -978,23 +1012,23 @@ def _result_archive(
 ) -> Path:
     source_path = _result_path(settings, result)
     archive_path = source_path.parent / f"{result.id}-amocrm.zip"
-    if not archive_path.is_file():
-        temporary_path = source_path.parent / f".{archive_path.name}.{uuid4().hex}.tmp"
-        try:
-            info = zipfile.ZipInfo(result.filename, date_time=(1980, 1, 1, 0, 0, 0))
-            info.compress_type = zipfile.ZIP_DEFLATED
-            info.external_attr = 0o600 << 16
-            with zipfile.ZipFile(
-                temporary_path,
-                mode="w",
-                compression=zipfile.ZIP_DEFLATED,
-                compresslevel=6,
-            ) as archive:
-                with source_path.open("rb") as source, archive.open(info, "w") as target:
-                    shutil.copyfileobj(source, target, length=1024 * 1024)
-            os.replace(temporary_path, archive_path)
-        finally:
-            temporary_path.unlink(missing_ok=True)
+    temporary_path = source_path.parent / f".{archive_path.name}.{uuid4().hex}.tmp"
+    member_filename = _amocrm_result_filename(result)
+    try:
+        info = zipfile.ZipInfo(member_filename, date_time=(1980, 1, 1, 0, 0, 0))
+        info.compress_type = zipfile.ZIP_DEFLATED
+        info.external_attr = 0o600 << 16
+        with zipfile.ZipFile(
+            temporary_path,
+            mode="w",
+            compression=zipfile.ZIP_DEFLATED,
+            compresslevel=6,
+        ) as archive:
+            with source_path.open("rb") as source, archive.open(info, "w") as target:
+                shutil.copyfileobj(source, target, length=1024 * 1024)
+        os.replace(temporary_path, archive_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
     digest = hashlib.sha256()
     with archive_path.open("rb") as archive_file:
         for block in iter(lambda: archive_file.read(1024 * 1024), b""):
@@ -1021,7 +1055,7 @@ def _deliver_directly_to_amocrm(
         raise RuntimeError("Job is not linked to a valid amoCRM lead.")
 
     delivery = _delivery_record(session, job, result, integration)
-    archive_path = _result_archive(settings, result, delivery)
+    delivery.archive_filename = _amocrm_archive_filename(job, result)
     access_token = get_amocrm_access_token(
         session, settings, integration, client=client
     )
@@ -1032,6 +1066,7 @@ def _deliver_directly_to_amocrm(
         client=client,
     ) as amo:
         if not delivery.amo_file_uuid or not delivery.amo_version_uuid:
+            archive_path = _result_archive(settings, result, delivery)
             with archive_path.open("rb") as archive_file:
                 uploaded = amo.upload_file(
                     archive_file,
@@ -1057,28 +1092,17 @@ def _deliver_directly_to_amocrm(
             )
             session.commit()
 
-        if delivery.amo_note_id is None:
-            note = amo.find_attachment_note(job.crm_entity_id, delivery.amo_file_uuid)
-            if note is None:
-                note = amo.create_attachment_note(
-                    job.crm_entity_id,
-                    file_uuid=delivery.amo_file_uuid,
-                    version_uuid=delivery.amo_version_uuid,
-                    file_name=delivery.archive_filename,
-                )
-            try:
-                delivery.amo_note_id = int(note["id"])
-            except (KeyError, TypeError, ValueError) as exc:
-                raise RuntimeError("amoCRM did not return the attachment note ID.") from exc
+        if not amo.is_file_linked(job.crm_entity_id, delivery.amo_file_uuid):
+            amo.link_file(job.crm_entity_id, delivery.amo_file_uuid)
             add_event(
                 session,
                 owner_external_user_id=job.owner_external_user_id,
                 job_id=job.id,
                 integration_id=integration.id,
-                event_type="amocrm.archive.attached",
+                event_type="amocrm.file.linked",
                 source="integration",
-                message="Result archive attached to the amoCRM lead.",
-                details={"result_id": result.id, "note_id": delivery.amo_note_id},
+                message="Result archive linked to the amoCRM lead.",
+                details={"result_id": result.id, "file_uuid": delivery.amo_file_uuid},
             )
             session.commit()
 
@@ -1105,7 +1129,124 @@ def _deliver_directly_to_amocrm(
                 integration_id=integration.id,
                 event_type="amocrm.lead.finalized",
                 source="integration",
-                message="Result archive was attached and the completed amoCRM status was applied.",
+                message="Result archive was linked and the completed amoCRM status was applied.",
+                details={
+                    "status_id": configuration.completed_status_id,
+                    "file_uuid": delivery.amo_file_uuid,
+                },
+            )
+
+
+def _deliver_via_yandex_disk(
+    session: Session,
+    settings: AppSettings,
+    job: ProofJob,
+    result: ProofResult,
+    integration: ProofIntegration,
+    configuration: AmoIntegrationConfiguration,
+    *,
+    client: httpx.Client | None,
+) -> None:
+    if not configuration.api_base_url or configuration.api_timeout_seconds is None:
+        raise RuntimeError("amoCRM API connection is not configured.")
+    if configuration.completed_status_id is None:
+        raise RuntimeError("The completed amoCRM lead status is not configured.")
+    if not configuration.yandex_disk_root:
+        raise RuntimeError("Корневая папка Яндекс.Диска не настроена.")
+    if job.crm_entity_type not in {"lead", "leads"} or not job.crm_entity_id.isdecimal():
+        raise RuntimeError("Job is not linked to a valid amoCRM lead.")
+
+    credentials = amocrm_credentials(integration, settings)
+    yandex_token = str(credentials.get("yandex_disk_token") or "")
+    if not yandex_token:
+        raise RuntimeError("OAuth token Яндекс.Диска не настроен.")
+
+    delivery = _delivery_record(session, job, result, integration)
+    delivery.archive_filename = _amocrm_archive_filename(job, result)
+    if not delivery.yandex_disk_path:
+        delivery.yandex_disk_path = disk_path(
+            configuration.yandex_disk_root,
+            job.crm_order_id,
+            delivery.archive_filename,
+        )
+
+    if not delivery.yandex_public_url:
+        archive_path = _result_archive(settings, result, delivery)
+        with YandexDiskClient(
+            yandex_token,
+            timeout_seconds=configuration.api_timeout_seconds,
+            client=client,
+        ) as disk:
+            with archive_path.open("rb") as archive_file:
+                delivery.yandex_public_url = disk.upload_and_publish(
+                    delivery.yandex_disk_path,
+                    archive_file,
+                )
+        add_event(
+            session,
+            owner_external_user_id=job.owner_external_user_id,
+            job_id=job.id,
+            integration_id=integration.id,
+            event_type="yandex_disk.archive.published",
+            source="integration",
+            message="Result archive uploaded and published on Yandex Disk.",
+            details={
+                "result_id": result.id,
+                "archive_sha256": delivery.archive_sha256,
+                "disk_path": delivery.yandex_disk_path,
+            },
+        )
+        session.commit()
+
+    access_token = get_amocrm_access_token(session, settings, integration, client=client)
+    with AmoClient(
+        configuration.api_base_url,
+        access_token,
+        timeout_seconds=configuration.api_timeout_seconds,
+        client=client,
+    ) as amo:
+        if delivery.amo_note_id is None:
+            note = amo.find_common_note(job.crm_entity_id, delivery.yandex_public_url)
+            if note is None:
+                note = amo.create_common_note(job.crm_entity_id, delivery.yandex_public_url)
+            try:
+                delivery.amo_note_id = int(note["id"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RuntimeError("amoCRM did not return the note ID.") from exc
+            add_event(
+                session,
+                owner_external_user_id=job.owner_external_user_id,
+                job_id=job.id,
+                integration_id=integration.id,
+                event_type="amocrm.yandex_link.noted",
+                source="integration",
+                message="Yandex Disk archive link added to the amoCRM lead.",
+                details={"result_id": result.id, "note_id": delivery.amo_note_id},
+            )
+            session.commit()
+
+        if delivery.finalized_at is None:
+            status_payload: dict[str, Any] = {"status_id": configuration.completed_status_id}
+            matching_status = next(
+                (
+                    item
+                    for item in configuration.statuses_cache
+                    if item.get("id") == configuration.completed_status_id
+                ),
+                None,
+            )
+            if matching_status and matching_status.get("pipeline_id"):
+                status_payload["pipeline_id"] = matching_status["pipeline_id"]
+            amo.update_lead(job.crm_entity_id, status_payload)
+            delivery.finalized_at = utc_now()
+            add_event(
+                session,
+                owner_external_user_id=job.owner_external_user_id,
+                job_id=job.id,
+                integration_id=integration.id,
+                event_type="amocrm.lead.finalized",
+                source="integration",
+                message="Yandex Disk link was noted and the completed amoCRM status was applied.",
                 details={
                     "status_id": configuration.completed_status_id,
                     "note_id": delivery.amo_note_id,
@@ -1159,16 +1300,15 @@ def deliver_result(
         integration.last_error_at = utc_now()
         integration.last_error_message = sanitized_message(str(exc))[:2000]
         return False
-    if configuration.delivery_mode == "amocrm_attachment":
+    if configuration.delivery_mode in {"amocrm_attachment", "yandex_disk_note"}:
         try:
-            _deliver_directly_to_amocrm(
-                session,
-                settings,
-                job,
-                result,
-                integration,
-                configuration,
-                client=client,
+            delivery_handler = (
+                _deliver_via_yandex_disk
+                if configuration.delivery_mode == "yandex_disk_note"
+                else _deliver_directly_to_amocrm
+            )
+            delivery_handler(
+                session, settings, job, result, integration, configuration, client=client
             )
         except Exception as exc:
             safe_error = sanitized_message(str(exc))
@@ -1187,7 +1327,11 @@ def deliver_result(
             session,
             job,
             "delivered",
-            message="Result archive delivered to the amoCRM lead.",
+            message=(
+                "Yandex Disk archive link delivered to the amoCRM lead."
+                if configuration.delivery_mode == "yandex_disk_note"
+                else "Result archive delivered to the amoCRM lead."
+            ),
             integration_id=integration.id,
         )
         integration.last_delivery_at = utc_now()

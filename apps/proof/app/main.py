@@ -109,6 +109,7 @@ from .services import (
     worker_configuration,
     worker_is_online,
 )
+from .yandex_disk import YandexDiskClient
 
 APP_VERSION = "1.1.0"
 settings = AppSettings.from_env()
@@ -760,6 +761,7 @@ def render_integrations_page(
         oauth_client_secret_saved=bool(oauth_credentials.get("client_secret")),
         oauth_connected=oauth_connected,
         oauth_token_expires_at=token_expires_at_display,
+        yandex_disk_token_saved=bool(oauth_credentials.get("yandex_disk_token")),
         amocrm_redirect_uri=settings.amocrm_redirect_uri if settings.public_base_url else "",
         amocrm_revoked_uri=settings.amocrm_revoked_uri if settings.public_base_url else "",
         amocrm_webhook_base=(
@@ -849,6 +851,8 @@ def configure_amocrm_oauth_ui(
         "client_id": normalized_client_id,
         "client_secret": normalized_client_secret,
     }
+    if credentials.get("yandex_disk_token"):
+        stored_credentials["yandex_disk_token"] = credentials["yandex_disk_token"]
     if not identity_changed:
         stored_credentials.update({
             key: credentials[key]
@@ -980,6 +984,65 @@ def configure_amocrm_statuses_ui(
     )
 
 
+@app.post("/integrations/amocrm/yandex-disk")
+def configure_yandex_disk_ui(
+    request: Request,
+    csrf_token: str = Form(...),
+    oauth_token: str = Form(""),
+    session: Session = Depends(get_db),
+) -> HTMLResponse:
+    owner_id, _ = require_ui_identity(request)
+    verify_csrf(request, csrf_token)
+    integration = require_amocrm_integration(session, owner_id)
+    configuration = AmoIntegrationConfiguration.model_validate(
+        json_load(integration.configuration_json, {})
+    )
+    credentials = amocrm_credentials(integration, settings)
+    token = oauth_token.strip() or str(credentials.get("yandex_disk_token") or "")
+    try:
+        updated = AmoIntegrationConfiguration.model_validate({
+            **configuration.model_dump(mode="json"),
+            "delivery_mode": "yandex_disk_note",
+        })
+        if not token:
+            raise ValueError("Укажите OAuth token Яндекс.Диска.")
+        if updated.api_timeout_seconds is None:
+            raise ValueError("Сначала настройте HTTP timeout подключения amoCRM.")
+        with YandexDiskClient(
+            token,
+            timeout_seconds=updated.api_timeout_seconds,
+        ) as disk:
+            disk.account()
+    except (ValueError, RuntimeError, httpx.HTTPError) as exc:
+        return render_integrations_page(
+            request,
+            session,
+            owner_id,
+            integration_error=sanitized_message(str(exc)),
+        )
+    credentials["yandex_disk_token"] = token
+    integration.credentials_encrypted = encrypt_secret(
+        credential_cipher_for_settings(settings), credentials
+    )
+    integration.configuration_json = json_dump(updated.model_dump(mode="json"))
+    add_event(
+        session,
+        owner_external_user_id=owner_id,
+        integration_id=integration.id,
+        event_type="yandex_disk.configured",
+        source="ui",
+        message="Yandex Disk delivery settings saved.",
+        details={"root_path": updated.yandex_disk_root},
+    )
+    session.commit()
+    return render_integrations_page(
+        request,
+        session,
+        owner_id,
+        integration_notice="Яндекс.Диск подключён.",
+    )
+
+
 @app.post("/integrations/amocrm/execution")
 def configure_amocrm_execution_ui(
     request: Request,
@@ -1005,10 +1068,13 @@ def configure_amocrm_execution_ui(
             raise HTTPException(status_code=422, detail="Настройте три поля и их очистку.")
         if configuration.queued_status_id is None or configuration.completed_status_id is None:
             raise HTTPException(status_code=422, detail="Настройте начальный и конечный статусы.")
+        credentials = amocrm_credentials(integration, settings)
+        if not configuration.yandex_disk_root or not credentials.get("yandex_disk_token"):
+            raise HTTPException(status_code=422, detail="Сначала подключите Яндекс.Диск.")
     integration.default_preset_id = preset.id
     integration.enabled = should_enable
     integration.delivery_url = ""
-    configuration.delivery_mode = "amocrm_attachment"
+    configuration.delivery_mode = "yandex_disk_note"
     integration.configuration_json = json_dump(configuration.model_dump(mode="json"))
     add_event(
         session,
@@ -1163,7 +1229,7 @@ def disconnect_amocrm_oauth_ui(
     credentials = amocrm_credentials(integration, settings)
     retained = {
         key: credentials[key]
-        for key in ("client_id", "client_secret")
+        for key in ("client_id", "client_secret", "yandex_disk_token")
         if credentials.get(key)
     }
     integration.credentials_encrypted = encrypt_secret(
@@ -1232,7 +1298,7 @@ def amocrm_oauth_revoked(
         raise HTTPException(status_code=401, detail="Invalid revocation hook signature.")
     retained = {
         key: credentials[key]
-        for key in ("client_id", "client_secret")
+        for key in ("client_id", "client_secret", "yandex_disk_token")
         if credentials.get(key)
     }
     integration.credentials_encrypted = encrypt_secret(
