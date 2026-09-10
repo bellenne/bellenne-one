@@ -1845,13 +1845,17 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
                 session,
                 owner_external_user_id=integration.owner_external_user_id,
                 integration_id=integration.id,
-                event_type="amocrm.lead.read_failed",
-                source="integration",
-                level="error",
-                message="amoCRM lead could not be read for Job creation.",
-                error_code="AMOCRM_LEAD_READ_FAILED",
-                details={"crm_entity_id": payload.crm_entity_id, "error": safe_error},
-            )
+            event_type="amocrm.lead.read_failed",
+            source="integration",
+            level="error",
+            message=f"amoCRM lead could not be read for Job creation: {safe_error}",
+            error_code="AMOCRM_LEAD_READ_FAILED",
+            details={
+                "request_id": request_id,
+                "crm_entity_id": payload.crm_entity_id,
+                "error": safe_error,
+            },
+        )
             session.commit()
             raise HTTPException(status_code=502, detail="Не удалось получить данные сделки amoCRM.") from exc
 

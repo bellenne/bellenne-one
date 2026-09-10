@@ -84,6 +84,9 @@ textarea { min-height: calc(var(--bp-space-12) * 3); resize: vertical; }
 .event-list div,
 .log-view div { display: grid; gap: var(--bp-space-1); }
 .log-view article { grid-template-columns: auto auto auto minmax(0, 1fr); }
+.log-details { margin-top: var(--bp-space-2); }
+.log-details > summary { color: var(--bp-text-secondary); cursor: pointer; font: var(--bp-font-label); width: fit-content; }
+.log-details > .code-block { margin-top: var(--bp-space-2); max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
 .log-source { color: var(--bp-text-secondary); font: var(--bp-font-label); text-transform: uppercase; }
 
 .filter-panel { margin-bottom: var(--bp-space-4); padding: var(--bp-space-5); }
