@@ -3,12 +3,14 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta
 from typing import Any
 from urllib.parse import unquote, urlparse
+from uuid import uuid4
 
 import httpx
 from fastapi import (
@@ -117,6 +119,7 @@ engine = build_engine(settings)
 session_factory = build_session_factory(engine)
 templates = Jinja2Templates(directory="app/templates")
 notification_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="proof-integrations")
+webhook_logger = logging.getLogger("bellenne.proof.webhooks")
 
 
 def schedule_notifications_after_commit(session: Session) -> None:
@@ -1689,25 +1692,61 @@ def update_amocrm_after_delivery(
 
 @app.post("/webhooks/amocrm/{webhook_secret}")
 async def amocrm_webhook(webhook_secret: str, request: Request, session: Session = Depends(get_db)) -> JSONResponse:
+    request_id = str(uuid4())
     integration = next((row for row in session.scalars(select(ProofIntegration).where(
         ProofIntegration.kind == "amocrm", ProofIntegration.enabled.is_(True)
     )) if constant_time_matches(webhook_secret, row.webhook_secret_digest)), None)
     if integration is None:
+        webhook_logger.warning(
+            "amoCRM webhook rejected request_id=%s reason=invalid_credential client=%s",
+            request_id,
+            request.client.host if request.client else "unknown",
+        )
         raise HTTPException(status_code=401, detail="Invalid webhook credential.")
     content_type = request.headers.get("content-type", "")
+    content_length = request.headers.get("content-length", "")
+    client_address = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
+    if not client_address and request.client:
+        client_address = request.client.host
+    incoming_details = {
+        "request_id": request_id,
+        "content_type": content_type[:200],
+        "content_length": content_length[:40],
+        "client_address": client_address[:120],
+        "user_agent": request.headers.get("user-agent", "")[:300],
+    }
+    add_event(
+        session,
+        owner_external_user_id=integration.owner_external_user_id,
+        integration_id=integration.id,
+        event_type="webhook.incoming",
+        source="integration",
+        message=f"amoCRM webhook reached Proof Core. Request ID: {request_id}.",
+        details=incoming_details,
+        queue_notification=False,
+    )
+    integration.last_incoming_at = utc_now()
+    session.commit()
+    webhook_logger.info(
+        "amoCRM webhook received request_id=%s integration_id=%s content_type=%s client=%s",
+        request_id,
+        integration.id,
+        content_type[:200],
+        client_address[:120],
+    )
     is_json_webhook = "application/json" in content_type
-    if is_json_webhook:
-        raw_payload = await request.json()
-    else:
-        form = await request.form()
-        raw_payload = {key: value for key, value in form.multi_items()}
     try:
+        if is_json_webhook:
+            raw_payload = await request.json()
+        else:
+            form = await request.form()
+            raw_payload = {key: value for key, value in form.multi_items()}
         payload = (
             WebhookRequest.model_validate(raw_payload)
             if is_json_webhook
             else parse_amocrm_form_payload(raw_payload)
         )
-    except (ValidationError, ValueError) as exc:
+    except (ValidationError, ValueError, json.JSONDecodeError) as exc:
         integration.last_incoming_at = utc_now()
         integration.last_error_at = utc_now()
         integration.last_error_message = "Webhook contract validation failed."
@@ -1718,8 +1757,9 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
             event_type="webhook.validation_failed",
             source="integration",
             level="error",
-            message="amoCRM webhook contract validation failed.",
+            message=f"amoCRM webhook contract validation failed. Request ID: {request_id}.",
             error_code="WEBHOOK_VALIDATION_FAILED",
+            details={**incoming_details, "error": sanitized_message(str(exc))[:1000]},
         )
         session.commit()
         detail = exc.errors() if isinstance(exc, ValidationError) else str(exc)
@@ -1759,6 +1799,18 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
             session.commit()
             if not accepted_in_amo:
                 raise HTTPException(status_code=502, detail="Не удалось подтвердить приём сделки в amoCRM.")
+        add_event(
+            session,
+            owner_external_user_id=integration.owner_external_user_id,
+            integration_id=integration.id,
+            job_id=job.id if job else None,
+            event_type="webhook.duplicate",
+            source="integration",
+            message=f"Duplicate amoCRM webhook handled. Request ID: {request_id}.",
+            details={**incoming_details, "event_id": payload.event_id},
+            queue_notification=False,
+        )
+        session.commit()
         return JSONResponse(
             {
                 "accepted": existing_receipt.accepted,
@@ -1840,6 +1892,29 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
             "owner_id": integration.owner_external_user_id,
             "job_id": job.id,
         }
+    session.commit()
+    add_event(
+        session,
+        owner_external_user_id=integration.owner_external_user_id,
+        integration_id=integration.id,
+        job_id=job.id if job else None,
+        event_type="webhook.processed",
+        source="integration",
+        message=(
+            f"amoCRM webhook processed ({'accepted' if accepted else 'ignored'}). "
+            f"Request ID: {request_id}."
+        ),
+        details={
+            **incoming_details,
+            "event_id": payload.event_id,
+            "event_type": payload.event_type,
+            "crm_entity_type": payload.crm_entity_type,
+            "crm_entity_id": payload.crm_entity_id,
+            "accepted": accepted,
+            "duplicate": duplicate,
+        },
+        queue_notification=False,
+    )
     session.commit()
     return JSONResponse(
         {"accepted": accepted, "duplicate": duplicate, "job_id": job.id if job else None},
