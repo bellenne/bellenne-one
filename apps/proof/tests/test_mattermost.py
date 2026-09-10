@@ -147,6 +147,9 @@ def test_error_event_is_delivered_once_to_configured_mattermost(client: TestClie
     assert requests[0].url == MATTERMOST_URL
     assert "production-alerts" in payload
     assert "Исходный файл не найден." in payload
+    assert "Номер заказа" in payload
+    assert "33860843" in payload
+    assert "Необходимо подготовить цветопробу вручную." in payload
     assert "SOURCE_NOT_FOUND" not in payload
     assert job_id not in payload
     with session_factory() as session:

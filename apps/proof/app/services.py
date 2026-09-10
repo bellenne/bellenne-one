@@ -327,7 +327,7 @@ def mattermost_settings(
     return str(credentials.get("webhook_url", "")), channel[:120]
 
 
-def mattermost_error_message(event: ProofEvent) -> str:
+def mattermost_error_message(event: ProofEvent, crm_order_id: str = "") -> str:
     def safe(value: str) -> str:
         return value.replace("@", "@\u200b").replace("`", "'").strip()
 
@@ -341,7 +341,19 @@ def mattermost_error_message(event: ProofEvent) -> str:
     }
     message = translations.get(message.strip(), message.strip())
     message = re.sub(r"^amoCRM API returned HTTP", "amoCRM API вернул HTTP", message)
-    return safe(message)
+    order_id = ""
+    if isinstance(details, dict):
+        order_id = str(details.get("crm_order_id") or details.get("crm_entity_id") or "").strip()
+    order_id = order_id or crm_order_id.strip()
+    lines = [
+        "#### 🚨 BellenneProof: зафиксирована ошибка",
+        "",
+        safe(message),
+    ]
+    if order_id:
+        lines.extend(("", f"**Номер заказа:** {safe(order_id)}"))
+    lines.extend(("", "⚠️ **Необходимо подготовить цветопробу вручную.**"))
+    return "\n".join(lines)
 
 
 def post_mattermost_message(
@@ -385,6 +397,7 @@ def dispatch_pending_mattermost(
         for notification in pending:
             event = notification.event
             integration = notification.integration
+            job = session.get(ProofJob, event.job_id) if event.job_id else None
             webhook_url, channel = mattermost_settings(integration, settings)
             try:
                 if not integration.enabled:
@@ -392,7 +405,11 @@ def dispatch_pending_mattermost(
                 if not webhook_url:
                     raise RuntimeError("Mattermost webhook URL is not configured.")
                 notification.response_status = post_mattermost_message(
-                    settings, webhook_url, channel, mattermost_error_message(event), client=client
+                    settings,
+                    webhook_url,
+                    channel,
+                    mattermost_error_message(event, job.crm_order_id if job else ""),
+                    client=client,
                 )
             except Exception as exc:
                 safe_error = sanitized_message(str(exc).replace(webhook_url, "[REDACTED_URL]"))[:2000]
