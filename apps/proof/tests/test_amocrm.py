@@ -336,7 +336,7 @@ def test_official_webhook_reads_only_selected_fields_and_moves_lead_to_queue(
     )]
 
 
-def test_official_webhook_is_queued_only_after_amo_ack_and_duplicate_resumes_ack(
+def test_each_official_webhook_creates_an_independent_job_for_the_same_lead(
     client: TestClient,
     monkeypatch,
 ) -> None:
@@ -372,12 +372,14 @@ def test_official_webhook_is_queued_only_after_amo_ack_and_duplicate_resumes_ack
         f"/webhooks/amocrm/{setup['webhook_secret']}",
         data=official_webhook(),
     )
-    assert retry.status_code == 200
-    assert retry.json()["duplicate"] is True
+    assert retry.status_code == 202
+    assert retry.json()["duplicate"] is False
     with session_factory() as session:
-        job = session.query(ProofJob).one()
-        assert job.processing_status == "queued"
-    assert FakeAmoClient.get_calls == 1
+        jobs = session.query(ProofJob).order_by(ProofJob.created_at).all()
+        assert len(jobs) == 2
+        assert jobs[0].processing_status == "received"
+        assert jobs[1].processing_status == "queued"
+    assert FakeAmoClient.get_calls == 2
     assert len(FakeAmoClient.updates) == 1
 
 

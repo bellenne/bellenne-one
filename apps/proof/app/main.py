@@ -113,7 +113,7 @@ from .services import (
 )
 from .yandex_disk import YandexDiskClient
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 settings = AppSettings.from_env()
 engine = build_engine(settings)
 session_factory = build_session_factory(engine)
@@ -333,12 +333,12 @@ def parse_amocrm_form_payload(raw_payload: dict[str, Any]) -> WebhookRequest:
 
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
-    return {"status": "ok", "service": "BellenneProof Core"}
+    return {"status": "ok", "service": "BellenneProof Core", "version": APP_VERSION}
 
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok"}
+    return {"status": "ok", "version": APP_VERSION}
 
 
 @app.get("/api/ui/state")
@@ -1746,6 +1746,12 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
             if is_json_webhook
             else parse_amocrm_form_payload(raw_payload)
         )
+        if not is_json_webhook:
+            # amoCRM does not provide a delivery identifier. An identical payload can
+            # represent another requested proof for the same lead, so every HTTP
+            # delivery is an independent event. Explicit JSON integrations retain
+            # their caller-supplied idempotency key.
+            payload = payload.model_copy(update={"event_id": request_id})
     except (ValidationError, ValueError, json.JSONDecodeError) as exc:
         integration.last_incoming_at = utc_now()
         integration.last_error_at = utc_now()
@@ -1777,7 +1783,7 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
         WebhookReceipt.integration_id == integration.id,
         WebhookReceipt.idempotency_key == payload.event_id,
     ))
-    if existing_receipt is not None:
+    if existing_receipt is not None and is_json_webhook:
         job = session.get(ProofJob, existing_receipt.job_id) if existing_receipt.job_id else None
         if not is_json_webhook and job is not None and job.processing_status == "received":
             accepted_in_amo = update_amocrm_job_status(
@@ -1841,22 +1847,30 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
             integration.last_incoming_at = utc_now()
             integration.last_error_at = utc_now()
             integration.last_error_message = safe_error[:2000]
-            add_event(
+            error_event = add_event(
                 session,
                 owner_external_user_id=integration.owner_external_user_id,
                 integration_id=integration.id,
-            event_type="amocrm.lead.read_failed",
-            source="integration",
-            level="error",
-            message=f"amoCRM lead could not be read for Job creation: {safe_error}",
-            error_code="AMOCRM_LEAD_READ_FAILED",
-            details={
-                "request_id": request_id,
-                "crm_entity_id": payload.crm_entity_id,
-                "error": safe_error,
-            },
-        )
+                event_type="amocrm.lead.read_failed",
+                source="integration",
+                level="error",
+                message=f"amoCRM lead could not be read for Job creation: {safe_error}",
+                error_code="AMOCRM_LEAD_READ_FAILED",
+                details={
+                    "request_id": request_id,
+                    "crm_entity_id": payload.crm_entity_id,
+                    "error": safe_error,
+                },
+            )
+            # This webhook error must notify operators before the request ends.
+            # Remove the generic after-commit trigger to avoid racing two dispatchers.
+            session.info.pop("proof_notification_pending", None)
             session.commit()
+            dispatch_pending_mattermost(
+                session_factory,
+                settings,
+                event_id=error_event.id,
+            )
             raise HTTPException(status_code=502, detail="Не удалось получить данные сделки amoCRM.") from exc
 
     if not crm_order_id:
@@ -1876,7 +1890,10 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
         enqueue=is_json_webhook,
     )
     session.commit()
-    if accepted and not duplicate and job is not None and not is_json_webhook:
+    queued_after_amo_ack = False
+    if accepted and job is not None and not is_json_webhook and (
+        not duplicate or job.processing_status == "received"
+    ):
         accepted_in_amo = update_amocrm_job_status(
             session,
             integration,
@@ -1891,7 +1908,8 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
             session.commit()
             raise HTTPException(status_code=502, detail="Не удалось подтвердить приём сделки в amoCRM.")
         queue_received_job(session, job)
-    if accepted and not duplicate and job is not None:
+        queued_after_amo_ack = True
+    if accepted and job is not None and (not duplicate or queued_after_amo_ack):
         session.info["proof_worker_wake_pending"] = {
             "owner_id": integration.owner_external_user_id,
             "job_id": job.id,

@@ -372,14 +372,16 @@ def dispatch_pending_mattermost(
     settings: AppSettings,
     *,
     client: httpx.Client | None = None,
+    event_id: str | None = None,
 ) -> int:
     delivered = 0
     with session_factory() as session:
-        pending = list(session.scalars(
-            select(ProofNotificationDelivery)
-            .where(ProofNotificationDelivery.status == "pending")
-            .order_by(ProofNotificationDelivery.created_at)
-        ))
+        query = select(ProofNotificationDelivery).where(
+            ProofNotificationDelivery.status == "pending"
+        )
+        if event_id:
+            query = query.where(ProofNotificationDelivery.event_id == event_id)
+        pending = list(session.scalars(query.order_by(ProofNotificationDelivery.created_at)))
         for notification in pending:
             event = notification.event
             integration = notification.integration
