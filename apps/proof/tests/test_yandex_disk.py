@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 
 import httpx
+import pytest
 
 from app.yandex_disk import YandexDiskClient, disk_path, normalize_disk_root
 
@@ -30,7 +31,7 @@ def test_upload_and_publish_creates_folders_and_returns_file_link() -> None:
     with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
         with YandexDiskClient("secret", timeout_seconds=8, client=http_client) as disk:
             public_url = disk.upload_and_publish(
-                disk_path("amoCRM/Сделки", "31095815", "31095815 4.zip"),
+                disk_path("amoCRM/Сделки", "31095815", "31095815_4.zip"),
                 io.BytesIO(b"archive"),
             )
 
@@ -51,3 +52,22 @@ def test_upload_and_publish_creates_folders_and_returns_file_link() -> None:
 
 def test_disk_root_is_normalized_without_allowing_parent_segments() -> None:
     assert normalize_disk_root(r"/Производство\Цветопробы/") == "Производство/Цветопробы"
+
+
+def test_yandex_api_error_keeps_safe_provider_code_and_description() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(507, json={
+            "error": "DiskNotEnoughSpaceError",
+            "description": "Insufficient storage space",
+        })
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
+        with YandexDiskClient("secret", timeout_seconds=8, client=http_client) as disk:
+            with pytest.raises(RuntimeError) as caught:
+                disk.account()
+
+    message = str(caught.value)
+    assert "HTTP 507" in message
+    assert "DiskNotEnoughSpaceError" in message
+    assert "Insufficient storage space" in message
+    assert "secret" not in message

@@ -50,6 +50,7 @@ def init_database(engine: Engine) -> None:
             },
             "proof_result_deliveries": {
                 "yandex_disk_path": "TEXT",
+                "yandex_uploaded_at": "DATETIME",
                 "yandex_public_url": "TEXT",
             },
         }

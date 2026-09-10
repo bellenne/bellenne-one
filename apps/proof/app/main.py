@@ -294,12 +294,16 @@ def parse_amocrm_form_payload(raw_payload: dict[str, Any]) -> WebhookRequest:
     action = ""
     entity_id = ""
     for key, value in raw_payload.items():
-        match = re.match(r"^([a-z_]+)\[([a-z_]+)]\[\d+]\[([a-z_]+)]$", key)
+        match = re.match(r"^([a-z_]+)\[([a-z_]+)]\[(\d+)]\[([a-z_]+)]$", key)
         if not match:
             continue
-        candidate_entity, candidate_action, field = match.groups()
+        candidate_entity, candidate_action, _candidate_index, field = match.groups()
         if field == "id" and not entity_id:
-            entity_type, action, entity_id = candidate_entity, candidate_action, str(value)
+            entity_type, action, entity_id = (
+                candidate_entity,
+                candidate_action,
+                str(value),
+            )
     if not entity_type or not action or not entity_id:
         raise ValueError("Unsupported amoCRM form payload: entity, action, and id were not found.")
     idempotency_source = json.dumps(
@@ -308,12 +312,17 @@ def parse_amocrm_form_payload(raw_payload: dict[str, Any]) -> WebhookRequest:
         separators=(",", ":"),
     )
     event_id = hashlib.sha256(idempotency_source.encode("utf-8")).hexdigest()
+    crm_order_id = str(
+        raw_payload.get("crm_order_id")
+        or raw_payload.get("order_number")
+        or entity_id
+    ).strip()
     return WebhookRequest(
         event_id=event_id,
         event_type=f"{entity_type}.{action}",
         crm_entity_type=entity_type,
         crm_entity_id=entity_id,
-        crm_order_id=str(raw_payload.get("crm_order_id", "")),
+        crm_order_id=crm_order_id,
         preset_id=None,
         input=raw_payload,
     )
@@ -891,10 +900,8 @@ def configure_amocrm_webhook_ui(
     source_path_field_id: str = Form(...),
     layout_number_field_id: str = Form(...),
     third_field_id: str = Form(...),
-    third_target: str = Form("order_number"),
     clear_source_path: str | None = Form(None),
     clear_layout_number: str | None = Form(None),
-    clear_third: str | None = Form(None),
     rotate_webhook_secret: str | None = Form(None),
     session: Session = Depends(get_db),
 ) -> HTMLResponse:
@@ -907,13 +914,13 @@ def configure_amocrm_webhook_ui(
     mappings = [
         AmoFieldMapping(target="source_path", field_id=parse_optional_id(source_path_field_id)),
         AmoFieldMapping(target="layout_number", field_id=parse_optional_id(layout_number_field_id)),
-        AmoFieldMapping(target=third_target, field_id=parse_optional_id(third_field_id)),
+        AmoFieldMapping(target="public_id", field_id=parse_optional_id(third_field_id)),
     ]
     clear_field_ids = [
         mapping.field_id
         for mapping, selected in zip(
             mappings,
-            (clear_source_path, clear_layout_number, clear_third),
+            (clear_source_path, clear_layout_number, "on"),
             strict=True,
         )
         if selected == "on"
@@ -1663,7 +1670,7 @@ def update_amocrm_after_delivery(
         configuration = amocrm_configuration(integration)
     except ValidationError:
         return
-    if delivered and configuration.delivery_mode == "amocrm_attachment":
+    if delivered and configuration.delivery_mode in {"amocrm_attachment", "yandex_disk_note"}:
         return
     update_amocrm_job_status(
         session,
@@ -1762,7 +1769,7 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
         )
 
     input_payload = payload.input
-    crm_order_id = payload.crm_order_id
+    crm_order_id = payload.crm_order_id or payload.crm_entity_id
     if not is_json_webhook:
         if not configuration.has_required_mappings() or not configuration.clear_field_ids:
             raise HTTPException(
@@ -1777,7 +1784,6 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
             ) as client:
                 lead = client.get_lead(payload.crm_entity_id)
             input_payload = build_job_input(lead, configuration)
-            crm_order_id = str(input_payload.get("order_number") or crm_order_id)
         except (ValueError, ValidationError, RuntimeError, httpx.HTTPError) as exc:
             safe_error = sanitized_message(str(exc))
             integration.last_incoming_at = utc_now()
@@ -1796,6 +1802,9 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
             )
             session.commit()
             raise HTTPException(status_code=502, detail="Не удалось получить данные сделки amoCRM.") from exc
+
+    if not crm_order_id:
+        raise HTTPException(status_code=422, detail="Webhook amoCRM не содержит номер заказа.")
 
     job, duplicate, accepted = create_job_from_webhook(
         session,

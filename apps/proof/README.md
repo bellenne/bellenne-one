@@ -57,12 +57,13 @@ The standard amoCRM form webhook is only a wake-up/event envelope. All business
 conditions belong to the amoCRM automation that sends it; Core deliberately does
 not duplicate a source pipeline/status filter. Core fetches the current lead by
 ID and extracts exactly three custom fields selected in the UI: the order UNC
-path, layout number and one additional identifier. Other lead custom fields are
-not copied into the Job. The derived event ID is the idempotency key.
+path, layout number and the checkbox that triggered Proof (stored as `public_id`).
+The amoCRM lead ID from the webhook is used as the order number. Other lead custom fields are not copied into the Job. The derived
+event ID is the idempotency key.
 
 The Integrations page also stores the queued, completed and failed status IDs.
-After persisting a new Job as `received`, Core clears the selected one, two, or
-three fields and applies the queued status in one lead PATCH. Only after that
+After persisting a new Job as `received`, Core always clears the trigger checkbox,
+clears the other selected fields and applies the queued status in one lead PATCH. Only after that
 acknowledgement succeeds does the Job enter the Worker queue. If the PATCH fails,
 the Job remains `received`; a duplicate delivery retries the acknowledgement
 without creating another Job or rereading the fields that may already be empty.
@@ -72,8 +73,8 @@ Production delivery packs the immutable Worker JPEG into a ZIP and uploads it to
 adds its public URL as a `common` note on the amoCRM lead. Only after the note
 exists does Core apply the completed status. The final step does not clear the
 source fields again.
-The ZIP name is `<order number> <published revision>.zip`, for example
-`31095815 4.zip`; the archive contains the JPEG under its Worker filename.
+The ZIP name is `<order number>_<published revision>.zip`, for example
+`31095815_4.zip`; the archive contains the JPEG under its Worker filename.
 
 The Yandex Disk path, public URL and amoCRM note ID are persisted separately from
 the immutable Result. If adding the note or finalizing the lead fails, Retry

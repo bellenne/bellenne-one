@@ -8,7 +8,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from .yandex_disk import YANDEX_DEALS_ROOT
 
-MappingTarget = Literal["source_path", "layout_number", "order_number", "public_id"]
+MappingTarget = Literal[
+    "source_path",
+    "layout_number",
+    "order_number",
+    "public_id",
+    "trigger_flag",
+]
 DeliveryMode = Literal["amocrm_attachment", "yandex_disk_note", "webhook"]
 AMOCRM_HOST_SUFFIXES = (".amocrm.ru", ".amocrm.com", ".kommo.com")
 
@@ -26,7 +32,7 @@ class AmoIntegrationConfiguration(BaseModel):
     queued_status_id: int | None = Field(default=None, gt=0)
     completed_status_id: int | None = Field(default=None, gt=0)
     failed_status_id: int | None = Field(default=None, gt=0)
-    delivery_mode: DeliveryMode = "amocrm_attachment"
+    delivery_mode: DeliveryMode = "yandex_disk_note"
     mappings: list[AmoFieldMapping] = Field(default_factory=list, max_length=3)
     clear_field_ids: list[int] = Field(default_factory=list, max_length=3)
     fields_cache: list[dict[str, Any]] = Field(default_factory=list)
@@ -63,6 +69,16 @@ class AmoIntegrationConfiguration(BaseModel):
 
     @model_validator(mode="after")
     def unique_targets(self):
+        # Normalize configurations produced by intermediate builds without
+        # forcing the production integration to be configured again.
+        if not any(mapping.target == "public_id" for mapping in self.mappings):
+            legacy = [
+                mapping
+                for mapping in self.mappings
+                if mapping.target in {"order_number", "trigger_flag"}
+            ]
+            if len(legacy) == 1:
+                legacy[0].target = "public_id"
         targets = [mapping.target for mapping in self.mappings]
         if len(targets) != len(set(targets)):
             raise ValueError("Каждое назначение данных можно настроить только один раз.")
@@ -73,6 +89,9 @@ class AmoIntegrationConfiguration(BaseModel):
             raise ValueError("Поля для очистки не должны повторяться.")
         if any(field_id not in field_ids for field_id in self.clear_field_ids):
             raise ValueError("Очищать можно только поля из трёх выбранных привязок.")
+        public_id_field_id = self.mapping_for("public_id")
+        if public_id_field_id is not None and public_id_field_id not in self.clear_field_ids:
+            self.clear_field_ids.append(public_id_field_id)
         return self
 
     def mapping_for(self, target: MappingTarget) -> int | None:
@@ -85,7 +104,8 @@ class AmoIntegrationConfiguration(BaseModel):
         return len(self.mappings) == 3 and {
             "source_path",
             "layout_number",
-        }.issubset({mapping.target for mapping in self.mappings})
+            "public_id",
+        } == {mapping.target for mapping in self.mappings}
 
 
 class AmoOAuthTokenSet(BaseModel):
@@ -232,11 +252,28 @@ class AmoClient:
             method, f"{self.base_url}{path}", headers=self.headers, **kwargs
         )
         if not 200 <= response.status_code < 300:
-            raise RuntimeError(f"amoCRM API returned HTTP {response.status_code}.")
+            detail = self._error_detail(response)
+            suffix = f": {detail}" if detail else ""
+            raise RuntimeError(f"amoCRM API returned HTTP {response.status_code}{suffix}.")
         payload = response.json()
         if not isinstance(payload, dict):
             raise RuntimeError("amoCRM API returned an invalid response.")
         return payload
+
+    @staticmethod
+    def _error_detail(response: httpx.Response) -> str:
+        try:
+            payload = response.json()
+        except ValueError:
+            return ""
+        if not isinstance(payload, dict):
+            return ""
+        values = [
+            str(payload[key]).strip()
+            for key in ("title", "detail", "error", "error_description", "hint")
+            if payload.get(key) not in (None, "")
+        ]
+        return " — ".join(dict.fromkeys(values))[:1000]
 
     @staticmethod
     def _safe_drive_url(value: Any) -> str:
@@ -411,13 +448,17 @@ class AmoClient:
             response = self.client.request(
                 "GET",
                 f"{self.base_url}/api/v4/leads/{lead_id}/notes"
-                f"?filter[note_type]=common&limit=250&page={page}",
+                f"?filter[note_type]=common&limit=100&page={page}",
                 headers=self.headers,
             )
             if response.status_code == 204:
                 return None
             if not 200 <= response.status_code < 300:
-                raise RuntimeError(f"amoCRM API returned HTTP {response.status_code}.")
+                detail = self._error_detail(response)
+                suffix = f": {detail}" if detail else ""
+                raise RuntimeError(
+                    f"amoCRM notes API returned HTTP {response.status_code}{suffix}."
+                )
             payload = response.json()
             if not isinstance(payload, dict):
                 raise RuntimeError("amoCRM returned an invalid notes response.")
@@ -431,18 +472,22 @@ class AmoClient:
                     and note["params"].get("text") == text
                 ):
                     return note
-            if len(notes) < 250:
+            if len(notes) < 100:
                 return None
         raise RuntimeError("amoCRM note lookup exceeded the safe page limit.")
 
     def create_common_note(self, lead_id: str, text: str) -> dict[str, Any]:
         if not lead_id.isdecimal():
             raise ValueError("Job does not contain a valid amoCRM lead ID.")
-        return self._request(
+        payload = self._request(
             "POST",
             f"/api/v4/leads/{lead_id}/notes",
-            json={"note_type": "common", "params": {"text": text}},
+            json=[{"note_type": "common", "params": {"text": text}}],
         )
+        notes = payload.get("_embedded", {}).get("notes", [])
+        if not isinstance(notes, list) or not notes or not isinstance(notes[0], dict):
+            raise RuntimeError("amoCRM did not return the created note.")
+        return notes[0]
 
     def load_catalog(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         def load_pages(path: str, collection_name: str) -> list[dict[str, Any]]:

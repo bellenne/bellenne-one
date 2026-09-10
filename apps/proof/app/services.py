@@ -68,6 +68,34 @@ DELIVERY_LABELS = {
 AMOCRM_TOKEN_REFRESH_MARGIN_SECONDS = 60
 AMOCRM_TOKEN_REFRESH_LOCK = Lock()
 
+
+class DeliveryStageError(RuntimeError):
+    def __init__(
+        self,
+        stage: str,
+        stage_label: str,
+        cause: Exception,
+        *,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        self.stage = stage
+        self.stage_label = stage_label
+        self.details = details or {}
+        self.safe_cause = sanitized_message(str(cause))
+        super().__init__(f"{stage_label}: {self.safe_cause}")
+
+
+def delivery_stage_error(
+    stage: str,
+    stage_label: str,
+    cause: Exception,
+    *,
+    details: dict[str, Any] | None = None,
+) -> DeliveryStageError:
+    if isinstance(cause, DeliveryStageError):
+        return cause
+    return DeliveryStageError(stage, stage_label, cause, details=details)
+
 WORKER_RUNTIME_DEFAULTS = {
     "heartbeat_interval": 30,
     "poll_interval": 5,
@@ -451,6 +479,7 @@ def transition_delivery(
     message: str,
     integration_id: int | None = None,
     details: dict[str, Any] | None = None,
+    error_code: str | None = None,
 ) -> None:
     allowed = ALLOWED_DELIVERY_TRANSITIONS.get(job.delivery_status, set())
     if target not in allowed:
@@ -470,6 +499,7 @@ def transition_delivery(
         message=message,
         level="error" if target == "failed" else "info",
         details=details,
+        error_code=error_code,
     )
 
 
@@ -1002,7 +1032,7 @@ def _amocrm_archive_filename(job: ProofJob, result: ProofResult) -> str:
         raise RuntimeError("Job does not contain a safe order number for the archive name.")
     if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
         raise RuntimeError("Worker Result does not contain the published order revision.")
-    return f"{order_number} {revision}.zip"
+    return f"{order_number}_{revision}.zip"
 
 
 def _result_archive(
@@ -1147,49 +1177,80 @@ def _deliver_via_yandex_disk(
     *,
     client: httpx.Client | None,
 ) -> None:
-    if not configuration.api_base_url or configuration.api_timeout_seconds is None:
-        raise RuntimeError("amoCRM API connection is not configured.")
-    if configuration.completed_status_id is None:
-        raise RuntimeError("The completed amoCRM lead status is not configured.")
-    if not configuration.yandex_disk_root:
-        raise RuntimeError("Корневая папка Яндекс.Диска не настроена.")
-    if job.crm_entity_type not in {"lead", "leads"} or not job.crm_entity_id.isdecimal():
-        raise RuntimeError("Job is not linked to a valid amoCRM lead.")
+    try:
+        if not configuration.api_base_url or configuration.api_timeout_seconds is None:
+            raise RuntimeError("подключение amoCRM API не настроено")
+        if configuration.completed_status_id is None:
+            raise RuntimeError("не выбран конечный статус сделки amoCRM")
+        if not configuration.yandex_disk_root:
+            raise RuntimeError("корневая папка Яндекс.Диска не настроена")
+        if job.crm_entity_type not in {"lead", "leads"} or not job.crm_entity_id.isdecimal():
+            raise RuntimeError("Job не связан с корректной сделкой amoCRM")
+    except Exception as exc:
+        raise delivery_stage_error("DELIVERY_CONFIGURATION", "Проверка настроек delivery", exc) from exc
 
     credentials = amocrm_credentials(integration, settings)
     yandex_token = str(credentials.get("yandex_disk_token") or "")
     if not yandex_token:
-        raise RuntimeError("OAuth token Яндекс.Диска не настроен.")
+        exc = RuntimeError("OAuth token Яндекс.Диска не настроен")
+        raise delivery_stage_error("YANDEX_AUTH", "Авторизация Яндекс.Диска", exc) from exc
 
     delivery = _delivery_record(session, job, result, integration)
-    delivery.archive_filename = _amocrm_archive_filename(job, result)
-    if not delivery.yandex_disk_path:
-        delivery.yandex_disk_path = disk_path(
+    try:
+        delivery.archive_filename = _amocrm_archive_filename(job, result)
+    except Exception as exc:
+        raise delivery_stage_error("ARCHIVE_NAMING", "Формирование имени ZIP", exc) from exc
+    try:
+        expected_disk_path = disk_path(
             configuration.yandex_disk_root,
             job.crm_order_id,
             delivery.archive_filename,
         )
+        if not delivery.yandex_disk_path or (
+            delivery.yandex_uploaded_at is None and delivery.yandex_public_url is None
+        ):
+            delivery.yandex_disk_path = expected_disk_path
+    except Exception as exc:
+        raise delivery_stage_error("YANDEX_PATH", "Формирование пути Яндекс.Диска", exc) from exc
 
-    if not delivery.yandex_public_url:
-        archive_path = _result_archive(settings, result, delivery)
+    if delivery.yandex_uploaded_at is None and not delivery.yandex_public_url:
+        try:
+            archive_path = _result_archive(settings, result, delivery)
+        except Exception as exc:
+            raise delivery_stage_error(
+                "ARCHIVE_CREATE", "Создание ZIP-архива", exc,
+                details={"archive_filename": delivery.archive_filename},
+            ) from exc
         with YandexDiskClient(
             yandex_token,
             timeout_seconds=configuration.api_timeout_seconds,
             client=client,
         ) as disk:
-            with archive_path.open("rb") as archive_file:
-                delivery.yandex_public_url = disk.upload_and_publish(
-                    delivery.yandex_disk_path,
-                    archive_file,
-                )
+            parent = delivery.yandex_disk_path.rsplit("/", 1)[0]
+            try:
+                disk.ensure_folder(parent)
+            except Exception as exc:
+                raise delivery_stage_error(
+                    "YANDEX_FOLDER", "Поиск или создание папки заказа на Яндекс.Диске", exc,
+                    details={"disk_path": parent},
+                ) from exc
+            try:
+                with archive_path.open("rb") as archive_file:
+                    disk.upload(delivery.yandex_disk_path, archive_file)
+            except Exception as exc:
+                raise delivery_stage_error(
+                    "YANDEX_UPLOAD", "Загрузка ZIP на Яндекс.Диск", exc,
+                    details={"disk_path": delivery.yandex_disk_path},
+                ) from exc
+        delivery.yandex_uploaded_at = utc_now()
         add_event(
             session,
             owner_external_user_id=job.owner_external_user_id,
             job_id=job.id,
             integration_id=integration.id,
-            event_type="yandex_disk.archive.published",
+            event_type="yandex_disk.archive.uploaded",
             source="integration",
-            message="Result archive uploaded and published on Yandex Disk.",
+            message="ZIP-архив загружен в папку заказа на Яндекс.Диске.",
             details={
                 "result_id": result.id,
                 "archive_sha256": delivery.archive_sha256,
@@ -1198,7 +1259,35 @@ def _deliver_via_yandex_disk(
         )
         session.commit()
 
-    access_token = get_amocrm_access_token(session, settings, integration, client=client)
+    if not delivery.yandex_public_url:
+        try:
+            with YandexDiskClient(
+                yandex_token,
+                timeout_seconds=configuration.api_timeout_seconds,
+                client=client,
+            ) as disk:
+                delivery.yandex_public_url = disk.publish(delivery.yandex_disk_path)
+        except Exception as exc:
+            raise delivery_stage_error(
+                "YANDEX_PUBLISH", "Публикация ZIP и получение открытой ссылки", exc,
+                details={"disk_path": delivery.yandex_disk_path},
+            ) from exc
+        add_event(
+            session,
+            owner_external_user_id=job.owner_external_user_id,
+            job_id=job.id,
+            integration_id=integration.id,
+            event_type="yandex_disk.archive.published",
+            source="integration",
+            message="Для ZIP-архива получена открытая ссылка Яндекс.Диска.",
+            details={"result_id": result.id, "public_url": delivery.yandex_public_url},
+        )
+        session.commit()
+
+    try:
+        access_token = get_amocrm_access_token(session, settings, integration, client=client)
+    except Exception as exc:
+        raise delivery_stage_error("AMOCRM_AUTH", "Авторизация amoCRM", exc) from exc
     with AmoClient(
         configuration.api_base_url,
         access_token,
@@ -1206,13 +1295,16 @@ def _deliver_via_yandex_disk(
         client=client,
     ) as amo:
         if delivery.amo_note_id is None:
-            note = amo.find_common_note(job.crm_entity_id, delivery.yandex_public_url)
-            if note is None:
-                note = amo.create_common_note(job.crm_entity_id, delivery.yandex_public_url)
             try:
+                note = amo.find_common_note(job.crm_entity_id, delivery.yandex_public_url)
+                if note is None:
+                    note = amo.create_common_note(job.crm_entity_id, delivery.yandex_public_url)
                 delivery.amo_note_id = int(note["id"])
-            except (KeyError, TypeError, ValueError) as exc:
-                raise RuntimeError("amoCRM did not return the note ID.") from exc
+            except Exception as exc:
+                raise delivery_stage_error(
+                    "AMOCRM_NOTE", "Добавление ссылки в примечание сделки amoCRM", exc,
+                    details={"lead_id": job.crm_entity_id},
+                ) from exc
             add_event(
                 session,
                 owner_external_user_id=job.owner_external_user_id,
@@ -1237,7 +1329,13 @@ def _deliver_via_yandex_disk(
             )
             if matching_status and matching_status.get("pipeline_id"):
                 status_payload["pipeline_id"] = matching_status["pipeline_id"]
-            amo.update_lead(job.crm_entity_id, status_payload)
+            try:
+                amo.update_lead(job.crm_entity_id, status_payload)
+            except Exception as exc:
+                raise delivery_stage_error(
+                    "AMOCRM_FINAL_STATUS", "Перевод сделки amoCRM в конечный статус", exc,
+                    details={"lead_id": job.crm_entity_id, "status_id": configuration.completed_status_id},
+                ) from exc
             delivery.finalized_at = utc_now()
             add_event(
                 session,
@@ -1289,36 +1387,44 @@ def deliver_result(
             json_load(integration.configuration_json, {})
         )
     except Exception as exc:
+        safe_error = sanitized_message(str(exc))
         transition_delivery(
             session,
             job,
             "failed",
-            message="Delivery to amoCRM failed.",
+            message=f"Ошибка delivery на этапе «Проверка настроек»: {safe_error}",
             integration_id=integration.id,
-            details={"error": sanitized_message(str(exc))},
+            details={"stage": "DELIVERY_CONFIGURATION", "error": safe_error},
+            error_code="DELIVERY_CONFIGURATION",
         )
         integration.last_error_at = utc_now()
-        integration.last_error_message = sanitized_message(str(exc))[:2000]
+        integration.last_error_message = safe_error[:2000]
         return False
     if configuration.delivery_mode in {"amocrm_attachment", "yandex_disk_note"}:
         try:
-            delivery_handler = (
-                _deliver_via_yandex_disk
-                if configuration.delivery_mode == "yandex_disk_note"
-                else _deliver_directly_to_amocrm
-            )
-            delivery_handler(
+            # Existing production databases can still contain the legacy
+            # amocrm_attachment value. It now follows the supported Yandex path.
+            _deliver_via_yandex_disk(
                 session, settings, job, result, integration, configuration, client=client
             )
         except Exception as exc:
-            safe_error = sanitized_message(str(exc))
+            safe_error = (
+                exc.safe_cause
+                if isinstance(exc, DeliveryStageError)
+                else sanitized_message(str(exc))
+            )
+            stage = exc.stage if isinstance(exc, DeliveryStageError) else "DELIVERY_UNKNOWN"
+            failure_details = {"stage": stage, "error": safe_error}
+            if isinstance(exc, DeliveryStageError):
+                failure_details.update(exc.details)
             transition_delivery(
                 session,
                 job,
                 "failed",
-                message="Delivery to amoCRM failed.",
+                message=f"Ошибка delivery на этапе «{getattr(exc, 'stage_label', 'неизвестный этап')}»: {safe_error}",
                 integration_id=integration.id,
-                details={"error": safe_error},
+                details=failure_details,
+                error_code=stage,
             )
             integration.last_error_at = utc_now()
             integration.last_error_message = safe_error[:2000]
@@ -1327,11 +1433,7 @@ def deliver_result(
             session,
             job,
             "delivered",
-            message=(
-                "Yandex Disk archive link delivered to the amoCRM lead."
-                if configuration.delivery_mode == "yandex_disk_note"
-                else "Result archive delivered to the amoCRM lead."
-            ),
+            message="Ссылка на ZIP-архив Яндекс.Диска добавлена в сделку amoCRM.",
             integration_id=integration.id,
         )
         integration.last_delivery_at = utc_now()

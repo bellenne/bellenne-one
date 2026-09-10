@@ -183,6 +183,7 @@ class ProofResultDelivery(Base):
     amo_version_uuid: Mapped[str | None] = mapped_column(String(80), nullable=True)
     amo_note_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     yandex_disk_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    yandex_uploaded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     yandex_public_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     finalized_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)

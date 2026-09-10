@@ -69,9 +69,28 @@ class YandexDiskClient:
         return self._json(response, "проверка подключения")
 
     @staticmethod
-    def _json(response: httpx.Response, operation: str) -> dict[str, Any]:
+    def _error_detail(response: httpx.Response) -> str:
+        try:
+            payload = response.json()
+        except ValueError:
+            return ""
+        if not isinstance(payload, dict):
+            return ""
+        values = [
+            str(payload[key]).strip()
+            for key in ("error", "description", "message")
+            if payload.get(key) not in (None, "")
+        ]
+        return " — ".join(dict.fromkeys(values))[:1000]
+
+    @classmethod
+    def _json(cls, response: httpx.Response, operation: str) -> dict[str, Any]:
         if not 200 <= response.status_code < 300:
-            raise RuntimeError(f"Яндекс.Диск: {operation} вернул HTTP {response.status_code}.")
+            detail = cls._error_detail(response)
+            suffix = f": {detail}" if detail else ""
+            raise RuntimeError(
+                f"Яндекс.Диск: {operation} вернул HTTP {response.status_code}{suffix}."
+            )
         try:
             payload = response.json()
         except ValueError as exc:
@@ -98,8 +117,10 @@ class YandexDiskClient:
                 if error_code == "DiskPathPointsToExistentDirectoryError":
                     continue
             if response.status_code != 201:
+                detail = self._error_detail(response)
+                suffix = f": {detail}" if detail else ""
                 raise RuntimeError(
-                    f"Яндекс.Диск: создание папки вернуло HTTP {response.status_code}."
+                    f"Яндекс.Диск: создание папки вернуло HTTP {response.status_code}{suffix}."
                 )
 
     @staticmethod
@@ -135,8 +156,10 @@ class YandexDiskClient:
             headers={"Content-Type": "application/zip"},
         )
         if upload_response.status_code not in {201, 202}:
+            detail = self._error_detail(upload_response)
+            suffix = f": {detail}" if detail else ""
             raise RuntimeError(
-                f"Яндекс.Диск: загрузка файла вернула HTTP {upload_response.status_code}."
+                f"Яндекс.Диск: загрузка файла вернула HTTP {upload_response.status_code}{suffix}."
             )
 
     def publish(self, path: str) -> str:
@@ -146,8 +169,10 @@ class YandexDiskClient:
             params={"path": path},
         )
         if response.status_code not in {200, 201, 202}:
+            detail = self._error_detail(response)
+            suffix = f": {detail}" if detail else ""
             raise RuntimeError(
-                f"Яндекс.Диск: публикация файла вернула HTTP {response.status_code}."
+                f"Яндекс.Диск: публикация файла вернула HTTP {response.status_code}{suffix}."
             )
         metadata = self.client.get(
             f"{YANDEX_DISK_API_URL}/resources",
