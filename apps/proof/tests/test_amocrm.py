@@ -203,7 +203,7 @@ def official_webhook() -> dict[str, str]:
     }
 
 
-def test_ui_saves_exactly_three_selected_amocrm_fields(
+def test_ui_saves_designer_alongside_three_required_amocrm_fields(
     client: TestClient,
     identity_headers: dict[str, str],
 ) -> None:
@@ -214,6 +214,7 @@ def test_ui_saves_exactly_three_selected_amocrm_fields(
             {"id": 1001, "name": "Путь к папке заказа", "type": "text"},
             {"id": 1002, "name": "Номер макета", "type": "numeric"},
             {"id": 1003, "name": "Запустить Proof", "type": "checkbox"},
+            {"id": 1004, "name": "Дизайнер", "type": "text"},
         ])
         integration.configuration_json = json_dump(configuration.model_dump(mode="json"))
         session.commit()
@@ -225,6 +226,7 @@ def test_ui_saves_exactly_three_selected_amocrm_fields(
             "source_path_field_id": "1001",
             "layout_number_field_id": "1002",
             "third_field_id": "1003",
+            "designer_field_id": "1004",
             "clear_source_path": "on",
             "clear_layout_number": "on",
         },
@@ -241,6 +243,7 @@ def test_ui_saves_exactly_three_selected_amocrm_fields(
             ("source_path", 1001),
             ("layout_number", 1002),
             ("public_id", 1003),
+            ("designer_name", 1004),
         ]
         assert configuration.clear_field_ids == [1001, 1002, 1003]
 

@@ -14,6 +14,7 @@ MappingTarget = Literal[
     "order_number",
     "public_id",
     "trigger_flag",
+    "designer_name",
 ]
 DeliveryMode = Literal["amocrm_attachment", "yandex_disk_note", "webhook"]
 AMOCRM_HOST_SUFFIXES = (".amocrm.ru", ".amocrm.com", ".kommo.com")
@@ -33,7 +34,7 @@ class AmoIntegrationConfiguration(BaseModel):
     completed_status_id: int | None = Field(default=None, gt=0)
     failed_status_id: int | None = Field(default=None, gt=0)
     delivery_mode: DeliveryMode = "yandex_disk_note"
-    mappings: list[AmoFieldMapping] = Field(default_factory=list, max_length=3)
+    mappings: list[AmoFieldMapping] = Field(default_factory=list, max_length=4)
     clear_field_ids: list[int] = Field(default_factory=list, max_length=3)
     fields_cache: list[dict[str, Any]] = Field(default_factory=list)
     statuses_cache: list[dict[str, Any]] = Field(default_factory=list)
@@ -88,7 +89,7 @@ class AmoIntegrationConfiguration(BaseModel):
         if len(self.clear_field_ids) != len(set(self.clear_field_ids)):
             raise ValueError("Поля для очистки не должны повторяться.")
         if any(field_id not in field_ids for field_id in self.clear_field_ids):
-            raise ValueError("Очищать можно только поля из трёх выбранных привязок.")
+            raise ValueError("Очищать можно только выбранные поля amoCRM.")
         public_id_field_id = self.mapping_for("public_id")
         if public_id_field_id is not None and public_id_field_id not in self.clear_field_ids:
             self.clear_field_ids.append(public_id_field_id)
@@ -101,11 +102,11 @@ class AmoIntegrationConfiguration(BaseModel):
         )
 
     def has_required_mappings(self) -> bool:
-        return len(self.mappings) == 3 and {
+        return {
             "source_path",
             "layout_number",
             "public_id",
-        } == {mapping.target for mapping in self.mappings}
+        }.issubset({mapping.target for mapping in self.mappings})
 
 
 class AmoOAuthTokenSet(BaseModel):

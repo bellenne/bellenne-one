@@ -327,7 +327,11 @@ def mattermost_settings(
     return str(credentials.get("webhook_url", "")), channel[:120]
 
 
-def mattermost_error_message(event: ProofEvent, crm_order_id: str = "") -> str:
+def mattermost_error_message(
+    event: ProofEvent,
+    crm_order_id: str = "",
+    designer_name: str = "",
+) -> str:
     def safe(value: str) -> str:
         return value.replace("@", "@\u200b").replace("`", "'").strip()
 
@@ -344,6 +348,7 @@ def mattermost_error_message(event: ProofEvent, crm_order_id: str = "") -> str:
     order_id = ""
     if isinstance(details, dict):
         order_id = str(details.get("crm_order_id") or details.get("crm_entity_id") or "").strip()
+        designer_name = str(details.get("designer_name") or designer_name).strip()
     order_id = order_id or crm_order_id.strip()
     lines = [
         "#### 🚨 BellenneProof: зафиксирована ошибка",
@@ -352,6 +357,9 @@ def mattermost_error_message(event: ProofEvent, crm_order_id: str = "") -> str:
     ]
     if order_id:
         lines.extend(("", f"**Номер заказа:** {safe(order_id)}"))
+        lines.append(f"**Дизайнер:** {safe(designer_name or 'Пустая сделка')}")
+    elif designer_name:
+        lines.extend(("", f"**Дизайнер:** {safe(designer_name)}"))
     lines.extend(("", "⚠️ **Необходимо подготовить цветопробу вручную.**"))
     return "\n".join(lines)
 
@@ -398,6 +406,7 @@ def dispatch_pending_mattermost(
             event = notification.event
             integration = notification.integration
             job = session.get(ProofJob, event.job_id) if event.job_id else None
+            job_input = json_load(job.input_json, {}) if job else {}
             webhook_url, channel = mattermost_settings(integration, settings)
             try:
                 if not integration.enabled:
@@ -408,7 +417,11 @@ def dispatch_pending_mattermost(
                     settings,
                     webhook_url,
                     channel,
-                    mattermost_error_message(event, job.crm_order_id if job else ""),
+                    mattermost_error_message(
+                        event,
+                        job.crm_order_id if job else "",
+                        str(job_input.get("designer_name") or "") if isinstance(job_input, dict) else "",
+                    ),
                     client=client,
                 )
             except Exception as exc:

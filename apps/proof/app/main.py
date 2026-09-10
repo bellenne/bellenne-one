@@ -44,6 +44,7 @@ from .amocrm import (
     AmoIntegrationConfiguration,
     amocrm_authorization_url,
     build_job_input,
+    custom_field_value,
     exchange_amocrm_oauth_token,
     normalize_amocrm_referer,
     parse_optional_id,
@@ -113,7 +114,7 @@ from .services import (
 )
 from .yandex_disk import YandexDiskClient
 
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 settings = AppSettings.from_env()
 engine = build_engine(settings)
 session_factory = build_session_factory(engine)
@@ -903,6 +904,7 @@ def configure_amocrm_webhook_ui(
     source_path_field_id: str = Form(...),
     layout_number_field_id: str = Form(...),
     third_field_id: str = Form(...),
+    designer_field_id: str = Form(""),
     clear_source_path: str | None = Form(None),
     clear_layout_number: str | None = Form(None),
     rotate_webhook_secret: str | None = Form(None),
@@ -919,6 +921,9 @@ def configure_amocrm_webhook_ui(
         AmoFieldMapping(target="layout_number", field_id=parse_optional_id(layout_number_field_id)),
         AmoFieldMapping(target="public_id", field_id=parse_optional_id(third_field_id)),
     ]
+    designer_field = parse_optional_id(designer_field_id)
+    if designer_field is not None:
+        mappings.append(AmoFieldMapping(target="designer_name", field_id=designer_field))
     clear_field_ids = [
         mapping.field_id
         for mapping, selected in zip(
@@ -1832,7 +1837,7 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
         if not configuration.has_required_mappings() or not configuration.clear_field_ids:
             raise HTTPException(
                 status_code=422,
-                detail="Для webhook amoCRM настройте ровно три поля и поля для очистки.",
+                detail="Для webhook amoCRM настройте три обязательных поля и поля для очистки.",
             )
         try:
             with AmoClient(
@@ -1844,6 +1849,11 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
             input_payload = build_job_input(lead, configuration)
         except (ValueError, ValidationError, RuntimeError, httpx.HTTPError) as exc:
             safe_error = sanitized_message(str(exc))
+            designer_name = ""
+            designer_field_id = configuration.mapping_for("designer_name")
+            if designer_field_id is not None and "lead" in locals():
+                designer_value = custom_field_value(lead, designer_field_id)
+                designer_name = str(designer_value or "").strip()
             integration.last_incoming_at = utc_now()
             integration.last_error_at = utc_now()
             integration.last_error_message = safe_error[:2000]
@@ -1859,6 +1869,7 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
                 details={
                     "request_id": request_id,
                     "crm_entity_id": payload.crm_entity_id,
+                    "designer_name": designer_name,
                     "error": safe_error,
                 },
             )
