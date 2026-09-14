@@ -26,6 +26,14 @@ class AmoFieldMapping(BaseModel):
     field_id: int = Field(gt=0)
 
 
+class AmoPipelineStatuses(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    pipeline_id: int = Field(gt=0)
+    queued_status_id: int = Field(gt=0)
+    completed_status_id: int = Field(gt=0)
+    failed_status_id: int | None = Field(default=None, gt=0)
+
+
 class AmoIntegrationConfiguration(BaseModel):
     model_config = ConfigDict(extra="ignore")
     api_base_url: str = ""
@@ -33,6 +41,7 @@ class AmoIntegrationConfiguration(BaseModel):
     queued_status_id: int | None = Field(default=None, gt=0)
     completed_status_id: int | None = Field(default=None, gt=0)
     failed_status_id: int | None = Field(default=None, gt=0)
+    pipeline_statuses: list[AmoPipelineStatuses] = Field(default_factory=list)
     delivery_mode: DeliveryMode = "yandex_disk_note"
     mappings: list[AmoFieldMapping] = Field(default_factory=list, max_length=4)
     clear_field_ids: list[int] = Field(default_factory=list, max_length=3)
@@ -107,6 +116,33 @@ class AmoIntegrationConfiguration(BaseModel):
             "layout_number",
             "public_id",
         }.issubset({mapping.target for mapping in self.mappings})
+
+    def statuses_for_pipeline(self, pipeline_id: int | None) -> AmoPipelineStatuses | None:
+        if pipeline_id is not None:
+            configured = next(
+                (item for item in self.pipeline_statuses if item.pipeline_id == pipeline_id),
+                None,
+            )
+            if configured is not None:
+                return configured
+        if self.queued_status_id and self.completed_status_id:
+            legacy_pipeline_id = next(
+                (
+                    item.get("pipeline_id")
+                    for item in self.statuses_cache
+                    if item.get("id") == self.queued_status_id
+                    and isinstance(item.get("pipeline_id"), int)
+                ),
+                pipeline_id,
+            )
+            if legacy_pipeline_id is not None and (pipeline_id is None or legacy_pipeline_id == pipeline_id):
+                return AmoPipelineStatuses(
+                    pipeline_id=legacy_pipeline_id,
+                    queued_status_id=self.queued_status_id,
+                    completed_status_id=self.completed_status_id,
+                    failed_status_id=self.failed_status_id,
+                )
+        return None
 
 
 class AmoOAuthTokenSet(BaseModel):
@@ -197,7 +233,10 @@ def custom_field_value(lead: dict[str, Any], field_id: int) -> Any:
 
 
 def build_job_input(lead: dict[str, Any], configuration: AmoIntegrationConfiguration) -> dict[str, Any]:
-    result: dict[str, Any] = {"metadata": {"amo_lead_id": lead.get("id")}}
+    result: dict[str, Any] = {"metadata": {
+        "amo_lead_id": lead.get("id"),
+        "amo_pipeline_id": lead.get("pipeline_id"),
+    }}
     for mapping in configuration.mappings:
         value = custom_field_value(lead, mapping.field_id)
         if mapping.target == "layout_number":

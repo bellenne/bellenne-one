@@ -42,6 +42,7 @@ from .amocrm import (
     AmoClient,
     AmoFieldMapping,
     AmoIntegrationConfiguration,
+    AmoPipelineStatuses,
     amocrm_authorization_url,
     build_job_input,
     custom_field_value,
@@ -114,7 +115,7 @@ from .services import (
 )
 from .yandex_disk import YandexDiskClient
 
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.2.0"
 settings = AppSettings.from_env()
 engine = build_engine(settings)
 session_factory = build_session_factory(engine)
@@ -967,9 +968,10 @@ def configure_amocrm_webhook_ui(
 def configure_amocrm_statuses_ui(
     request: Request,
     csrf_token: str = Form(...),
-    queued_status_id: str = Form(...),
-    completed_status_id: str = Form(...),
-    failed_status_id: str = Form(""),
+    pipeline_id: list[str] = Form(...),
+    queued_status_id: list[str] = Form(...),
+    completed_status_id: list[str] = Form(...),
+    failed_status_id: list[str] = Form(...),
     session: Session = Depends(get_db),
 ) -> HTMLResponse:
     owner_id, _ = require_ui_identity(request)
@@ -978,11 +980,48 @@ def configure_amocrm_statuses_ui(
     configuration = AmoIntegrationConfiguration.model_validate(
         json_load(integration.configuration_json, {})
     )
+    if not (
+        len(pipeline_id) == len(queued_status_id) == len(completed_status_id) == len(failed_status_id)
+    ):
+        raise HTTPException(status_code=422, detail="Некорректный набор статусов воронок.")
+    pipeline_statuses: list[AmoPipelineStatuses] = []
+    for pipeline, queued, completed, failed in zip(
+        pipeline_id, queued_status_id, completed_status_id, failed_status_id, strict=True
+    ):
+        if not queued and not completed and not failed:
+            continue
+        if not queued or not completed:
+            raise HTTPException(
+                status_code=422,
+                detail="Для используемой воронки выберите статусы приёма и завершения.",
+            )
+        parsed_pipeline_id = parse_optional_id(pipeline)
+        allowed_status_ids = {
+            item.get("id")
+            for item in configuration.statuses_cache
+            if item.get("pipeline_id") == parsed_pipeline_id
+        }
+        selected_status_ids = {
+            value for value in (
+                parse_optional_id(queued), parse_optional_id(completed), parse_optional_id(failed)
+            ) if value is not None
+        }
+        if not selected_status_ids.issubset(allowed_status_ids):
+            raise HTTPException(
+                status_code=422,
+                detail="Выбранный статус не принадлежит указанной воронке amoCRM.",
+            )
+        pipeline_statuses.append(AmoPipelineStatuses(
+            pipeline_id=parsed_pipeline_id,
+            queued_status_id=parse_optional_id(queued),
+            completed_status_id=parse_optional_id(completed),
+            failed_status_id=parse_optional_id(failed),
+        ))
+    if not pipeline_statuses:
+        raise HTTPException(status_code=422, detail="Настройте статусы хотя бы одной воронки.")
     configuration = AmoIntegrationConfiguration.model_validate({
         **configuration.model_dump(mode="json"),
-        "queued_status_id": parse_optional_id(queued_status_id),
-        "completed_status_id": parse_optional_id(completed_status_id),
-        "failed_status_id": parse_optional_id(failed_status_id),
+        "pipeline_statuses": [item.model_dump(mode="json") for item in pipeline_statuses],
     })
     integration.configuration_json = json_dump(configuration.model_dump(mode="json"))
     add_event(
@@ -1081,8 +1120,10 @@ def configure_amocrm_execution_ui(
             raise HTTPException(status_code=422, detail="Сначала авторизуйте amoCRM.")
         if not configuration.has_required_mappings() or not configuration.clear_field_ids:
             raise HTTPException(status_code=422, detail="Настройте три поля и их очистку.")
-        if configuration.queued_status_id is None or configuration.completed_status_id is None:
-            raise HTTPException(status_code=422, detail="Настройте начальный и конечный статусы.")
+        if not configuration.pipeline_statuses and (
+            configuration.queued_status_id is None or configuration.completed_status_id is None
+        ):
+            raise HTTPException(status_code=422, detail="Настройте статусы хотя бы одной воронки.")
         credentials = amocrm_credentials(integration, settings)
         if not configuration.yandex_disk_root or not credentials.get("yandex_disk_token"):
             raise HTTPException(status_code=422, detail="Сначала подключите Яндекс.Диск.")
@@ -1678,6 +1719,14 @@ def update_amocrm_after_delivery(
         configuration = amocrm_configuration(integration)
     except ValidationError:
         return
+    job_input = json_load(job.input_json, {})
+    metadata = job_input.get("metadata", {}) if isinstance(job_input, dict) else {}
+    pipeline_id = metadata.get("amo_pipeline_id") if isinstance(metadata, dict) else None
+    status_route = configuration.statuses_for_pipeline(
+        pipeline_id if isinstance(pipeline_id, int) else None
+    )
+    if status_route is None:
+        return
     if delivered and configuration.delivery_mode in {"amocrm_attachment", "yandex_disk_note"}:
         return
     update_amocrm_job_status(
@@ -1685,7 +1734,7 @@ def update_amocrm_after_delivery(
         integration,
         job,
         configuration,
-        configuration.completed_status_id if delivered else configuration.failed_status_id,
+        status_route.completed_status_id if delivered else status_route.failed_status_id,
         event_type=("amocrm.lead.completed" if delivered else "amocrm.lead.delivery_failed"),
         message=(
             "Lead moved to the configured completed status."
@@ -1783,6 +1832,11 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
         configuration = amocrm_configuration(integration)
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail="amoCRM integration configuration is invalid.") from exc
+    input_metadata = payload.input.get("metadata", {}) if isinstance(payload.input, dict) else {}
+    input_pipeline_id = input_metadata.get("amo_pipeline_id") if isinstance(input_metadata, dict) else None
+    status_route = configuration.statuses_for_pipeline(
+        input_pipeline_id if isinstance(input_pipeline_id, int) else None
+    )
 
     existing_receipt = session.scalar(select(WebhookReceipt).where(
         WebhookReceipt.integration_id == integration.id,
@@ -1846,6 +1900,12 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
                 timeout_seconds=configuration.api_timeout_seconds,
             ) as client:
                 lead = client.get_lead(payload.crm_entity_id)
+            lead_pipeline_id = lead.get("pipeline_id")
+            status_route = configuration.statuses_for_pipeline(
+                lead_pipeline_id if isinstance(lead_pipeline_id, int) else None
+            )
+            if status_route is None:
+                raise ValueError("Для воронки сделки не настроены статусы BellenneProof.")
             input_payload = build_job_input(lead, configuration)
         except (ValueError, ValidationError, RuntimeError, httpx.HTTPError) as exc:
             safe_error = sanitized_message(str(exc))
@@ -1886,6 +1946,8 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
 
     if not crm_order_id:
         raise HTTPException(status_code=422, detail="Webhook amoCRM не содержит номер заказа.")
+    if status_route is None:
+        raise HTTPException(status_code=422, detail="Для воронки сделки не настроены статусы BellenneProof.")
 
     job, duplicate, accepted = create_job_from_webhook(
         session,
@@ -1910,7 +1972,7 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
             integration,
             job,
             configuration,
-            configuration.queued_status_id,
+            status_route.queued_status_id,
             event_type="amocrm.lead.accepted",
             message="Lead fields cleared and lead moved to the configured processing status.",
             clear_field_ids=configuration.clear_field_ids,
@@ -2143,12 +2205,18 @@ def worker_fail(
         except ValidationError:
             configuration = None
         if configuration is not None:
+            job_input = json_load(job.input_json, {})
+            metadata = job_input.get("metadata", {}) if isinstance(job_input, dict) else {}
+            pipeline_id = metadata.get("amo_pipeline_id") if isinstance(metadata, dict) else None
+            status_route = configuration.statuses_for_pipeline(
+                pipeline_id if isinstance(pipeline_id, int) else None
+            )
             update_amocrm_job_status(
                 session,
                 integration,
                 job,
                 configuration,
-                configuration.failed_status_id,
+                status_route.failed_status_id if status_route else None,
                 event_type="amocrm.lead.processing_failed",
                 message="Lead moved to the configured failed status after processing failure.",
             )

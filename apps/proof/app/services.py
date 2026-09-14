@@ -1106,9 +1106,15 @@ def _deliver_directly_to_amocrm(
     *,
     client: httpx.Client | None,
 ) -> None:
+    job_input = json_load(job.input_json, {})
+    metadata = job_input.get("metadata", {}) if isinstance(job_input, dict) else {}
+    pipeline_id = metadata.get("amo_pipeline_id") if isinstance(metadata, dict) else None
+    status_route = configuration.statuses_for_pipeline(
+        pipeline_id if isinstance(pipeline_id, int) else None
+    )
     if not configuration.api_base_url or configuration.api_timeout_seconds is None:
         raise RuntimeError("amoCRM API connection is not configured.")
-    if configuration.completed_status_id is None:
+    if status_route is None:
         raise RuntimeError("The completed amoCRM lead status is not configured.")
     if job.crm_entity_type not in {"lead", "leads"} or not job.crm_entity_id.isdecimal():
         raise RuntimeError("Job is not linked to a valid amoCRM lead.")
@@ -1167,13 +1173,13 @@ def _deliver_directly_to_amocrm(
 
         if delivery.finalized_at is None:
             status_payload: dict[str, Any] = {
-                "status_id": configuration.completed_status_id,
+                "status_id": status_route.completed_status_id,
             }
             matching_status = next(
                 (
                     item
                     for item in configuration.statuses_cache
-                    if item.get("id") == configuration.completed_status_id
+                    if item.get("id") == status_route.completed_status_id
                 ),
                 None,
             )
@@ -1190,7 +1196,7 @@ def _deliver_directly_to_amocrm(
                 source="integration",
                 message="Result archive was linked and the completed amoCRM status was applied.",
                 details={
-                    "status_id": configuration.completed_status_id,
+                    "status_id": status_route.completed_status_id,
                     "file_uuid": delivery.amo_file_uuid,
                 },
             )
@@ -1206,10 +1212,16 @@ def _deliver_via_yandex_disk(
     *,
     client: httpx.Client | None,
 ) -> None:
+    job_input = json_load(job.input_json, {})
+    metadata = job_input.get("metadata", {}) if isinstance(job_input, dict) else {}
+    pipeline_id = metadata.get("amo_pipeline_id") if isinstance(metadata, dict) else None
+    status_route = configuration.statuses_for_pipeline(
+        pipeline_id if isinstance(pipeline_id, int) else None
+    )
     try:
         if not configuration.api_base_url or configuration.api_timeout_seconds is None:
             raise RuntimeError("подключение amoCRM API не настроено")
-        if configuration.completed_status_id is None:
+        if status_route is None:
             raise RuntimeError("не выбран конечный статус сделки amoCRM")
         if not configuration.yandex_disk_root:
             raise RuntimeError("корневая папка Яндекс.Диска не настроена")
@@ -1347,12 +1359,12 @@ def _deliver_via_yandex_disk(
             session.commit()
 
         if delivery.finalized_at is None:
-            status_payload: dict[str, Any] = {"status_id": configuration.completed_status_id}
+            status_payload: dict[str, Any] = {"status_id": status_route.completed_status_id}
             matching_status = next(
                 (
                     item
                     for item in configuration.statuses_cache
-                    if item.get("id") == configuration.completed_status_id
+                    if item.get("id") == status_route.completed_status_id
                 ),
                 None,
             )
@@ -1363,7 +1375,7 @@ def _deliver_via_yandex_disk(
             except Exception as exc:
                 raise delivery_stage_error(
                     "AMOCRM_FINAL_STATUS", "Перевод сделки amoCRM в конечный статус", exc,
-                    details={"lead_id": job.crm_entity_id, "status_id": configuration.completed_status_id},
+                    details={"lead_id": job.crm_entity_id, "status_id": status_route.completed_status_id},
                 ) from exc
             delivery.finalized_at = utc_now()
             add_event(
@@ -1375,7 +1387,7 @@ def _deliver_via_yandex_disk(
                 source="integration",
                 message="Yandex Disk link was noted and the completed amoCRM status was applied.",
                 details={
-                    "status_id": configuration.completed_status_id,
+                    "status_id": status_route.completed_status_id,
                     "note_id": delivery.amo_note_id,
                 },
             )
