@@ -148,7 +148,7 @@ def test_error_event_is_delivered_once_to_configured_mattermost(client: TestClie
     assert "production-alerts" in payload
     assert "Исходный файл не найден." in payload
     assert "Номер заказа" in payload
-    assert "33860843" in payload
+    assert "ORDER-42" in payload
     assert "Дизайнер" in payload
     assert "Пустая сделка" in payload
     assert "Необходимо подготовить цветопробу вручную." in payload

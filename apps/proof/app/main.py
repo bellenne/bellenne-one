@@ -905,9 +905,16 @@ def configure_amocrm_webhook_ui(
     source_path_field_id: str = Form(...),
     layout_number_field_id: str = Form(...),
     third_field_id: str = Form(...),
+    proof_variant_field_id: str = Form(...),
+    brightness_direction_field_id: str = Form(...),
+    brightness_percent_field_id: str = Form(...),
     designer_field_id: str = Form(""),
     clear_source_path: str | None = Form(None),
     clear_layout_number: str | None = Form(None),
+    clear_trigger_flag: str | None = Form(None),
+    clear_proof_variant: str | None = Form(None),
+    clear_brightness_direction: str | None = Form(None),
+    clear_brightness_percent: str | None = Form(None),
     rotate_webhook_secret: str | None = Form(None),
     session: Session = Depends(get_db),
 ) -> HTMLResponse:
@@ -919,8 +926,17 @@ def configure_amocrm_webhook_ui(
     )
     mappings = [
         AmoFieldMapping(target="source_path", field_id=parse_optional_id(source_path_field_id)),
-        AmoFieldMapping(target="layout_number", field_id=parse_optional_id(layout_number_field_id)),
-        AmoFieldMapping(target="public_id", field_id=parse_optional_id(third_field_id)),
+        AmoFieldMapping(target="layout_numbers", field_id=parse_optional_id(layout_number_field_id)),
+        AmoFieldMapping(target="trigger_flag", field_id=parse_optional_id(third_field_id)),
+        AmoFieldMapping(target="proof_variant", field_id=parse_optional_id(proof_variant_field_id)),
+        AmoFieldMapping(
+            target="brightness_direction",
+            field_id=parse_optional_id(brightness_direction_field_id),
+        ),
+        AmoFieldMapping(
+            target="brightness_percent",
+            field_id=parse_optional_id(brightness_percent_field_id),
+        ),
     ]
     designer_field = parse_optional_id(designer_field_id)
     if designer_field is not None:
@@ -928,8 +944,15 @@ def configure_amocrm_webhook_ui(
     clear_field_ids = [
         mapping.field_id
         for mapping, selected in zip(
-            mappings[:3],
-            (clear_source_path, clear_layout_number, "on"),
+            mappings[:6],
+            (
+                clear_source_path,
+                clear_layout_number,
+                clear_trigger_flag,
+                clear_proof_variant,
+                clear_brightness_direction,
+                clear_brightness_percent,
+            ),
             strict=True,
         )
         if selected == "on"
@@ -1891,7 +1914,7 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
         if not configuration.has_required_mappings() or not configuration.clear_field_ids:
             raise HTTPException(
                 status_code=422,
-                detail="Для webhook amoCRM настройте три обязательных поля и поля для очистки.",
+                detail="Для webhook amoCRM настройте обязательные поля цветопробы и поля для очистки.",
             )
         try:
             with AmoClient(
@@ -1946,7 +1969,7 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
 
     if not crm_order_id:
         raise HTTPException(status_code=422, detail="Webhook amoCRM не содержит номер заказа.")
-    if status_route is None:
+    if status_route is None and not is_json_webhook:
         raise HTTPException(status_code=422, detail="Для воронки сделки не настроены статусы BellenneProof.")
 
     job, duplicate, accepted = create_job_from_webhook(

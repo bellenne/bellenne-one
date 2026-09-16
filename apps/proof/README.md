@@ -29,7 +29,8 @@ For a remote Worker, use the public module root, for example
 one durable Worker state volume must belong to exactly one Worker instance.
 
 For amoCRM Jobs, Core sends the full UNC order path from the selected custom
-field and `input.layout_number` as an integer. Each Worker has its own UNC prefix
+field, `input.layout_numbers`, `input.proof_variant`, and the optional brightness
+settings used by the color variant. Each Worker has its own UNC prefix
 to read-only mount mapping on the Workers page. Worker validates the mapped
 mount against its bootstrap allowlist before using it. The preset snapshot is
 opaque to Core and must conform to the Worker version being deployed. The
@@ -56,25 +57,27 @@ exactly.
 The standard amoCRM form webhook is only a wake-up/event envelope. All business
 conditions belong to the amoCRM automation that sends it; Core deliberately does
 not duplicate a source pipeline/status filter. Core fetches the current lead by
-ID and extracts exactly three custom fields selected in the UI: the order UNC
-path, layout number and the checkbox that triggered Proof (stored as `public_id`).
+ID and extracts the configured proof fields: the order UNC path, comma-separated
+layout numbers, trigger checkbox, proof variant, brightness direction and
+percentage. Direction and percentage are required only for the color variant.
 The amoCRM lead ID from the webhook is used as the order number. Other lead custom fields are not copied into the Job. The derived
 event ID is the idempotency key.
 
 The Integrations page also stores the queued, completed and failed status IDs.
-After persisting a new Job as `received`, Core always clears the trigger checkbox,
-clears the other selected fields and applies the queued status in one lead PATCH. Only after that
+After persisting a new Job as `received`, Core clears the fields selected in the
+UI and applies the queued status in one lead PATCH. Only after that
 acknowledgement succeeds does the Job enter the Worker queue. If the PATCH fails,
 the Job remains `received`; a duplicate delivery retries the acknowledgement
 without creating another Job or rereading the fields that may already be empty.
 
-Production delivery packs the immutable Worker JPEG into a ZIP and uploads it to
+Production delivery validates the immutable Worker ZIP and uploads it to
 `amoCRM/Сделки/<order number>/`. Core publishes that exact ZIP and
 adds its public URL as a `common` note on the amoCRM lead. Only after the note
 exists does Core apply the completed status. The final step does not clear the
 source fields again.
 The ZIP name is `<order number>_<published revision>.zip`, for example
-`31095815_4.zip`; the archive contains the JPEG under its Worker filename.
+`31095815_4.zip`; the archive contains all signed preview JPEG files from the
+single revision created for the Job.
 
 The Yandex Disk path, public URL and amoCRM note ID are persisted separately from
 the immutable Result. If adding the note or finalizing the lead fails, Retry

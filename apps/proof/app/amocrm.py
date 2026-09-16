@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, BinaryIO, Literal
 from urllib.parse import urlencode, urlsplit
 
@@ -11,10 +12,14 @@ from .yandex_disk import YANDEX_DEALS_ROOT
 MappingTarget = Literal[
     "source_path",
     "layout_number",
+    "layout_numbers",
     "order_number",
     "public_id",
     "trigger_flag",
     "designer_name",
+    "proof_variant",
+    "brightness_direction",
+    "brightness_percent",
 ]
 DeliveryMode = Literal["amocrm_attachment", "yandex_disk_note", "webhook"]
 AMOCRM_HOST_SUFFIXES = (".amocrm.ru", ".amocrm.com", ".kommo.com")
@@ -43,8 +48,8 @@ class AmoIntegrationConfiguration(BaseModel):
     failed_status_id: int | None = Field(default=None, gt=0)
     pipeline_statuses: list[AmoPipelineStatuses] = Field(default_factory=list)
     delivery_mode: DeliveryMode = "yandex_disk_note"
-    mappings: list[AmoFieldMapping] = Field(default_factory=list, max_length=4)
-    clear_field_ids: list[int] = Field(default_factory=list, max_length=3)
+    mappings: list[AmoFieldMapping] = Field(default_factory=list, max_length=8)
+    clear_field_ids: list[int] = Field(default_factory=list, max_length=7)
     fields_cache: list[dict[str, Any]] = Field(default_factory=list)
     statuses_cache: list[dict[str, Any]] = Field(default_factory=list)
     account_id: int | None = Field(default=None, gt=0)
@@ -81,14 +86,17 @@ class AmoIntegrationConfiguration(BaseModel):
     def unique_targets(self):
         # Normalize configurations produced by intermediate builds without
         # forcing the production integration to be configured again.
-        if not any(mapping.target == "public_id" for mapping in self.mappings):
+        if not any(mapping.target == "trigger_flag" for mapping in self.mappings):
             legacy = [
                 mapping
                 for mapping in self.mappings
-                if mapping.target in {"order_number", "trigger_flag"}
+                if mapping.target in {"order_number", "public_id"}
             ]
             if len(legacy) == 1:
-                legacy[0].target = "public_id"
+                legacy[0].target = "trigger_flag"
+        for mapping in self.mappings:
+            if mapping.target == "layout_number":
+                mapping.target = "layout_numbers"
         targets = [mapping.target for mapping in self.mappings]
         if len(targets) != len(set(targets)):
             raise ValueError("Каждое назначение данных можно настроить только один раз.")
@@ -99,9 +107,6 @@ class AmoIntegrationConfiguration(BaseModel):
             raise ValueError("Поля для очистки не должны повторяться.")
         if any(field_id not in field_ids for field_id in self.clear_field_ids):
             raise ValueError("Очищать можно только выбранные поля amoCRM.")
-        public_id_field_id = self.mapping_for("public_id")
-        if public_id_field_id is not None and public_id_field_id not in self.clear_field_ids:
-            self.clear_field_ids.append(public_id_field_id)
         return self
 
     def mapping_for(self, target: MappingTarget) -> int | None:
@@ -113,8 +118,11 @@ class AmoIntegrationConfiguration(BaseModel):
     def has_required_mappings(self) -> bool:
         return {
             "source_path",
-            "layout_number",
-            "public_id",
+            "layout_numbers",
+            "trigger_flag",
+            "proof_variant",
+            "brightness_direction",
+            "brightness_percent",
         }.issubset({mapping.target for mapping in self.mappings})
 
     def statuses_for_pipeline(self, pipeline_id: int | None) -> AmoPipelineStatuses | None:
@@ -232,6 +240,73 @@ def custom_field_value(lead: dict[str, Any], field_id: int) -> Any:
     return None
 
 
+def parse_layout_numbers(value: Any) -> list[int]:
+    if isinstance(value, bool):
+        raise ValueError("Поле номеров макетов должно содержать числа через запятую.")
+    raw_values = value if isinstance(value, list) else re.split(r"[,;]", str(value or ""))
+    result: list[int] = []
+    for raw in raw_values:
+        normalized = str(raw).strip()
+        if not normalized:
+            continue
+        if not normalized.isdecimal() or not 1 <= int(normalized) <= 999999:
+            raise ValueError("Поле номеров макетов должно содержать числа через запятую.")
+        number = int(normalized)
+        if number not in result:
+            result.append(number)
+    if not result:
+        raise ValueError("В сделке отсутствуют корректные номера макетов.")
+    if len(result) > 100:
+        raise ValueError("За одно задание можно обработать не более 100 макетов.")
+    return result
+
+
+def parse_trigger_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    normalized = str(value or "").strip().casefold()
+    if normalized in {"1", "true", "yes", "on", "да", "нужна", "нужно"}:
+        return True
+    if normalized in {"", "0", "false", "no", "off", "нет"}:
+        return False
+    raise ValueError("Поле «Нужна цветопроба» содержит неизвестное значение.")
+
+
+def parse_proof_variant(value: Any) -> str:
+    normalized = str(value or "").strip().casefold().replace("ё", "е").replace("х", "x")
+    if "цветокор" in normalized and "30x30" in normalized:
+        return "fragment_30x30_color"
+    if normalized.startswith("2 ") and "30x30" in normalized:
+        return "two_fragments_30x30"
+    if "60x30" in normalized:
+        return "fragment_60x30"
+    raise ValueError("В сделке не выбран поддерживаемый вариант ЦП.")
+
+
+def parse_brightness_direction(value: Any) -> str | None:
+    normalized = str(value or "").strip().casefold()
+    if not normalized:
+        return None
+    if normalized == "добавить":
+        return "add"
+    if normalized == "убавить":
+        return "subtract"
+    raise ValueError("Поле изменения яркости должно содержать «Добавить» или «Убавить».")
+
+
+def parse_brightness_percent(value: Any) -> float | None:
+    normalized = str(value or "").strip().removesuffix("%").strip().replace(",", ".")
+    if not normalized:
+        return None
+    try:
+        percent = float(normalized)
+    except ValueError as exc:
+        raise ValueError("Количество изменения яркости должно быть числом процентов.") from exc
+    if not 0 < percent <= 100:
+        raise ValueError("Количество изменения яркости должно быть больше 0 и не больше 100%.")
+    return percent
+
+
 def build_job_input(lead: dict[str, Any], configuration: AmoIntegrationConfiguration) -> dict[str, Any]:
     result: dict[str, Any] = {"metadata": {
         "amo_lead_id": lead.get("id"),
@@ -239,20 +314,35 @@ def build_job_input(lead: dict[str, Any], configuration: AmoIntegrationConfigura
     }}
     for mapping in configuration.mappings:
         value = custom_field_value(lead, mapping.field_id)
-        if mapping.target == "layout_number":
-            if isinstance(value, bool):
-                raise ValueError("Поле номера макета должно содержать целое число.")
-            try:
-                value = int(str(value).strip())
-            except (TypeError, ValueError) as exc:
-                raise ValueError("Поле номера макета должно содержать целое число.") from exc
+        if mapping.target in {"layout_number", "layout_numbers"}:
+            value = parse_layout_numbers(value)
+            result["layout_numbers"] = value
+            result["layout_number"] = value[0]
+            continue
+        if mapping.target == "trigger_flag":
+            value = parse_trigger_flag(value)
+        elif mapping.target == "proof_variant":
+            value = parse_proof_variant(value)
+        elif mapping.target == "brightness_direction":
+            value = parse_brightness_direction(value)
+        elif mapping.target == "brightness_percent":
+            value = parse_brightness_percent(value)
         elif value is not None:
             value = str(value).strip()
         result[mapping.target] = value
     if not isinstance(result.get("source_path"), str) or not result["source_path"]:
         raise ValueError("В сделке не заполнено настроенное поле пути заказа.")
-    if not isinstance(result.get("layout_number"), int) or not 1 <= result["layout_number"] <= 999999:
-        raise ValueError("В сделке отсутствует корректный номер макета.")
+    if not result.get("proof_required") and "trigger_flag" in result:
+        result["proof_required"] = bool(result.pop("trigger_flag"))
+    if not result.get("proof_required"):
+        raise ValueError("В сделке не отмечено поле «Нужна цветопроба».")
+    if not isinstance(result.get("layout_numbers"), list):
+        raise ValueError("В сделке отсутствуют корректные номера макетов.")
+    if result.get("proof_variant") == "fragment_30x30_color":
+        if result.get("brightness_direction") not in {"add", "subtract"}:
+            raise ValueError("Для варианта с цветокоррекцией выберите изменение яркости.")
+        if not isinstance(result.get("brightness_percent"), float):
+            raise ValueError("Для варианта с цветокоррекцией укажите количество процентов.")
     return result
 
 

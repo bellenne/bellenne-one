@@ -1070,6 +1070,39 @@ def _result_archive(
     delivery: ProofResultDelivery,
 ) -> Path:
     source_path = _result_path(settings, result)
+    metadata = json_load(result.metadata_json, {})
+    if (
+        result.content_type == "application/zip"
+        and source_path.suffix.casefold() == ".zip"
+        and metadata.get("result_kind") == "preview_archive"
+    ):
+        try:
+            with zipfile.ZipFile(source_path) as archive:
+                members = [member for member in archive.infolist() if not member.is_dir()]
+                if (
+                    not members
+                    or len({member.filename.casefold() for member in members}) != len(members)
+                    or any(
+                        Path(member.filename).name != member.filename
+                        or Path(member.filename).suffix.casefold() not in {".jpg", ".jpeg"}
+                        for member in members
+                    )
+                ):
+                    raise RuntimeError("Worker preview archive contains invalid members.")
+                for member in members:
+                    with archive.open(member) as file:
+                        while file.read(1024 * 1024):
+                            pass
+        except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
+            raise RuntimeError("Worker preview archive is invalid.") from exc
+        digest = hashlib.sha256()
+        with source_path.open("rb") as archive_file:
+            for block in iter(lambda: archive_file.read(1024 * 1024), b""):
+                digest.update(block)
+        if digest.hexdigest() != result.sha256:
+            raise RuntimeError("Worker preview archive checksum does not match Result.")
+        delivery.archive_sha256 = result.sha256
+        return source_path
     archive_path = source_path.parent / f"{result.id}-amocrm.zip"
     temporary_path = source_path.parent / f".{archive_path.name}.{uuid4().hex}.tmp"
     member_filename = _amocrm_result_filename(result)
