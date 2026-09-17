@@ -115,7 +115,7 @@ from .services import (
 )
 from .yandex_disk import YandexDiskClient
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 settings = AppSettings.from_env()
 engine = build_engine(settings)
 session_factory = build_session_factory(engine)
@@ -903,18 +903,11 @@ def configure_amocrm_webhook_ui(
     request: Request,
     csrf_token: str = Form(...),
     source_path_field_id: str = Form(...),
-    layout_number_field_id: str = Form(...),
     third_field_id: str = Form(...),
-    proof_variant_field_id: str = Form(...),
-    brightness_direction_field_id: str = Form(...),
-    brightness_percent_field_id: str = Form(...),
+    proof_data_field_code: str = Form("BELLENNE_PROOF_DATA"),
     designer_field_id: str = Form(""),
     clear_source_path: str | None = Form(None),
-    clear_layout_number: str | None = Form(None),
     clear_trigger_flag: str | None = Form(None),
-    clear_proof_variant: str | None = Form(None),
-    clear_brightness_direction: str | None = Form(None),
-    clear_brightness_percent: str | None = Form(None),
     rotate_webhook_secret: str | None = Form(None),
     session: Session = Depends(get_db),
 ) -> HTMLResponse:
@@ -926,17 +919,7 @@ def configure_amocrm_webhook_ui(
     )
     mappings = [
         AmoFieldMapping(target="source_path", field_id=parse_optional_id(source_path_field_id)),
-        AmoFieldMapping(target="layout_numbers", field_id=parse_optional_id(layout_number_field_id)),
         AmoFieldMapping(target="trigger_flag", field_id=parse_optional_id(third_field_id)),
-        AmoFieldMapping(target="proof_variant", field_id=parse_optional_id(proof_variant_field_id)),
-        AmoFieldMapping(
-            target="brightness_direction",
-            field_id=parse_optional_id(brightness_direction_field_id),
-        ),
-        AmoFieldMapping(
-            target="brightness_percent",
-            field_id=parse_optional_id(brightness_percent_field_id),
-        ),
     ]
     designer_field = parse_optional_id(designer_field_id)
     if designer_field is not None:
@@ -944,15 +927,8 @@ def configure_amocrm_webhook_ui(
     clear_field_ids = [
         mapping.field_id
         for mapping, selected in zip(
-            mappings[:6],
-            (
-                clear_source_path,
-                clear_layout_number,
-                clear_trigger_flag,
-                clear_proof_variant,
-                clear_brightness_direction,
-                clear_brightness_percent,
-            ),
+            mappings[:2],
+            (clear_source_path, clear_trigger_flag),
             strict=True,
         )
         if selected == "on"
@@ -963,6 +939,7 @@ def configure_amocrm_webhook_ui(
         **configuration.model_dump(mode="json"),
         "mappings": [item.model_dump(mode="json") for item in mappings],
         "clear_field_ids": clear_field_ids,
+        "proof_data_field_code": proof_data_field_code.strip(),
     })
     raw_secret = ""
     if rotate_webhook_secret == "on":
@@ -1909,6 +1886,7 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
         )
 
     input_payload = payload.input
+    webhook_clear_field_ids = list(configuration.clear_field_ids)
     crm_order_id = payload.crm_order_id or payload.crm_entity_id
     if not is_json_webhook:
         if not configuration.has_required_mappings() or not configuration.clear_field_ids:
@@ -1930,6 +1908,10 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
             if status_route is None:
                 raise ValueError("Для воронки сделки не настроены статусы BellenneProof.")
             input_payload = build_job_input(lead, configuration)
+            proof_metadata = input_payload.get("metadata", {})
+            proof_field_id = proof_metadata.get("amo_proof_data_field_id")
+            if isinstance(proof_field_id, int) and proof_field_id not in webhook_clear_field_ids:
+                webhook_clear_field_ids.append(proof_field_id)
         except (ValueError, ValidationError, RuntimeError, httpx.HTTPError) as exc:
             safe_error = sanitized_message(str(exc))
             designer_name = ""
@@ -1998,7 +1980,7 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
             status_route.queued_status_id,
             event_type="amocrm.lead.accepted",
             message="Lead fields cleared and lead moved to the configured processing status.",
-            clear_field_ids=configuration.clear_field_ids,
+            clear_field_ids=webhook_clear_field_ids,
         )
         if not accepted_in_amo:
             session.commit()

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import math
 import re
+from datetime import datetime
 from typing import Any, BinaryIO, Literal
 from urllib.parse import urlencode, urlsplit
 
@@ -56,6 +59,7 @@ class AmoIntegrationConfiguration(BaseModel):
     account_name: str = Field(default="", max_length=255)
     connected_at: str = Field(default="", max_length=64)
     yandex_disk_root: str = Field(default=YANDEX_DEALS_ROOT, max_length=1000)
+    proof_data_field_code: str = Field(default="BELLENNE_PROOF_DATA", min_length=1, max_length=255)
 
     @field_validator("api_base_url")
     @classmethod
@@ -81,6 +85,14 @@ class AmoIntegrationConfiguration(BaseModel):
     @classmethod
     def fixed_yandex_disk_root(cls, _value: str) -> str:
         return YANDEX_DEALS_ROOT
+
+    @field_validator("proof_data_field_code")
+    @classmethod
+    def valid_proof_data_field_code(cls, value: str) -> str:
+        normalized = value.strip()
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,254}", normalized):
+            raise ValueError("Код поля BellenneProof содержит недопустимые символы.")
+        return normalized
 
     @model_validator(mode="after")
     def unique_targets(self):
@@ -118,11 +130,7 @@ class AmoIntegrationConfiguration(BaseModel):
     def has_required_mappings(self) -> bool:
         return {
             "source_path",
-            "layout_numbers",
             "trigger_flag",
-            "proof_variant",
-            "brightness_direction",
-            "brightness_percent",
         }.issubset({mapping.target for mapping in self.mappings})
 
     def statuses_for_pipeline(self, pipeline_id: int | None) -> AmoPipelineStatuses | None:
@@ -240,6 +248,106 @@ def custom_field_value(lead: dict[str, Any], field_id: int) -> Any:
     return None
 
 
+def custom_field_by_code(lead: dict[str, Any], field_code: str) -> dict[str, Any] | None:
+    return next((
+        field for field in lead.get("custom_fields_values") or []
+        if isinstance(field, dict) and field.get("field_code") == field_code
+    ), None)
+
+
+PROOF_VARIANTS = {
+    "fragment_90x30", "fragment_60x30", "two_fragments_30x30",
+    "fragment_30x30_color", "fragment_30x30", "thumbnail",
+}
+
+
+def _validate_brightness(item: dict[str, Any], *, context: str) -> None:
+    is_color = item.get("proof_variant") == "fragment_30x30_color"
+    direction = item.get("brightness_direction")
+    percent = item.get("brightness_percent")
+    if is_color:
+        if direction not in {"add", "subtract"}:
+            raise ValueError(f"{context}: неверное направление изменения яркости.")
+        if isinstance(percent, bool) or not isinstance(percent, (int, float)) or not math.isfinite(percent) or not 0 < percent <= 100:
+            raise ValueError(f"{context}: неверный процент изменения яркости.")
+    elif direction is not None or percent is not None:
+        raise ValueError(f"{context}: яркость допустима только для цветокоррекции.")
+
+
+def parse_proof_widget_payload(lead: dict[str, Any], field_code: str) -> tuple[dict[str, Any], int]:
+    field = custom_field_by_code(lead, field_code)
+    values = field.get("values") or [] if field else []
+    raw = values[0].get("value") if values and isinstance(values[0], dict) else None
+    if raw in (None, ""):
+        raise ValueError("В сделке отсутствуют данные BellenneProof для запуска.")
+    if not isinstance(raw, str):
+        raise ValueError("Поле BellenneProof должно содержать JSON-строку.")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Поле BellenneProof содержит повреждённый JSON.") from exc
+    if not isinstance(payload, dict) or payload.get("schema") != "bellenne-proof/v2":
+        raise ValueError("Поле BellenneProof содержит неподдерживаемую схему данных.")
+    if not {"schema", "revision", "updated_at", "items"}.issubset(payload):
+        raise ValueError("Поле BellenneProof не содержит обязательные корневые поля.")
+    revision = payload.get("revision")
+    updated_at = payload.get("updated_at")
+    items = payload.get("items")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+        raise ValueError("Поле BellenneProof содержит неверную ревизию.")
+    if updated_at is not None:
+        if not isinstance(updated_at, str):
+            raise ValueError("Поле BellenneProof содержит неверное время обновления.")
+        try:
+            parsed_updated_at = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("Поле BellenneProof содержит неверное время обновления.") from exc
+        if parsed_updated_at.tzinfo is None or parsed_updated_at.utcoffset().total_seconds() != 0:
+            raise ValueError("Время обновления BellenneProof должно быть указано в UTC.")
+    if not isinstance(items, list) or not items:
+        raise ValueError("В сделке нет позиций для подготовки цветопробы.")
+    seen_ids: set[str] = set()
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise ValueError(f"Позиция {index + 1}: ожидался объект.")
+        required = {"id", "position", "layout_number", "proof_variant", "brightness_direction", "brightness_percent"}
+        if not required.issubset(item):
+            raise ValueError(f"Позиция {index + 1}: отсутствуют обязательные поля.")
+        item_id = item.get("id")
+        if not isinstance(item_id, str) or not item_id.strip() or item_id in seen_ids:
+            raise ValueError(f"Позиция {index + 1}: неверный или повторяющийся ID.")
+        seen_ids.add(item_id)
+        if isinstance(item.get("position"), bool) or not isinstance(item.get("position"), int) or item.get("position") != index:
+            raise ValueError(f"Позиция {index + 1}: неверный порядковый номер.")
+        layout_number = item.get("layout_number")
+        if not isinstance(layout_number, str) or not layout_number.isdecimal() or not 1 <= int(layout_number) <= 999999:
+            raise ValueError(f"Позиция {index + 1}: неверный номер макета.")
+        variant = item.get("proof_variant")
+        if variant not in PROOF_VARIANTS:
+            raise ValueError(f"Позиция {index + 1}: неизвестный вариант цветопробы.")
+        _validate_brightness(item, context=f"Позиция {index + 1}")
+        fragments = item.get("fragments")
+        if variant == "fragment_90x30":
+            if not isinstance(fragments, list) or len(fragments) != 3:
+                raise ValueError(f"Позиция {index + 1}: для 90×30 нужны ровно три фрагмента.")
+            for fragment_index, fragment in enumerate(fragments):
+                if not isinstance(fragment, dict) or set(fragment) != {"id", "position", "proof_variant", "brightness_direction", "brightness_percent"}:
+                    raise ValueError(f"Позиция {index + 1}, фрагмент {fragment_index + 1}: неверный состав полей.")
+                fragment_id = fragment.get("id")
+                if not isinstance(fragment_id, str) or not fragment_id.strip() or fragment_id in seen_ids:
+                    raise ValueError(f"Позиция {index + 1}, фрагмент {fragment_index + 1}: неверный или повторяющийся ID.")
+                seen_ids.add(fragment_id)
+                if isinstance(fragment.get("position"), bool) or not isinstance(fragment.get("position"), int) or fragment.get("position") != fragment_index or fragment.get("proof_variant") not in {"fragment_30x30", "fragment_30x30_color"}:
+                    raise ValueError(f"Позиция {index + 1}, фрагмент {fragment_index + 1}: неверные данные.")
+                _validate_brightness(fragment, context=f"Позиция {index + 1}, фрагмент {fragment_index + 1}")
+        elif "fragments" in item:
+            raise ValueError(f"Позиция {index + 1}: fragments допустимы только для 90×30.")
+    field_id = field.get("field_id") if field else None
+    if not isinstance(field_id, int):
+        raise ValueError("Служебное поле BellenneProof не имеет корректного ID.")
+    return payload, field_id
+
+
 def parse_layout_numbers(value: Any) -> list[int]:
     if isinstance(value, bool):
         raise ValueError("Поле номеров макетов должно содержать числа через запятую.")
@@ -308,25 +416,20 @@ def parse_brightness_percent(value: Any) -> float | None:
 
 
 def build_job_input(lead: dict[str, Any], configuration: AmoIntegrationConfiguration) -> dict[str, Any]:
+    proof_payload, proof_field_id = parse_proof_widget_payload(
+        lead, configuration.proof_data_field_code
+    )
     result: dict[str, Any] = {"metadata": {
         "amo_lead_id": lead.get("id"),
         "amo_pipeline_id": lead.get("pipeline_id"),
+        "amo_proof_data_field_id": proof_field_id,
     }}
     for mapping in configuration.mappings:
-        value = custom_field_value(lead, mapping.field_id)
-        if mapping.target in {"layout_number", "layout_numbers"}:
-            value = parse_layout_numbers(value)
-            result["layout_numbers"] = value
-            result["layout_number"] = value[0]
+        if mapping.target not in {"source_path", "trigger_flag", "designer_name"}:
             continue
+        value = custom_field_value(lead, mapping.field_id)
         if mapping.target == "trigger_flag":
             value = parse_trigger_flag(value)
-        elif mapping.target == "proof_variant":
-            value = parse_proof_variant(value)
-        elif mapping.target == "brightness_direction":
-            value = parse_brightness_direction(value)
-        elif mapping.target == "brightness_percent":
-            value = parse_brightness_percent(value)
         elif value is not None:
             value = str(value).strip()
         result[mapping.target] = value
@@ -336,13 +439,7 @@ def build_job_input(lead: dict[str, Any], configuration: AmoIntegrationConfigura
         result["proof_required"] = bool(result.pop("trigger_flag"))
     if not result.get("proof_required"):
         raise ValueError("В сделке не отмечено поле «Нужна цветопроба».")
-    if not isinstance(result.get("layout_numbers"), list):
-        raise ValueError("В сделке отсутствуют корректные номера макетов.")
-    if result.get("proof_variant") == "fragment_30x30_color":
-        if result.get("brightness_direction") not in {"add", "subtract"}:
-            raise ValueError("Для варианта с цветокоррекцией выберите изменение яркости.")
-        if not isinstance(result.get("brightness_percent"), float):
-            raise ValueError("Для варианта с цветокоррекцией укажите количество процентов.")
+    result.update(proof_payload)
     return result
 
 
