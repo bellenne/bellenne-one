@@ -178,13 +178,9 @@ def configured_amocrm() -> AmoIntegrationConfiguration:
         completed_status_id=90,
         mappings=[
             AmoFieldMapping(target="source_path", field_id=1001),
-            AmoFieldMapping(target="layout_numbers", field_id=1002),
             AmoFieldMapping(target="trigger_flag", field_id=1003),
-            AmoFieldMapping(target="proof_variant", field_id=1004),
-            AmoFieldMapping(target="brightness_direction", field_id=1005),
-            AmoFieldMapping(target="brightness_percent", field_id=1006),
         ],
-        clear_field_ids=[1001, 1002, 1003, 1004, 1005, 1006],
+        clear_field_ids=[1001, 1003],
         statuses_cache=[{
             "id": 89,
             "name": "В очереди Proof",
@@ -192,6 +188,53 @@ def configured_amocrm() -> AmoIntegrationConfiguration:
             "pipeline_name": "Production",
         }],
     )
+
+
+def proof_widget_field(*, layout_number: str = "4", variant: str = "fragment_60x30") -> dict[str, Any]:
+    item: dict[str, Any] = {
+        "id": "proof-1",
+        "position": 0,
+        "layout_number": layout_number,
+        "proof_variant": variant,
+        "brightness_direction": None,
+        "brightness_percent": None,
+    }
+    if variant == "fragment_90x30":
+        item["fragments"] = [
+            {
+                "id": "proof-1:fragment:1",
+                "position": 0,
+                "proof_variant": "fragment_30x30",
+                "brightness_direction": None,
+                "brightness_percent": None,
+            },
+            {
+                "id": "proof-1:fragment:2",
+                "position": 1,
+                "proof_variant": "fragment_30x30_color",
+                "brightness_direction": "add",
+                "brightness_percent": 5,
+            },
+            {
+                "id": "proof-1:fragment:3",
+                "position": 2,
+                "proof_variant": "fragment_30x30_color",
+                "brightness_direction": "subtract",
+                "brightness_percent": 2.5,
+            },
+        ]
+    return {
+        "field_id": 2001,
+        "field_code": "BELLENNE_PROOF_DATA",
+        "values": [{
+            "value": json.dumps({
+                "schema": "bellenne-proof/v2",
+                "revision": 7,
+                "updated_at": "2026-09-17T10:00:00.000Z",
+                "items": [item],
+            }, ensure_ascii=False),
+        }],
+    }
 
 
 def test_amocrm_account_url_cannot_send_token_to_an_arbitrary_host() -> None:
@@ -212,27 +255,24 @@ def official_webhook() -> dict[str, str]:
     }
 
 
-def test_build_job_input_parses_multiple_layouts_and_color_settings() -> None:
+def test_build_job_input_preserves_widget_90x30_fragments() -> None:
     lead = {
         "id": 42,
         "pipeline_id": 77,
         "custom_fields_values": [
             {"field_id": 1001, "values": [{"value": r"\\server\orders\42"}]},
-            {"field_id": 1002, "values": [{"value": "3, 7; 3"}]},
             {"field_id": 1003, "values": [{"value": True}]},
-            {"field_id": 1004, "values": [{"value": "Фрагмента 30х30 + цветокор"}]},
-            {"field_id": 1005, "values": [{"value": "Убавить"}]},
-            {"field_id": 1006, "values": [{"value": "12,5%"}]},
+            proof_widget_field(layout_number="3", variant="fragment_90x30"),
         ],
     }
 
     payload = build_job_input(lead, configured_amocrm())
 
-    assert payload["layout_numbers"] == [3, 7]
-    assert payload["layout_number"] == 3
-    assert payload["proof_variant"] == "fragment_30x30_color"
-    assert payload["brightness_direction"] == "subtract"
-    assert payload["brightness_percent"] == 12.5
+    assert payload["schema"] == "bellenne-proof/v2"
+    assert payload["items"][0]["layout_number"] == "3"
+    assert payload["items"][0]["proof_variant"] == "fragment_90x30"
+    assert payload["items"][0]["fragments"][1]["brightness_direction"] == "add"
+    assert payload["items"][0]["fragments"][2]["brightness_percent"] == 2.5
     assert payload["proof_required"] is True
 
 
@@ -289,18 +329,11 @@ def test_ui_saves_designer_alongside_required_amocrm_fields(
         data={
             "csrf_token": "proof-csrf",
             "source_path_field_id": "1001",
-            "layout_number_field_id": "1002",
             "third_field_id": "1003",
-            "proof_variant_field_id": "1004",
-            "brightness_direction_field_id": "1005",
-            "brightness_percent_field_id": "1006",
+            "proof_data_field_code": "BELLENNE_PROOF_DATA",
             "designer_field_id": "1007",
             "clear_source_path": "on",
-            "clear_layout_number": "on",
             "clear_trigger_flag": "on",
-            "clear_proof_variant": "on",
-            "clear_brightness_direction": "on",
-            "clear_brightness_percent": "on",
         },
     )
     assert response.status_code == 200
@@ -313,14 +346,10 @@ def test_ui_saves_designer_alongside_required_amocrm_fields(
         )
         assert [(item.target, item.field_id) for item in configuration.mappings] == [
             ("source_path", 1001),
-            ("layout_numbers", 1002),
             ("trigger_flag", 1003),
-            ("proof_variant", 1004),
-            ("brightness_direction", 1005),
-            ("brightness_percent", 1006),
             ("designer_name", 1007),
         ]
-        assert configuration.clear_field_ids == [1001, 1002, 1003, 1004, 1005, 1006]
+        assert configuration.clear_field_ids == [1001, 1003]
 
 
 def test_ui_checks_and_saves_yandex_disk_token_encrypted(
@@ -376,9 +405,8 @@ def test_official_webhook_reads_only_selected_fields_and_moves_lead_to_queue(
         "status_id": 88,
         "custom_fields_values": [
             {"field_id": 1001, "values": [{"value": r"\\ip\дизайн отдел\Макеты (опт)\Сентябрь 2026\33860843"}]},
-            {"field_id": 1002, "values": [{"value": "4"}]},
             {"field_id": 1003, "values": [{"value": True}]},
-            {"field_id": 1004, "values": [{"value": "Фрагмент 60x30"}]},
+            proof_widget_field(variant="fragment_90x30"),
             {"field_id": 9999, "values": [{"value": "must-not-enter-job"}]},
         ],
     }
@@ -396,10 +424,11 @@ def test_official_webhook_reads_only_selected_fields_and_moves_lead_to_queue(
         job = session.get(ProofJob, response.json()["job_id"])
         payload = json_load(job.input_json, {})
         assert payload["source_path"].endswith(r"Сентябрь 2026\33860843")
-        assert payload["layout_number"] == 4
-        assert payload["layout_numbers"] == [4]
+        assert payload["schema"] == "bellenne-proof/v2"
+        assert payload["items"][0]["layout_number"] == "4"
+        assert payload["items"][0]["proof_variant"] == "fragment_90x30"
+        assert len(payload["items"][0]["fragments"]) == 3
         assert payload["proof_required"] is True
-        assert payload["proof_variant"] == "fragment_60x30"
         assert job.crm_order_id == "7654321"
         assert "must-not-enter-job" not in job.input_json
         assert job.processing_status == "queued"
@@ -410,11 +439,8 @@ def test_official_webhook_reads_only_selected_fields_and_moves_lead_to_queue(
             "pipeline_id": 77,
             "custom_fields_values": [
                 {"field_id": 1001, "values": None},
-                {"field_id": 1002, "values": None},
                 {"field_id": 1003, "values": None},
-                {"field_id": 1004, "values": None},
-                {"field_id": 1005, "values": None},
-                {"field_id": 1006, "values": None},
+                {"field_id": 2001, "values": None},
             ],
         },
     )]
@@ -433,9 +459,8 @@ def test_each_official_webhook_creates_an_independent_job_for_the_same_lead(
         "id": 7654321,
         "custom_fields_values": [
             {"field_id": 1001, "values": [{"value": r"\\ip\orders\33860843"}]},
-            {"field_id": 1002, "values": [{"value": "4"}]},
             {"field_id": 1003, "values": [{"value": True}]},
-            {"field_id": 1004, "values": [{"value": "Фрагмент 60x30"}]},
+            proof_widget_field(),
         ],
     }
     FakeAmoClient.updates = []
@@ -483,9 +508,8 @@ def test_official_webhook_does_not_repeat_amo_conditions_inside_core(
         "status_id": 999,
         "custom_fields_values": [
             {"field_id": 1001, "values": [{"value": r"\\ip\orders\33860843"}]},
-            {"field_id": 1002, "values": [{"value": "4"}]},
             {"field_id": 1003, "values": [{"value": True}]},
-            {"field_id": 1004, "values": [{"value": "Фрагмент 60x30"}]},
+            proof_widget_field(),
         ],
     }
     FakeAmoClient.updates = []
@@ -677,7 +701,7 @@ def test_legacy_attachment_setting_uses_yandex_delivery_without_duplicate_note(
     configuration = configured_amocrm().model_copy(update={
         "completed_status_id": 90,
         "delivery_mode": "amocrm_attachment",
-        "clear_field_ids": [1001, 1002],
+        "clear_field_ids": [1001, 1003],
         "statuses_cache": [{
             "id": 89,
             "name": "Proof queued",
@@ -779,7 +803,7 @@ def test_yandex_delivery_uploads_zip_once_and_recovers_note_without_duplication(
         "completed_status_id": 90,
         "delivery_mode": "yandex_disk_note",
         "yandex_disk_root": "Производство/Цветопробы",
-        "clear_field_ids": [1001, 1002],
+        "clear_field_ids": [1001, 1003],
         "statuses_cache": [{
             "id": 89,
             "name": "Proof queued",
