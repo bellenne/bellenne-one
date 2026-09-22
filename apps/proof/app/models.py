@@ -101,6 +101,25 @@ class WebhookReceipt(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
+class AmoWebhookInbox(Base):
+    __tablename__ = "proof_amocrm_webhook_inbox"
+    __table_args__ = (UniqueConstraint("integration_id", "idempotency_key"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    integration_id: Mapped[int] = mapped_column(ForeignKey("proof_integrations.id"), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_id: Mapped[str] = mapped_column(String(36), index=True)
+    is_json: Mapped[bool] = mapped_column(Boolean, default=False)
+    payload_json: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(24), default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    job_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class ProofJob(Base):
     __tablename__ = "proof_jobs"
     __table_args__ = (

@@ -36,6 +36,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 from sqlalchemy import event as sqlalchemy_event
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .amocrm import (
@@ -53,6 +54,7 @@ from .amocrm import (
 from .config import AppSettings
 from .database import build_engine, build_session_factory, init_database
 from .models import (
+    AmoWebhookInbox,
     ProofEvent,
     ProofIntegration,
     ProofJob,
@@ -115,12 +117,13 @@ from .services import (
 )
 from .yandex_disk import YandexDiskClient
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 settings = AppSettings.from_env()
 engine = build_engine(settings)
 session_factory = build_session_factory(engine)
 templates = Jinja2Templates(directory="app/templates")
 notification_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="proof-integrations")
+webhook_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="proof-webhooks")
 webhook_logger = logging.getLogger("bellenne.proof.webhooks")
 
 
@@ -145,7 +148,10 @@ async def lifespan(_: FastAPI):
     init_database(engine)
     if settings.notification_async_enabled:
         notification_executor.submit(dispatch_pending_mattermost, session_factory, settings)
+    dispatch_pending_amocrm_webhooks()
     yield
+    webhook_executor.shutdown(wait=False, cancel_futures=False)
+    notification_executor.shutdown(wait=False, cancel_futures=False)
     engine.dispose()
 
 
@@ -1744,6 +1750,191 @@ def update_amocrm_after_delivery(
     )
 
 
+def process_amocrm_inbox_item(inbox_id: str) -> None:
+    with session_factory() as session:
+        inbox = session.get(AmoWebhookInbox, inbox_id)
+        if inbox is None or inbox.status == "completed":
+            return
+        inbox.status = "processing"
+        inbox.attempts += 1
+        inbox.started_at = utc_now()
+        inbox.error_message = None
+        session.commit()
+
+        integration = session.get(ProofIntegration, inbox.integration_id)
+        if integration is None or not integration.enabled:
+            inbox.status = "failed"
+            inbox.error_message = "amoCRM integration is unavailable."
+            inbox.completed_at = utc_now()
+            session.commit()
+            return
+
+        raw_payload = json_load(inbox.payload_json, {})
+        try:
+            payload = (
+                WebhookRequest.model_validate(raw_payload)
+                if inbox.is_json
+                else parse_amocrm_form_payload(raw_payload)
+            )
+            preset_id = payload.preset_id or integration.default_preset_id
+            preset = session.get(ProofPreset, preset_id) if preset_id else None
+            if preset is None or preset.owner_external_user_id != integration.owner_external_user_id:
+                raise ValueError("Webhook has no valid Proof Preset.")
+            configuration = amocrm_configuration(integration)
+            input_metadata = payload.input.get("metadata", {}) if isinstance(payload.input, dict) else {}
+            input_pipeline_id = input_metadata.get("amo_pipeline_id") if isinstance(input_metadata, dict) else None
+            status_route = configuration.statuses_for_pipeline(
+                input_pipeline_id if isinstance(input_pipeline_id, int) else None
+            )
+            input_payload = payload.input
+            webhook_clear_field_ids = list(configuration.clear_field_ids)
+            crm_order_id = payload.crm_order_id or payload.crm_entity_id
+
+            if not inbox.is_json:
+                if not configuration.has_required_mappings() or not configuration.clear_field_ids:
+                    raise ValueError(
+                        "Для webhook amoCRM настройте обязательные поля цветопробы и поля для очистки."
+                    )
+                try:
+                    with AmoClient(
+                        configuration.api_base_url,
+                        get_amocrm_access_token(session, settings, integration),
+                        timeout_seconds=configuration.api_timeout_seconds,
+                    ) as client:
+                        lead = client.get_lead(payload.crm_entity_id)
+                    lead_pipeline_id = lead.get("pipeline_id")
+                    status_route = configuration.statuses_for_pipeline(
+                        lead_pipeline_id if isinstance(lead_pipeline_id, int) else None
+                    )
+                    if status_route is None:
+                        raise ValueError("Для воронки сделки не настроены статусы BellenneProof.")
+                    input_payload = build_job_input(lead, configuration)
+                    proof_metadata = input_payload.get("metadata", {})
+                    proof_field_id = proof_metadata.get("amo_proof_data_field_id")
+                    if isinstance(proof_field_id, int) and proof_field_id not in webhook_clear_field_ids:
+                        webhook_clear_field_ids.append(proof_field_id)
+                except (ValueError, ValidationError, RuntimeError, httpx.HTTPError) as exc:
+                    safe_error = sanitized_message(str(exc))
+                    designer_name = ""
+                    designer_field_id = configuration.mapping_for("designer_name")
+                    if designer_field_id is not None and "lead" in locals():
+                        designer_name = str(custom_field_value(lead, designer_field_id) or "").strip()
+                    integration.last_error_at = utc_now()
+                    integration.last_error_message = safe_error[:2000]
+                    add_event(
+                        session,
+                        owner_external_user_id=integration.owner_external_user_id,
+                        integration_id=integration.id,
+                        event_type="amocrm.lead.read_failed",
+                        source="integration",
+                        level="error",
+                        message=f"amoCRM lead could not be read for Job creation: {safe_error}",
+                        error_code="AMOCRM_LEAD_READ_FAILED",
+                        details={
+                            "request_id": inbox.request_id,
+                            "crm_entity_id": payload.crm_entity_id,
+                            "designer_name": designer_name,
+                            "error": safe_error,
+                        },
+                    )
+                    session.commit()
+                    raise
+
+            if not crm_order_id:
+                raise ValueError("Webhook amoCRM не содержит номер заказа.")
+            if status_route is None and not inbox.is_json:
+                raise ValueError("Для воронки сделки не настроены статусы BellenneProof.")
+
+            job, duplicate, accepted = create_job_from_webhook(
+                session,
+                integration,
+                idempotency_key=payload.event_id,
+                event_type=payload.event_type,
+                crm_entity_type=payload.crm_entity_type,
+                crm_entity_id=payload.crm_entity_id,
+                crm_order_id=crm_order_id,
+                preset=preset,
+                input_payload=input_payload,
+                original_payload=raw_payload,
+                enqueue=inbox.is_json,
+            )
+            session.commit()
+            queued_after_amo_ack = False
+            if accepted and job is not None and not inbox.is_json and (
+                not duplicate or job.processing_status == "received"
+            ):
+                accepted_in_amo = update_amocrm_job_status(
+                    session,
+                    integration,
+                    job,
+                    configuration,
+                    status_route.queued_status_id,
+                    event_type="amocrm.lead.accepted",
+                    message="Lead fields cleared and lead moved to the configured processing status.",
+                    clear_field_ids=webhook_clear_field_ids,
+                )
+                if not accepted_in_amo:
+                    session.commit()
+                    raise RuntimeError("Не удалось подтвердить приём сделки в amoCRM.")
+                queue_received_job(session, job)
+                queued_after_amo_ack = True
+            if accepted and job is not None and (not duplicate or queued_after_amo_ack):
+                session.info["proof_worker_wake_pending"] = {
+                    "owner_id": integration.owner_external_user_id,
+                    "job_id": job.id,
+                }
+            inbox.job_id = job.id if job else None
+            inbox.status = "completed"
+            inbox.completed_at = utc_now()
+            add_event(
+                session,
+                owner_external_user_id=integration.owner_external_user_id,
+                integration_id=integration.id,
+                job_id=job.id if job else None,
+                event_type="webhook.processed",
+                source="integration",
+                message=f"amoCRM webhook processed ({'accepted' if accepted else 'ignored'}). Request ID: {inbox.request_id}.",
+                details={
+                    "request_id": inbox.request_id,
+                    "event_id": payload.event_id,
+                    "event_type": payload.event_type,
+                    "crm_entity_type": payload.crm_entity_type,
+                    "crm_entity_id": payload.crm_entity_id,
+                    "accepted": accepted,
+                    "duplicate": duplicate,
+                },
+                queue_notification=False,
+            )
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            inbox = session.get(AmoWebhookInbox, inbox_id)
+            integration = session.get(ProofIntegration, inbox.integration_id) if inbox else None
+            safe_error = sanitized_message(str(exc))[:2000]
+            if inbox is not None:
+                inbox.status = "failed"
+                inbox.error_message = safe_error
+                inbox.completed_at = utc_now()
+            if integration is not None:
+                integration.last_error_at = utc_now()
+                integration.last_error_message = safe_error
+            session.commit()
+            webhook_logger.exception(
+                "amoCRM webhook background processing failed inbox_id=%s request_id=%s",
+                inbox_id,
+                inbox.request_id if inbox else "unknown",
+            )
+
+
+def dispatch_pending_amocrm_webhooks() -> None:
+    with session_factory() as session:
+        inbox_ids = list(session.scalars(select(AmoWebhookInbox.id).where(
+            AmoWebhookInbox.status.in_(("pending", "processing"))
+        )))
+    for inbox_id in inbox_ids:
+        webhook_executor.submit(process_amocrm_inbox_item, inbox_id)
+
+
 @app.post("/webhooks/amocrm/{webhook_secret}")
 async def amocrm_webhook(webhook_secret: str, request: Request, session: Session = Depends(get_db)) -> JSONResponse:
     request_id = str(uuid4())
@@ -1757,6 +1948,159 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
             request.client.host if request.client else "unknown",
         )
         raise HTTPException(status_code=401, detail="Invalid webhook credential.")
+    content_type = request.headers.get("content-type", "")
+    content_length = request.headers.get("content-length", "")
+    client_address = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
+    if not client_address and request.client:
+        client_address = request.client.host
+    incoming_details = {
+        "request_id": request_id,
+        "content_type": content_type[:200],
+        "content_length": content_length[:40],
+        "client_address": client_address[:120],
+        "user_agent": request.headers.get("user-agent", "")[:300],
+    }
+    is_json_webhook = "application/json" in content_type
+    try:
+        if is_json_webhook:
+            raw_payload = await request.json()
+        else:
+            form = await request.form()
+            raw_payload = {key: value for key, value in form.multi_items()}
+        payload = (
+            WebhookRequest.model_validate(raw_payload)
+            if is_json_webhook
+            else parse_amocrm_form_payload(raw_payload)
+        )
+    except (ValidationError, ValueError, json.JSONDecodeError) as exc:
+        integration.last_incoming_at = utc_now()
+        integration.last_error_at = utc_now()
+        integration.last_error_message = "Webhook contract validation failed."
+        add_event(
+            session,
+            owner_external_user_id=integration.owner_external_user_id,
+            integration_id=integration.id,
+            event_type="webhook.validation_failed",
+            source="integration",
+            level="error",
+            message=f"amoCRM webhook contract validation failed. Request ID: {request_id}.",
+            error_code="WEBHOOK_VALIDATION_FAILED",
+            details={**incoming_details, "error": sanitized_message(str(exc))[:1000]},
+        )
+        session.commit()
+        return JSONResponse(
+            {"accepted": False, "queued": False, "request_id": request_id},
+            status_code=200,
+        )
+
+    # JSON is the explicit Core API contract and historically returns the created
+    # Job synchronously. Only the official amoCRM form webhook uses the fast inbox.
+    if is_json_webhook:
+        preset_id = payload.preset_id or integration.default_preset_id
+        preset = session.get(ProofPreset, preset_id) if preset_id else None
+        if preset is None or preset.owner_external_user_id != integration.owner_external_user_id:
+            raise HTTPException(status_code=422, detail="Webhook has no valid Proof Preset.")
+        job, duplicate, accepted = create_job_from_webhook(
+            session,
+            integration,
+            idempotency_key=payload.event_id,
+            event_type=payload.event_type,
+            crm_entity_type=payload.crm_entity_type,
+            crm_entity_id=payload.crm_entity_id,
+            crm_order_id=payload.crm_order_id or payload.crm_entity_id,
+            preset=preset,
+            input_payload=payload.input,
+            original_payload=raw_payload,
+            enqueue=True,
+        )
+        if accepted and job is not None and not duplicate:
+            session.info["proof_worker_wake_pending"] = {
+                "owner_id": integration.owner_external_user_id,
+                "job_id": job.id,
+            }
+        integration.last_incoming_at = utc_now()
+        add_event(
+            session,
+            owner_external_user_id=integration.owner_external_user_id,
+            integration_id=integration.id,
+            job_id=job.id if job else None,
+            event_type="webhook.processed",
+            source="integration",
+            message=f"amoCRM webhook processed ({'accepted' if accepted else 'ignored'}). Request ID: {request_id}.",
+            details={**incoming_details, "event_id": payload.event_id, "duplicate": duplicate},
+            queue_notification=False,
+        )
+        session.commit()
+        return JSONResponse(
+            {"accepted": accepted, "duplicate": duplicate, "job_id": job.id if job else None},
+            status_code=200 if duplicate or not accepted else 202,
+        )
+
+    inbox = AmoWebhookInbox(
+        id=str(uuid4()),
+        integration_id=integration.id,
+        idempotency_key=payload.event_id,
+        request_id=request_id,
+        is_json=is_json_webhook,
+        payload_json=json_dump(raw_payload),
+        status="pending",
+    )
+    session.add(inbox)
+    integration.last_incoming_at = utc_now()
+    add_event(
+        session,
+        owner_external_user_id=integration.owner_external_user_id,
+        integration_id=integration.id,
+        event_type="webhook.incoming",
+        source="integration",
+        message=f"amoCRM webhook reached Proof Core. Request ID: {request_id}.",
+        details={**incoming_details, "event_id": payload.event_id},
+        queue_notification=False,
+    )
+    try:
+        session.commit()
+        duplicate = False
+    except IntegrityError:
+        session.rollback()
+        duplicate = True
+        existing = session.scalar(select(AmoWebhookInbox).where(
+            AmoWebhookInbox.integration_id == integration.id,
+            AmoWebhookInbox.idempotency_key == payload.event_id,
+        ))
+        add_event(
+            session,
+            owner_external_user_id=integration.owner_external_user_id,
+            integration_id=integration.id,
+            job_id=existing.job_id if existing else None,
+            event_type="webhook.duplicate",
+            source="integration",
+            message=f"Duplicate amoCRM webhook acknowledged. Request ID: {request_id}.",
+            details={**incoming_details, "event_id": payload.event_id},
+            queue_notification=False,
+        )
+        integration.last_incoming_at = utc_now()
+        session.commit()
+
+    if not duplicate:
+        webhook_executor.submit(process_amocrm_inbox_item, inbox.id)
+    webhook_logger.info(
+        "amoCRM webhook acknowledged request_id=%s integration_id=%s duplicate=%s",
+        request_id,
+        integration.id,
+        duplicate,
+    )
+    return JSONResponse(
+        {
+            "accepted": True,
+            "queued": not duplicate,
+            "duplicate": duplicate,
+            "request_id": request_id,
+        },
+        status_code=200,
+    )
+
+    # Legacy inline implementation below is intentionally unreachable while kept
+    # temporarily for a safe, reviewable migration to the durable inbox worker.
     content_type = request.headers.get("content-type", "")
     content_length = request.headers.get("content-length", "")
     client_address = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()

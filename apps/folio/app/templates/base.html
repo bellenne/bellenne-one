@@ -1,0 +1,10 @@
+{% from "icons.html" import icon %}
+{% macro token() %}<input type="hidden" name="csrf" value="{{ csrf }}">{% endmacro %}
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>BellenneFolio</title>
+<link rel="stylesheet" href="{{ prefix }}/shared/css/theme.css"><link rel="stylesheet" href="{{ prefix }}/shared/css/app.css"><link rel="stylesheet" href="{{ prefix }}/static/folio.css"></head>
+<body><div class="app-shell"><aside class="sidebar" aria-label="Навигация Folio"><a class="brand" href="/">BellenneOne</a><nav class="sidebar-nav">
+<a class="sidebar-item" href="{{ prefix }}/">{{ icon('echo') }}<span>Чаты Folio</span></a>
+{% if actor.role == 'admin' %}<a class="sidebar-item" href="{{ prefix }}/scenarios">{{ icon('plan') }}<span>Сценарии</span></a><a class="sidebar-item" href="{{ prefix }}/catalog">{{ icon('accounts') }}<span>Товары и шаблоны</span></a><a class="sidebar-item" href="{{ prefix }}/orders">{{ icon('reports') }}<span>Заказы и брифы</span></a><a class="sidebar-item" href="{{ prefix }}/settings">{{ icon('settings') }}<span>Настройки Folio</span></a><a class="sidebar-item" href="{{ prefix }}/audit">{{ icon('history') }}<span>Журнал</span></a>{% endif %}
+<a class="sidebar-item" href="/">{{ icon('dashboard') }}<span>В BellenneOne</span></a></nav><div class="sidebar-foot">Folio · Подготовка заказов</div></aside>
+<div class="main-shell"><header class="topbar"><button class="button button-secondary button-small sidebar-toggle" type="button" data-sidebar-toggle>{{ icon('menu') }}<span>Меню</span></button><strong>BellenneFolio</strong><div class="topbar-spacer"></div><span>{{ actor.name }} · {{ actor.role }}</span></header><main class="main-content">{% block content %}{% endblock %}</main></div></div>
+<script src="{{ prefix }}/shared/js/app.js" defer></script><script src="{{ prefix }}/static/folio.js" defer></script></body></html>
