@@ -246,3 +246,22 @@ class ProofNotificationDelivery(Base):
 
     event: Mapped[ProofEvent] = relationship(foreign_keys=[event_id])
     integration: Mapped[ProofIntegration] = relationship(foreign_keys=[integration_id])
+
+
+class ProofCrmNoteDelivery(Base):
+    __tablename__ = "proof_crm_note_deliveries"
+    __table_args__ = (UniqueConstraint("event_id", "integration_id"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    owner_external_user_id: Mapped[int] = mapped_column(Integer, index=True)
+    event_id: Mapped[str] = mapped_column(ForeignKey("proof_events.id"), index=True)
+    integration_id: Mapped[int] = mapped_column(ForeignKey("proof_integrations.id"), index=True)
+    lead_id: Mapped[str] = mapped_column(String(120), index=True)
+    status: Mapped[str] = mapped_column(String(24), default="pending", index=True)
+    amo_note_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    event: Mapped[ProofEvent] = relationship(foreign_keys=[event_id])
+    integration: Mapped[ProofIntegration] = relationship(foreign_keys=[integration_id])

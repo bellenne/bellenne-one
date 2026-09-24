@@ -1,18 +1,107 @@
 {% extends "base.html" %}{% block content %}
-<div class="page-header"><div><h1 class="page-title">Настройки Folio</h1><p class="page-subtitle">Ozon FBS, правила работы и доступ сотрудников</p></div></div>
-<section class="card card-body folio-stack folio-section"><h2>Правила кабинета</h2><form method="post" action="{{ prefix }}/settings" class="folio-stack">{{ token() }}<div class="form-grid form-grid-2">
-<label class="field">N часов до готовности к передаче<input class="input" name="handoff_hours" type="number" min="0" step="any" value="{{ settings.handoff_hours if settings.handoff_hours is defined and settings.handoff_hours is not none else '' }}"></label>
-<label class="field">Отсчитывать N от<select class="select" name="timer_origin" required><option value="">Выберите</option><option value="confirmation" {{ 'selected' if settings.timer_origin == 'confirmation' }}>Подтверждения покупателем</option><option value="review" {{ 'selected' if settings.timer_origin == 'review' }}>Проверки менеджером</option></select></label>
-<label class="field">Чаты менеджеров<select class="select" name="manager_scope" required><option value="">Выберите</option><option value="assigned" {{ 'selected' if settings.manager_scope == 'assigned' }}>Только назначенные</option><option value="all" {{ 'selected' if settings.manager_scope == 'all' }}>Все чаты Folio</option></select></label><label><input name="manager_resume" type="checkbox" {{ 'checked' if settings.manager_resume }}> Менеджер может явно возвращать бота</label>
-<label class="field">Начало импорта заказов (ISO 8601, без зоны — UTC)<input class="input" name="sync_since" value="{{ settings.sync_since or '' }}" placeholder="2026-09-22T00:00:00+03:00"></label><label class="field">Период синхронизации, минуты<input class="input" name="sync_minutes" type="number" min="0.001" step="any" value="{{ settings.sync_minutes or '' }}"></label>
-<label class="field">Таймаут HTTP, секунды<input class="input" name="http_timeout" type="number" min="0.001" step="any" value="{{ settings.http_timeout or '' }}"></label><label class="field">Интервал запросов Ozon, секунды<input class="input" name="request_interval" type="number" min="0.001" step="any" value="{{ settings.request_interval or '' }}"></label>
-<label class="field">Лимит текста, символы<input class="input" name="message_max_chars" type="number" min="1" value="{{ settings.message_max_chars or '' }}"></label><label class="field">Максимальный размер изображения, байты<input class="input" name="media_max_bytes" type="number" min="1" value="{{ settings.media_max_bytes or '' }}"></label>
-<label class="field">Статусы Ozon, разрешающие начало диалога (по одному на строку)<textarea class="input" name="start_statuses" rows="3">{{ settings.get("start_statuses",[])|join("\n") }}</textarea><span class="field-help">Используйте фактические статусы из синхронизированных заказов. Без списка автоматическое начало отключено.</span></label><fieldset><legend>Разрешённые изображения</legend>{% for mime in ['image/jpeg','image/png','image/webp'] %}<label><input type="checkbox" name="media_mimes" value="{{ mime }}" {{ 'checked' if mime in settings.get('media_mimes',[]) }}> {{ mime }}</label>{% endfor %}</fieldset>
-<label class="field">Подтверждённые хосты вложений Ozon (по одному на строку)<textarea class="input" name="media_hosts" rows="3">{{ settings.get('media_hosts',[])|join('\n') }}</textarea><span class="field-help">Точные имена хостов в доменах ozone.ru / ozon.ru. Переадресация и приватные IP запрещены.</span></label>
-</div><label><input type="checkbox" name="sync_enabled" {{ 'checked' if settings.sync_enabled }}> Периодическая синхронизация</label><label><input type="checkbox" name="send_enabled" {{ 'checked' if settings.send_enabled }}> Разрешить отправку текста через Ozon API</label><label><input type="checkbox" name="start_enabled" {{ 'checked' if settings.start_enabled }}> Инициировать чаты для всех сопоставленных заказов</label><label><input type="checkbox" name="automation_enabled" {{ 'checked' if settings.automation_enabled }}> Запускать опубликованный сценарий при однозначной связи новой позиции и чата</label>
-<p class="field-help">Подтверждение покупателем и проверка менеджером обязательны. Молчание не подтверждает бриф. Изменение N применяется к последующим проверкам; ранее назначенное время сохраняется. Получатель производства ещё не подключён: результат доступен через экспорт готового брифа. Статус «прочитано» Ozon не изменяется.</p><button class="button button-primary">Сохранить правила</button></form></section>
-<section class="card card-body folio-stack folio-section"><h2>Кабинеты Ozon</h2><p>Полный доступ ключа не гарантирует доступность чатов по подписке. Проверка выполняет только чтение заказов и чатов, без отправки покупателям.</p>
-{% for account in accounts %}<details><summary>{{ account.name }} · Client-Id {{ account.client_id }} · {{ account.error or account.checked_at or 'Не проверен' }}</summary><p>Проверенные возможности: {{ account.capabilities }}</p><form method="post" action="{{ prefix }}/accounts" class="folio-stack">{{ token() }}<input type="hidden" name="id" value="{{ account.id }}"><label class="field">Название<input class="input" name="name" value="{{ account.name }}" required></label><label class="field">Client-Id<input class="input" name="client_id" value="{{ account.client_id }}" required></label><label class="field">Новый API-ключ (пусто — сохранить текущий)<input class="input" name="api_key" type="password" autocomplete="new-password"></label><button class="button button-secondary">Обновить кабинет</button></form><div class="form-actions"><form method="post" action="{{ prefix }}/accounts/{{ account.id }}/probe">{{ token() }}<button class="button button-secondary">Проверить подключение</button></form><form method="post" action="{{ prefix }}/accounts/{{ account.id }}/sync">{{ token() }}<button class="button button-secondary">Синхронизировать</button></form></div></details>{% endfor %}
-<form method="post" action="{{ prefix }}/accounts" class="form-grid form-grid-2">{{ token() }}<label class="field">Название кабинета<input class="input" name="name" required></label><label class="field">Client-Id<input class="input" name="client_id" required></label><label class="field">API-ключ<input class="input" name="api_key" type="password" required autocomplete="new-password"></label><div class="form-actions"><button class="button button-secondary">Добавить кабинет</button></div></form></section>
-<section class="card card-body folio-stack"><h2>Пользователи Folio</h2><p class="field-help">Укажите ID существующего аккаунта Bellenne. Пароли и вход остаются в общей системе.</p><div class="table-scroll"><table class="data-table"><thead><tr><th>ID Bellenne</th><th>Имя</th><th>Роль</th></tr></thead><tbody>{% for u in users %}<tr><td>{{ u.id }}</td><td>{{ u.name }}</td><td>{{ u.role }} · {{ "Доступен" if u.enabled else "Доступ закрыт" }}</td></tr>{% endfor %}</tbody></table></div><form method="post" action="{{ prefix }}/users" class="form-grid form-grid-2">{{ token() }}<label class="field">ID Bellenne<input class="input" name="id" required></label><label class="field">Имя<input class="input" name="name" required></label><label class="field">Роль<select class="select" name="role"><option value="manager">manager</option><option value="admin">admin</option></select></label><label><input type="checkbox" name="enabled" checked> Доступ включён</label><div class="form-actions"><button class="button button-secondary">Сохранить доступ</button></div></form></section>
+<div class="page-header"><div><h1 class="page-title">Настройки Folio</h1><p class="page-subtitle">Подключения Ozon и RetailCRM, права и запуск автоматизации</p></div></div>
+<nav class="folio-settings-nav" aria-label="Разделы настроек">
+  <a class="button button-secondary" href="{{ prefix }}/settings">Проверка и запуск</a>
+  <a class="button button-secondary" href="{{ prefix }}/settings/ozon">Ozon</a>
+  <a class="button button-secondary" href="{{ prefix }}/settings/retailcrm">RetailCRM</a>
+  <a class="button button-secondary" href="{{ prefix }}/catalog">Товары и шаблоны</a>
+  <a class="button button-secondary" href="{{ prefix }}/scenarios">Сценарии</a>
+  <a class="button button-secondary" href="{{ prefix }}/settings/automation">Автоматизация</a>
+  <a class="button button-secondary" href="{{ prefix }}/settings/users">Пользователи</a>
+</nav>
+
+{% if section == 'overview' %}
+<section class="card card-body folio-stack folio-section">
+  <h2>Мастер запуска</h2>
+  <p>Пройдите этапы по порядку. Folio не включит автоматическую обработку, пока критичные возможности кабинета не подтверждены.</p>
+  <ol class="folio-onboarding">
+    <li class="{{ 'is-complete' if onboarding.connection }}"><a href="{{ prefix }}/settings/ozon">1. Подключить Ozon</a><span>{{ 'Готово' if onboarding.connection else 'Требуется настройка' }}</span></li>
+    <li class="{{ 'is-complete' if onboarding.capabilities }}"><a href="{{ prefix }}/settings/ozon">2. Проверить доступ</a><span>{{ 'Подтверждено' if onboarding.capabilities else 'Не подтверждено' }}</span></li>
+    <li class="{{ 'is-complete' if onboarding.mappings }}"><a href="{{ prefix }}/catalog">3. Сопоставить товары</a><span>{{ 'Настроено' if onboarding.mappings else 'Нет привязок' }}</span></li>
+    <li class="{{ 'is-complete' if onboarding.scenarios }}"><a href="{{ prefix }}/scenarios">4. Подготовить сценарии</a><span>{{ 'Готово' if onboarding.scenarios else 'Не все типы готовы' }}</span></li>
+    <li><a href="{{ prefix }}/scenarios">5. Выполнить симуляцию</a><span>Без отправки в Ozon</span></li>
+    <li class="{{ 'is-complete' if onboarding.automation }}"><a href="{{ prefix }}/settings/automation">6. Включить автоматизацию</a><span>{{ 'Включена' if onboarding.automation else 'Выключена' }}</span></li>
+  </ol>
+  {% if not onboarding.capabilities %}<div class="status status-warning">Подключение ещё не проверено полностью. Отправка покупателям и автоматизация должны оставаться выключенными.</div>{% endif %}
+  <div class="form-actions"><a class="button button-primary" href="{{ prefix }}/settings/ozon">Начать или продолжить настройку</a></div>
+</section>
+{% endif %}
+
+{% if section == 'ozon' %}
+<section class="card card-body folio-stack folio-section">
+  <div><h2>Кабинеты Ozon</h2><p class="field-help">Проверка подключения ничего не отправляет покупателям и не импортирует данные.</p></div>
+  {% for account in accounts %}
+    {% set caps = account_capabilities[account.id] %}
+    {% set last_job = account_jobs.get(account.id) %}
+    <article class="folio-account-card">
+      <div class="folio-account-head"><div><h3>{{ account.name }}</h3><p>Client ID: {{ account.client_id }} · API-ключ настроен</p></div><div class="folio-account-meta">{% if account.checked_at %}<span class="field-help">Проверено {{ account.checked_at|folio_time }}</span>{% endif %}<span class="field-help">Последняя синхронизация: {{ account.last_success|folio_time if account.last_success else 'ещё не выполнялась' }}</span></div></div>
+      {% if last_job and last_job.state in ['pending','running'] %}<div class="status status-warning">{{ job_labels.get(last_job.kind, 'Операция') }}: {{ state_labels.get(last_job.state, 'Выполняется') }}. Обновите страницу через несколько секунд.</div>{% endif %}
+      {% if account.error %}{% set problem = error_details(account.error) %}<div class="status status-negative"><strong>{{ problem.title }}</strong><span>{{ problem.action }}</span>{% if last_job %}<details><summary>Технические детали</summary><span>Операция Folio №{{ last_job.id }} · {{ last_job.finished_at|folio_time }}</span></details>{% endif %}</div>{% endif %}
+      <div class="folio-capabilities" aria-label="Результаты проверки доступа">
+        {% for key, title in [('account','Кабинет'),('orders','Заказы'),('list','Чтение чатов'),('history','История сообщений'),('send','Отправка сообщений'),('attachments','Вложения'),('start','Создание чата')] %}
+          {% set value = caps.get(key) %}
+          <div class="folio-capability-item"><span class="badge {{ 'badge-positive' if value is sameas true else 'badge-negative' if value is sameas false else 'badge-neutral' }}">{{ title }}: {{ 'доступно' if value is sameas true else 'недоступно' if value is sameas false else 'не проверено' }}</span>{% if value is sameas false and caps.get(key ~ '_error') %}{% set capability_problem = error_details(caps.get(key ~ '_error')) %}<small>{{ capability_problem.title }}. {{ capability_problem.action }}</small>{% endif %}</div>
+        {% endfor %}
+      </div>
+      <div class="form-actions">
+        <form method="post" action="{{ prefix }}/accounts/{{ account.id }}/probe">{{ token() }}<button class="button button-primary">Проверить подключение</button></form>
+        <form method="post" action="{{ prefix }}/accounts/{{ account.id }}/sync">{{ token() }}<button class="button button-secondary" {{ 'disabled' if not settings.sync_since }}>Синхронизировать сейчас</button></form>
+      </div>
+      {% if not settings.sync_since %}<p class="field-help">Перед первой синхронизацией укажите дату начала импорта ниже.</p>{% endif %}
+      <details><summary>Изменить подключение</summary><form method="post" action="{{ prefix }}/accounts" class="folio-stack">{{ token() }}<input type="hidden" name="id" value="{{ account.id }}"><label class="field">Название кабинета<input class="input" name="name" value="{{ account.name }}" required></label><label class="field">Client ID<input class="input" name="client_id" value="{{ account.client_id }}" required></label><label class="field">Заменить API-ключ<input class="input" name="api_key" type="password" autocomplete="new-password" placeholder="Оставьте пустым, чтобы сохранить текущий ключ"></label><button class="button button-secondary">Сохранить изменения</button></form></details>
+    </article>
+  {% else %}<div class="empty-state">Подключённые кабинеты пока отсутствуют.</div>{% endfor %}
+</section>
+
+<section class="card card-body folio-stack folio-section"><h2>Добавить кабинет</h2><form method="post" action="{{ prefix }}/accounts" class="form-grid form-grid-2">{{ token() }}<label class="field">Название кабинета<input class="input" name="name" required></label><label class="field">Client ID<input class="input" name="client_id" required></label><label class="field">API-ключ<input class="input" name="api_key" type="password" required autocomplete="new-password"></label><div class="form-actions"><button class="button button-primary">Сохранить подключение</button></div></form></section>
+
+<section class="card card-body folio-stack"><h2>Синхронизация заказов</h2><p class="field-help">Выберите, с какого момента Folio должен загружать заказы, и как часто проверять новые.</p><form method="post" action="{{ prefix }}/settings/ozon" class="folio-stack" data-datetime-form>{{ token() }}<div class="form-grid form-grid-2">
+  <label class="field">Загружать заказы начиная с<input class="input" type="datetime-local" data-datetime-local data-iso="{{ settings.sync_since or '' }}"><input type="hidden" name="sync_since" value="{{ settings.sync_since or '' }}" data-datetime-iso><span class="field-help">Дата и время отображаются в часовом поясе вашего устройства.</span></label>
+  <label class="field">Период синхронизации, минуты<input class="input" name="sync_minutes" type="number" min="0.001" step="any" value="{{ settings.sync_minutes or '' }}"></label>
+</div><label><input type="checkbox" name="sync_enabled" {{ 'checked' if settings.sync_enabled }}> Выполнять периодическую синхронизацию</label><div class="form-actions"><button class="button button-primary">Сохранить настройки Ozon</button></div></form></section>
+<div class="form-actions folio-section"><a class="button button-secondary" href="{{ prefix }}/settings">Назад к мастеру</a><a class="button button-primary" href="{{ prefix }}/catalog">Продолжить: товары</a></div>
+{% endif %}
+
+{% if section == 'retailcrm' %}
+<section class="card card-body folio-stack folio-section">
+  <div><h2>Подключение RetailCRM</h2><p class="field-help">Folio создаёт заказ на отдельном шаге опубликованного сценария. API-ключ должен иметь права чтения и изменения заказов.</p></div>
+  {% if retailcrm_config %}
+    {% set caps = retailcrm_capabilities %}
+    <div class="folio-capabilities" aria-label="Результаты проверки RetailCRM">
+      {% for key, title in [('order_read','Чтение заказов'),('order_write','Создание заказов'),('site','Доступ к магазину')] %}
+        {% set value = caps.get(key) %}
+        <div class="folio-capability-item"><span class="badge {{ 'badge-positive' if value is sameas true else 'badge-negative' if value is sameas false else 'badge-neutral' }}">{{ title }}: {{ 'доступно' if value is sameas true else 'недоступно' if value is sameas false else 'не проверено' }}</span></div>
+      {% endfor %}
+    </div>
+    {% if retailcrm_config.error %}{% set problem = error_details(retailcrm_config.error) %}<div class="status status-error"><strong>{{ problem.title }}</strong><div>{{ problem.action }}</div></div>{% endif %}
+    {% if retailcrm_job %}<p class="field-help">Последняя проверка: {{ state_labels.get(retailcrm_job.state, 'Неизвестное состояние') }} · {{ (retailcrm_job.finished_at or retailcrm_job.created_at)|folio_time }}</p>{% endif %}
+  {% endif %}
+  <form method="post" action="{{ prefix }}/settings/retailcrm" class="form-grid form-grid-2">{{ token() }}
+    <label class="field">Адрес RetailCRM<input class="input" type="url" name="base_url" value="{{ retailcrm_config.base_url if retailcrm_config else '' }}" placeholder="https://example.retailcrm.ru" required><span class="field-help">Публичный HTTPS-адрес аккаунта без пути <code>/api</code>.</span></label>
+    <label class="field">Код магазина<input class="input" name="site" value="{{ retailcrm_config.site if retailcrm_config else '' }}" required><span class="field-help">Символьный код магазина из RetailCRM.</span></label>
+    <label class="field">{{ 'Заменить API-ключ' if retailcrm_config else 'API-ключ' }}<input class="input" type="password" name="api_key" autocomplete="new-password" {{ '' if retailcrm_config else 'required' }} placeholder="{{ 'Оставьте пустым, чтобы сохранить текущий ключ' if retailcrm_config else '' }}"></label>
+    <div class="form-actions"><button class="button button-primary">Сохранить подключение</button></div>
+  </form>
+  {% if retailcrm_config %}<form method="post" action="{{ prefix }}/settings/retailcrm/probe">{{ token() }}<button class="button button-secondary">Проверить подключение и права</button></form>{% endif %}
+</section>
+{% endif %}
+
+{% if section == 'automation' %}
+<section class="card card-body folio-stack folio-section"><h2>Правила работы</h2><form method="post" action="{{ prefix }}/settings/automation" class="folio-stack">{{ token() }}<div class="form-grid form-grid-2">
+  <label class="field">N часов до готовности к передаче<input class="input" name="handoff_hours" type="number" min="0" step="any" value="{{ settings.handoff_hours if settings.handoff_hours is defined and settings.handoff_hours is not none else '' }}"></label>
+  <label class="field">Отсчитывать N от<select class="select" name="timer_origin" required><option value="">Выберите</option><option value="confirmation" {{ 'selected' if settings.timer_origin == 'confirmation' }}>Подтверждения покупателем, если шаг есть</option><option value="review" {{ 'selected' if settings.timer_origin == 'review' }}>Проверки менеджером</option></select></label>
+  <label class="field">Доступ менеджеров к чатам<select class="select" name="manager_scope" required><option value="">Выберите</option><option value="assigned" {{ 'selected' if settings.manager_scope == 'assigned' }}>Только назначенные</option><option value="all" {{ 'selected' if settings.manager_scope == 'all' }}>Все чаты Folio</option></select></label>
+  <label class="field">Статусы Ozon для начала диалога<textarea class="input" name="start_statuses" rows="3">{{ settings.get('start_statuses',[])|join('\n') }}</textarea><span class="field-help">Используйте только фактические статусы синхронизированных заказов.</span></label>
+</div>
+<label><input name="manager_resume" type="checkbox" {{ 'checked' if settings.manager_resume }}> Менеджер может явно возвращать чат боту</label>
+<label><input type="checkbox" name="send_enabled" {{ 'checked' if settings.send_enabled }}> Разрешить отправку текста через Ozon API</label>
+<label><input type="checkbox" name="start_enabled" {{ 'checked' if settings.start_enabled }}> Инициировать чаты для сопоставленных заказов</label>
+<label><input type="checkbox" name="automation_enabled" {{ 'checked' if settings.automation_enabled }}> Запускать опубликованный сценарий при однозначной связи позиции и чата</label>
+<p class="field-help">Подтверждение покупателем требуется только в сценариях с соответствующим узлом. Проверка менеджером и комплектность брифа обязательны всегда.</p><button class="button button-primary">Сохранить правила</button></form></section>
+<div class="form-actions"><a class="button button-secondary" href="{{ prefix }}/scenarios">Назад к сценариям</a><a class="button button-primary" href="{{ prefix }}/settings">Вернуться к проверке запуска</a></div>
+{% endif %}
+
+{% if section == 'users' %}
+<section class="card card-body folio-stack"><h2>Пользователи Folio</h2><p class="field-help">Укажите ID существующего аккаунта Bellenne. Пароль остаётся в общей системе авторизации.</p><div class="table-scroll"><table class="data-table"><thead><tr><th>ID Bellenne</th><th>Имя</th><th>Роль</th></tr></thead><tbody>{% for u in users %}<tr><td>{{ u.id }}</td><td>{{ u.name }}</td><td>{{ role_labels.get(u.role, 'Неизвестная роль') }} · {{ 'Доступен' if u.enabled else 'Доступ закрыт' }}</td></tr>{% endfor %}</tbody></table></div><form method="post" action="{{ prefix }}/users" class="form-grid form-grid-2">{{ token() }}<label class="field">ID Bellenne<input class="input" name="id" required></label><label class="field">Имя<input class="input" name="name" required></label><label class="field">Роль<select class="select" name="role"><option value="manager">Менеджер</option><option value="admin">Администратор</option></select></label><label><input type="checkbox" name="enabled" checked> Доступ включён</label><div class="form-actions"><button class="button button-primary">Сохранить доступ</button></div></form></section>
+{% endif %}
 {% endblock %}

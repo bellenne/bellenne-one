@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import re
@@ -206,6 +207,9 @@ async def internal_auth(request: Request):
         user = current_user(request, session)
         if user is None:
             return Response(status_code=status.HTTP_401_UNAUTHORIZED)
+        original_uri = request.headers.get("X-Original-URI", "/")
+        if user.access_scope == "folio" and not original_uri.startswith("/folio"):
+            return Response(status_code=status.HTTP_403_FORBIDDEN)
         return Response(
             status_code=status.HTTP_204_NO_CONTENT,
             headers={
@@ -218,11 +222,43 @@ async def internal_auth(request: Request):
         )
 
 
+@router.post("/internal/users/folio-manager")
+async def create_folio_manager(request: Request):
+    """Create a platform login for an admin-approved Folio manager."""
+    supplied = request.headers.get("X-Bellenne-Internal-Secret", "")
+    expected = request.app.state.settings.app_secret_key
+    if not supplied or not hmac.compare_digest(supplied, expected):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+    payload = await request.json()
+    username = str(payload.get("username", "")).strip()
+    password = str(payload.get("password", ""))
+    if not re.fullmatch(r"[A-Za-zА-Яа-яЁё0-9_.-]{3,80}", username):
+        raise HTTPException(status_code=422, detail="Некорректный логин")
+    if len(password) < 8:
+        raise HTTPException(status_code=422, detail="Пароль должен содержать не менее 8 символов")
+    with get_db(request) as session:
+        if session.scalar(select(User).where(User.username == username)):
+            raise HTTPException(status_code=409, detail="Пользователь с таким логином уже существует")
+        user = User(
+            username=username,
+            password_hash=hash_password(password),
+            access_scope="folio",
+        )
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        return {"id": str(user.id), "username": user.username}
+
+
 @router.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
     with get_db(request) as session:
-        if current_user(request, session):
-            return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
+        user = current_user(request, session)
+        if user:
+            return RedirectResponse(
+                "/folio/" if user.access_scope == "folio" else "/",
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
     return templates.TemplateResponse(
         request=request,
         name="login.html",
@@ -272,7 +308,10 @@ async def register(request: Request):
         request.session["user_id"] = user.id
         request.session["csrf_token"] = new_csrf_token()
         flash(request, "Аккаунт создан. Демонстрационные кабинеты можно удалить в разделе «Кабинеты».", "success")
-    return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
+    return RedirectResponse(
+        "/folio/" if user.access_scope == "folio" else "/",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
 
 
 @router.post("/login")
@@ -289,7 +328,10 @@ async def login(request: Request):
         request.session.clear()
         request.session["user_id"] = user.id
         request.session["csrf_token"] = new_csrf_token()
-    return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
+    return RedirectResponse(
+        "/folio/" if user.access_scope == "folio" else "/",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
 
 
 @router.post("/logout")

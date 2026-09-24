@@ -5,11 +5,19 @@ require the administrator's explicit activation; successful writes are recorded
 as evidence, never inferred from a successful list request.
 """
 
-import time
+import os
 
 import httpx
 
 from .security import cipher
+
+
+SELLER_INFO_PATH = "/v1/seller/info"
+CHAT_LIST_PATH = "/v3/chat/list"
+CHAT_HISTORY_PATH = "/v3/chat/history"
+CHAT_SEND_MESSAGE_PATH = "/v1/chat/send/message"
+CHAT_START_PATH = "/v1/chat/start"
+FBS_POSTING_LIST_PATH = "/v4/posting/fbs/list"
 
 
 class OzonError(Exception):
@@ -20,30 +28,32 @@ class OzonError(Exception):
 
 
 class OzonAdapter:
-    def __init__(self, account, settings, transport=None):
-        if not settings.get("http_timeout") or not settings.get("request_interval"):
-            raise OzonError("configure_http_limits")
-        self.interval = settings["request_interval"]
-        self.last_request = 0
+    def __init__(self, account, settings=None, transport=None):
+        client_options = {}
+        configured_timeout = os.environ.get("FOLIO_OZON_HTTP_TIMEOUT_SECONDS", "").strip()
+        if configured_timeout:
+            try:
+                timeout = float(configured_timeout)
+            except ValueError as exc:
+                raise RuntimeError("FOLIO_OZON_HTTP_TIMEOUT_SECONDS must be a positive number") from exc
+            if timeout <= 0:
+                raise RuntimeError("FOLIO_OZON_HTTP_TIMEOUT_SECONDS must be a positive number")
+            client_options["timeout"] = timeout
         self.client = httpx.Client(
             base_url="https://api-seller.ozon.ru",
             headers={
                 "Client-Id": account["client_id"],
                 "Api-Key": cipher().decrypt(account["secret"].encode()).decode(),
             },
-            timeout=settings["http_timeout"],
             follow_redirects=False,
             transport=transport,
+            **client_options,
         )
 
     def close(self):
         self.client.close()
 
     def post(self, path, body, write=False):
-        delay = self.interval - (time.monotonic() - self.last_request)
-        if delay > 0:
-            time.sleep(delay)
-        self.last_request = time.monotonic()
         try:
             response = self.client.post(path, json=body)
         except (httpx.ConnectError, httpx.ConnectTimeout):
@@ -70,13 +80,42 @@ class OzonAdapter:
             raise OzonError("invalid_response", unknown=write)
         return value
 
+    def chat_page(self, limit=100):
+        result = self.post(
+            CHAT_LIST_PATH,
+            {"limit": limit, "cursor": "", "filter": {"unread_only": False}},
+        )
+        if not isinstance(result.get("chats"), list):
+            raise OzonError("chat_list_contract_changed")
+        return result
+
+    def history_page(self, chat_id, limit=100):
+        result = self.post(
+            CHAT_HISTORY_PATH,
+            {"chat_id": chat_id, "limit": limit, "direction": "Backward"},
+        )
+        if not isinstance(result.get("messages"), list):
+            raise OzonError("chat_history_contract_changed")
+        return result
+
+    def probe_orders(self, since, until):
+        result = self.post(
+            FBS_POSTING_LIST_PATH,
+            {
+                "dir": "ASC",
+                "filter": {"since": since, "to": until},
+                "limit": 1,
+                "offset": 0,
+            },
+        )
+        if not isinstance(result.get("postings"), list):
+            raise OzonError("orders_contract_changed")
+        return result
+
     def chats(self):
         cursor, seen = "", set()
         while True:
-            result = self.post(
-                "/v3/chat/list",
-                {"limit": 100, "cursor": cursor, "filter": {"unread_only": False}},
-            )
+            result = self.post(CHAT_LIST_PATH, {"limit": 100, "cursor": cursor, "filter": {"unread_only": False}})
             if not isinstance(result.get("chats"), list):
                 raise OzonError("chat_list_contract_changed")
             yield from result["chats"]
@@ -93,7 +132,7 @@ class OzonAdapter:
             payload = {"chat_id": chat_id, "limit": 100, "direction": "Backward"}
             if cursor:
                 payload["from_message_id"] = cursor
-            result = self.post("/v3/chat/history", payload)
+            result = self.post(CHAT_HISTORY_PATH, payload)
             messages = result.get("messages")
             if not isinstance(messages, list):
                 raise OzonError("chat_history_contract_changed")
@@ -112,7 +151,7 @@ class OzonAdapter:
     def order_pages(self, since, until, offset=0):
         while True:
             result = self.post(
-                "/v3/posting/fbs/list",
+                FBS_POSTING_LIST_PATH,
                 {
                     "dir": "ASC",
                     "filter": {"since": since, "to": until},
@@ -120,7 +159,6 @@ class OzonAdapter:
                     "offset": offset,
                 },
             )
-            result = result.get("result", {})
             rows = result.get("postings")
             if not isinstance(rows, list):
                 raise OzonError("orders_contract_changed")
@@ -133,7 +171,7 @@ class OzonAdapter:
 
     def send(self, chat_id, text):
         result = self.post(
-            "/v1/chat/send/message", {"chat_id": chat_id, "text": text}, write=True
+            CHAT_SEND_MESSAGE_PATH, {"chat_id": chat_id, "text": text}, write=True
         )
         message_id = (result.get("result") or result).get("message_id")
         if not message_id:
@@ -141,8 +179,14 @@ class OzonAdapter:
         return str(message_id)
 
     def start(self, posting):
-        result = self.post("/v1/chat/start", {"posting_number": posting}, write=True)
+        result = self.post(CHAT_START_PATH, {"posting_number": posting}, write=True)
         chat_id = (result.get("result") or result).get("chat_id")
         if not chat_id:
             raise OzonError("start_result_unknown", unknown=True)
         return str(chat_id)
+
+    def seller_info(self):
+        result = self.post(SELLER_INFO_PATH, {})
+        if not result:
+            raise OzonError("seller_info_contract_changed")
+        return result

@@ -1,1 +1,72 @@
-{% extends "base.html" %}{% block content %}<div class="page-header"><h1 class="page-title">Симуляция · {{ record.name }}</h1><a class="button button-secondary" href="{{ prefix }}/scenarios/{{ record.id }}">К редактору</a></div><section class="card card-body folio-stack"><h2>Сообщения сценария</h2>{% for message in result.messages %}<p class="folio-text">{{ message.body }}</p>{% endfor %}<h2>Переходы</h2><div class="table-scroll"><table class="data-table"><thead><tr><th>Ответ</th><th>Шаг</th><th>Состояние</th></tr></thead><tbody>{% for row in result.trace %}<tr><td>{{ row.answer }}</td><td>{{ row.node }}</td><td>{{ row.status }}</td></tr>{% endfor %}</tbody></table></div><p>Результат: {{ result.instance.status }}. Симуляция не отправляет сообщения и не создаёт рабочие заказы.</p></section>{% endblock %}
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+  <div><h1 class="page-title">Тестовый чат · {{ record.name }}</h1><p class="page-subtitle">Сценарий запущен на условном новом заказе</p></div>
+  <a class="button button-secondary" href="{{ prefix }}/scenarios/{{ record.id }}">Вернуться в редактор</a>
+</div>
+
+{% if problem %}
+<section class="card card-body folio-stack">
+  <div class="folio-test-notice is-negative"><strong>Сценарий пока нельзя запустить</strong><span>{{ problem }}</span></div>
+  <p>Исправьте указанный шаг в редакторе, сохраните черновик и снова откройте тестовый чат.</p>
+  <div class="form-actions"><a class="button button-primary" href="{{ prefix }}/scenarios/{{ record.id }}">Исправить сценарий</a></div>
+</section>
+{% else %}
+<section class="card folio-test-chat">
+  <header class="folio-test-chat-header">
+    <div><strong>Тестовый покупатель</strong><span class="field-help">Заказ SIMULATION · {{ types[record.product_type] }}</span></div>
+    <div>
+      {% if result.instance.status == 'collecting' %}<span class="badge badge-positive">Бот работает</span>
+      {% elif result.instance.status == 'needs_review' %}<span class="badge badge-positive">Бриф собран</span>
+      {% elif result.instance.status == 'needs_manager' %}<span class="badge badge-negative">Нужен менеджер</span>
+      {% else %}<span class="badge badge-neutral">{{ instance_labels.get(result.instance.status, 'Завершён') }}</span>{% endif %}
+    </div>
+  </header>
+
+  <div class="folio-test-messages" aria-live="polite" data-test-messages>
+    <div class="folio-test-event"><span>Поступил новый заказ. Folio запустил сценарий.</span></div>
+    {% for message in result.timeline %}
+      <article class="folio-message {{ 'is-outgoing' if message.actor == 'buyer' }}">
+        <strong>{{ 'Вы' if message.actor == 'buyer' else 'Folio-бот' }}</strong>
+        <div class="folio-text">{% if message.kind == 'photo' %}Тестовое изображение · {% endif %}{{ message.body }}</div>
+      </article>
+    {% endfor %}
+    {% if not result.timeline %}<div class="empty-state">Бот не сформировал сообщение. Проверьте первый переход сценария.</div>{% endif %}
+  </div>
+
+  {% if result.instance.status == 'collecting' %}
+  <div class="folio-test-composer">
+    {% if result.current_node and result.current_node.kind == 'choice' %}
+      <div class="folio-test-notice"><strong>Бот ожидает выбор шаблона</strong><span>Введите номер варианта из сообщения бота{% if result.templates %}: {% for template in result.templates %}{{ template.id }} — {{ template.name }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}.</span></div>
+    {% elif result.current_node and result.current_node.kind == 'ask_photo' %}
+      <div class="folio-test-notice"><strong>Бот ожидает фотографию</strong><span>Добавьте тестовое фото. Оно существует только во время этой проверки.</span></div>
+    {% endif %}
+    <form method="post" action="{{ prefix }}/scenarios/{{ record.id }}/preview" class="folio-test-reply">
+      {{ token() }}
+      <textarea hidden name="history_json">{{ history|tojson }}</textarea>
+      <input type="hidden" name="preview_action" value="reply">
+      <label class="field"><span>Ваш ответ</span><textarea class="input" name="message" rows="3" maxlength="{{ message_max_chars }}" placeholder="Напишите ответ покупателя" required autofocus></textarea></label>
+      <button class="button button-primary">Отправить</button>
+    </form>
+    {% if result.current_node and result.current_node.kind == 'ask_photo' %}
+    <div class="form-actions">
+      <form method="post" action="{{ prefix }}/scenarios/{{ record.id }}/preview">{{ token() }}<textarea hidden name="history_json">{{ history|tojson }}</textarea><input type="hidden" name="preview_action" value="photo"><button class="button button-secondary">Добавить тестовое фото</button></form>
+      {% if result.current_node.accept %}<form method="post" action="{{ prefix }}/scenarios/{{ record.id }}/preview">{{ token() }}<textarea hidden name="history_json">{{ history|tojson }}</textarea><input type="hidden" name="preview_action" value="finish_photos"><button class="button button-secondary">Завершить загрузку фото</button></form>{% endif %}
+    </div>
+    {% endif %}
+  </div>
+  {% else %}
+  <div class="folio-test-result">
+    {% if result.instance.status == 'needs_review' %}<div class="folio-test-notice is-positive"><strong>Бот завершил сбор данных</strong><span>В реальном процессе бриф теперь ожидает проверки менеджером.</span></div>
+    {% elif result.instance.status == 'needs_manager' %}<div class="folio-test-notice is-warning"><strong>Автоматический диалог остановлен</strong><span>Такой ответ или переход передал бы реальный чат менеджеру.</span></div>
+    {% elif result.instance.status == 'closed' %}<div class="folio-test-notice"><strong>Сценарий завершён</strong><span>Диалог дошёл до шага завершения.</span></div>{% endif %}
+  </div>
+  {% endif %}
+</section>
+
+<div class="folio-test-footer">
+  <form method="post" action="{{ prefix }}/scenarios/{{ record.id }}/preview">{{ token() }}<input type="hidden" name="preview_action" value="reset"><button class="button button-secondary">Начать заново с нового заказа</button></form>
+  {% if result.instance.fields and result.instance.fields != '{}' %}<details class="card card-body"><summary>Собранные данные тестового брифа</summary><dl>{% for key,value in result.instance.fields|json|dictsort %}<dt>{{ field_labels.get(key, key) }}</dt><dd>{{ value|length ~ ' фото' if key == 'photos' else value }}</dd>{% endfor %}</dl></details>{% endif %}
+</div>
+{% endif %}
+{% endblock %}

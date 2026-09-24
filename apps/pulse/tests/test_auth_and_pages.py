@@ -49,6 +49,36 @@ def test_registration_and_login_rejects_invalid_password(client):
     assert response.headers["location"] == "/login"
 
 
+def test_internal_folio_manager_creation_and_scope(client):
+    response = client.post(
+        "/internal/users/folio-manager",
+        headers={"X-Bellenne-Internal-Secret": "test-secret-key"},
+        json={"username": "folio-manager", "password": "safe-password"},
+    )
+    assert response.status_code == 200
+    assert response.json()["username"] == "folio-manager"
+
+    client.cookies.clear()
+    page = client.get("/login")
+    logged_in = client.post(
+        "/login",
+        data={
+            "csrf_token": csrf_from(page.text),
+            "username": "folio-manager",
+            "password": "safe-password",
+        },
+        follow_redirects=False,
+    )
+    assert logged_in.status_code == 303
+    assert logged_in.headers["location"] == "/folio/"
+    assert client.get(
+        "/internal/auth", headers={"X-Original-URI": "/folio/"}
+    ).status_code == 204
+    assert client.get(
+        "/internal/auth", headers={"X-Original-URI": "/pulse/"}
+    ).status_code == 403
+
+
 def test_private_pages_render(authenticated_client):
     for path, marker in (
         ("/", "Факт, план и динамика"),

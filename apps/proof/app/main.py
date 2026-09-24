@@ -92,6 +92,7 @@ from .services import (
     create_preset,
     credential_cipher_for_settings,
     deliver_result,
+    dispatch_pending_amocrm_error_notes,
     dispatch_pending_mattermost,
     dispatch_worker_wakeups,
     get_amocrm_access_token,
@@ -124,12 +125,15 @@ session_factory = build_session_factory(engine)
 templates = Jinja2Templates(directory="app/templates")
 notification_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="proof-integrations")
 webhook_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="proof-webhooks")
+executors_need_restart = False
 webhook_logger = logging.getLogger("bellenne.proof.webhooks")
 
 
 def schedule_notifications_after_commit(session: Session) -> None:
     if session.info.pop("proof_notification_pending", False) and settings.notification_async_enabled:
         notification_executor.submit(dispatch_pending_mattermost, session_factory, settings)
+    if session.info.pop("proof_crm_note_pending", False) and settings.notification_async_enabled:
+        notification_executor.submit(dispatch_pending_amocrm_error_notes, session_factory, settings)
     wake_request = session.info.pop("proof_worker_wake_pending", None)
     if wake_request:
         notification_executor.submit(
@@ -145,14 +149,27 @@ sqlalchemy_event.listen(session_factory.class_, "after_commit", schedule_notific
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    global executors_need_restart, notification_executor, webhook_executor
+    if executors_need_restart:
+        notification_executor = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="proof-integrations"
+        )
+        webhook_executor = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="proof-webhooks"
+        )
+        executors_need_restart = False
     init_database(engine)
     if settings.notification_async_enabled:
         notification_executor.submit(dispatch_pending_mattermost, session_factory, settings)
+        notification_executor.submit(dispatch_pending_amocrm_error_notes, session_factory, settings)
     dispatch_pending_amocrm_webhooks()
-    yield
-    webhook_executor.shutdown(wait=False, cancel_futures=False)
-    notification_executor.shutdown(wait=False, cancel_futures=False)
-    engine.dispose()
+    try:
+        yield
+    finally:
+        webhook_executor.shutdown(wait=False, cancel_futures=False)
+        notification_executor.shutdown(wait=False, cancel_futures=False)
+        executors_need_restart = True
+        engine.dispose()
 
 
 app = FastAPI(
@@ -1733,8 +1750,13 @@ def update_amocrm_after_delivery(
     )
     if status_route is None:
         return
-    if delivered and configuration.delivery_mode in {"amocrm_attachment", "yandex_disk_note"}:
-        return
+    clear_field_ids: list[int] = []
+    configured_clear_ids = metadata.get("amo_clear_field_ids_after_success")
+    if delivered and isinstance(configured_clear_ids, list):
+        clear_field_ids = list(dict.fromkeys(
+            field_id for field_id in configured_clear_ids
+            if isinstance(field_id, int) and field_id > 0
+        ))
     update_amocrm_job_status(
         session,
         integration,
@@ -1743,10 +1765,11 @@ def update_amocrm_after_delivery(
         status_route.completed_status_id if delivered else status_route.failed_status_id,
         event_type=("amocrm.lead.completed" if delivered else "amocrm.lead.delivery_failed"),
         message=(
-            "Lead moved to the configured completed status."
+            "Lead moved to the configured completed status and Proof fields were cleared."
             if delivered
             else "Lead moved to the configured failed status after delivery failure."
         ),
+        clear_field_ids=clear_field_ids if delivered else None,
     )
 
 
@@ -1813,6 +1836,7 @@ def process_amocrm_inbox_item(inbox_id: str) -> None:
                     proof_field_id = proof_metadata.get("amo_proof_data_field_id")
                     if isinstance(proof_field_id, int) and proof_field_id not in webhook_clear_field_ids:
                         webhook_clear_field_ids.append(proof_field_id)
+                    proof_metadata["amo_clear_field_ids_after_success"] = webhook_clear_field_ids
                 except (ValueError, ValidationError, RuntimeError, httpx.HTTPError) as exc:
                     safe_error = sanitized_message(str(exc))
                     designer_name = ""
@@ -1870,8 +1894,7 @@ def process_amocrm_inbox_item(inbox_id: str) -> None:
                     configuration,
                     status_route.queued_status_id,
                     event_type="amocrm.lead.accepted",
-                    message="Lead fields cleared and lead moved to the configured processing status.",
-                    clear_field_ids=webhook_clear_field_ids,
+                    message="Lead moved to the configured processing status; Proof fields were preserved.",
                 )
                 if not accepted_in_amo:
                     session.commit()
@@ -2196,8 +2219,7 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
                 configuration,
                 configuration.queued_status_id,
                 event_type="amocrm.lead.accepted",
-                message="Lead fields cleared and lead moved to the configured processing status.",
-                clear_field_ids=configuration.clear_field_ids,
+                message="Lead moved to the configured processing status; Proof fields were preserved.",
             )
             if accepted_in_amo:
                 queue_received_job(session, job)
@@ -2256,6 +2278,7 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
             proof_field_id = proof_metadata.get("amo_proof_data_field_id")
             if isinstance(proof_field_id, int) and proof_field_id not in webhook_clear_field_ids:
                 webhook_clear_field_ids.append(proof_field_id)
+            proof_metadata["amo_clear_field_ids_after_success"] = webhook_clear_field_ids
         except (ValueError, ValidationError, RuntimeError, httpx.HTTPError) as exc:
             safe_error = sanitized_message(str(exc))
             designer_name = ""
@@ -2323,8 +2346,7 @@ async def amocrm_webhook(webhook_secret: str, request: Request, session: Session
             configuration,
             status_route.queued_status_id,
             event_type="amocrm.lead.accepted",
-            message="Lead fields cleared and lead moved to the configured processing status.",
-            clear_field_ids=webhook_clear_field_ids,
+            message="Lead moved to the configured processing status; Proof fields were preserved.",
         )
         if not accepted_in_amo:
             session.commit()

@@ -13,18 +13,31 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import db, media, scenarios, security
+from . import db, media, policy, presentation, retailcrm, scenarios, security
 
 BASE = Path(__file__).parent
 PREFIX = os.environ.get("MODULE_PREFIX", "/folio").rstrip("/")
-ROOT = BASE.parents[2]
-PULSE = ROOT / "apps/pulse/app"
 # Docker uses copies of existing shared assets; local execution reads originals.
+PULSE_CANDIDATE = BASE.parents[1] / "pulse" / "app"
+PULSE = PULSE_CANDIDATE if PULSE_CANDIDATE.exists() else BASE
 SHARED = BASE / "shared" if (BASE / "shared").exists() else PULSE / "static"
 templates = Jinja2Templates(
     directory=[str(BASE / "templates"), str(PULSE / "templates")]
 )
 templates.env.filters["json"] = json.loads
+templates.env.filters["folio_time"] = presentation.format_time
+templates.env.globals.update(
+    error_details=presentation.error_details,
+    actor_label=presentation.actor_label,
+    job_labels=presentation.JOB_LABELS,
+    state_labels=presentation.STATE_LABELS,
+    role_labels=presentation.ROLE_LABELS,
+    actor_labels=presentation.ACTOR_LABELS,
+    instance_labels=presentation.INSTANCE_LABELS,
+    field_labels=presentation.FIELD_LABELS,
+    object_labels=presentation.OBJECT_LABELS,
+    audit_labels=presentation.AUDIT_LABELS,
+)
 
 
 @asynccontextmanager
@@ -80,10 +93,49 @@ async def conflict(request, exc):
     )
 
 
+@app.exception_handler(HTTPException)
+async def http_problem(request, exc):
+    if "text/html" not in request.headers.get("accept", ""):
+        return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+    return templates.TemplateResponse(
+        request=request,
+        name="error.html",
+        context={
+            "prefix": PREFIX,
+            "message": str(exc.detail) if exc.detail else "Действие недоступно",
+        },
+        status_code=exc.status_code,
+    )
+
+
+FORM_LABELS = {
+    "name": "Название",
+    "client_id": "Client ID",
+    "api_key": "API-ключ",
+    "text": "Текст ответа",
+    "dedup": "Идентификатор формы",
+    "node": "Шаг сценария",
+    "item_id": "Товарная позиция",
+    "chat_id": "Чат",
+    "scenario_id": "Сценарий",
+    "account_id": "Кабинет Ozon",
+    "sku": "SKU",
+    "media_id": "Изображение",
+    "id": "Идентификатор",
+    "role": "Роль",
+    "revision": "Версия черновика",
+    "version_id": "Версия сценария",
+    "sync_minutes": "Период синхронизации",
+    "handoff_hours": "Время до передачи",
+    "base_url": "Адрес RetailCRM",
+    "site": "Код магазина RetailCRM",
+}
+
+
 def required(form, key):
     value = str(form.get(key, "")).strip()
     if not value:
-        raise scenarios.Invalid(f"Заполните поле {key}")
+        raise scenarios.Invalid(f"Заполните поле «{FORM_LABELS.get(key, 'Обязательное поле')}»")
     return value
 
 
@@ -97,7 +149,9 @@ def number(form, key, low=0, integer=False, optional=False):
             raise ValueError()
         return result
     except ValueError:
-        raise scenarios.Invalid(f"Некорректное число: {key}") from None
+        raise scenarios.Invalid(
+            f"Проверьте числовое значение поля «{FORM_LABELS.get(key, 'Числовое поле')}»"
+        ) from None
 
 
 def redirect(path="/"):
@@ -113,6 +167,7 @@ def render(request, con, actor, name, **context):
             "types": scenarios.TYPES,
             "kinds": scenarios.KINDS,
             "settings": db.config(con),
+            "message_max_chars": policy.MESSAGE_MAX_CHARS,
         }
     )
     return templates.TemplateResponse(request=request, name=name, context=context)
@@ -157,7 +212,9 @@ def inbox(
         if unread:
             clauses.append("c.unread>0")
         chats = con.execute(
-            "SELECT c.* FROM chats c WHERE "
+            "SELECT c.*,(SELECT m.body FROM messages m WHERE m.chat_id=c.id "
+            "ORDER BY m.created_at DESC,m.id DESC LIMIT 1) AS last_message "
+            "FROM chats c WHERE "
             + " AND ".join(clauses)
             + " ORDER BY c.updated_at DESC",
             params,
@@ -175,7 +232,11 @@ def inbox(
         if chat_id:
             chat = security.chat_access(con, actor, chat_id)
             messages = con.execute(
-                "SELECT * FROM messages WHERE chat_id=? ORDER BY created_at,id",
+                "SELECT m.*,v.number AS scenario_version FROM messages m "
+                "LEFT JOIN outbox o ON o.chat_id=m.chat_id AND o.external_id=m.external_id "
+                "LEFT JOIN instances i ON i.id=o.instance_id "
+                "LEFT JOIN versions v ON v.id=i.version_id "
+                "WHERE m.chat_id=? ORDER BY m.created_at,m.id",
                 (chat_id,),
             ).fetchall()
             outgoing = con.execute(
@@ -239,10 +300,9 @@ async def chat_action(request: Request, chat_id: int, action: str):
         elif action == "send":
             text = required(form, "text")
             settings = db.config(con)
-            limit = settings.get("message_max_chars")
-            if not settings.get("send_enabled") or not limit or len(text) > limit:
+            if not settings.get("send_enabled") or len(text) > policy.MESSAGE_MAX_CHARS:
                 raise scenarios.Invalid(
-                    "Отправка отключена или превышен настроенный лимит текста"
+                    "Отправка отключена или текст длиннее 1000 символов"
                 )
             key = required(form, "dedup")
             if not con.execute(
@@ -288,10 +348,9 @@ async def chat_action(request: Request, chat_id: int, action: str):
             if not chat["active_item"]:
                 raise scenarios.Invalid("Сначала выберите товарную позицию")
             upload = form.get("file")
-            maximum = db.config(con).get("media_max_bytes")
-            if not maximum or not hasattr(upload, "read"):
-                raise scenarios.Invalid("Настройте лимит и выберите изображение")
-            content = await upload.read(maximum + 1)
+            if not hasattr(upload, "read"):
+                raise scenarios.Invalid("Выберите изображение")
+            content = await upload.read(policy.IMAGE_MAX_BYTES + 1)
             mid = media.store(
                 con, content, db.config(con), chat_id, chat["active_item"]
             )
@@ -378,58 +437,84 @@ def private_media(request: Request, media_id: str):
 
 
 @app.get("/settings")
-def settings_page(request: Request):
+@app.get("/settings/{section}")
+def settings_page(request: Request, section: str = "overview"):
+    if section not in {"overview", "ozon", "retailcrm", "automation", "users"}:
+        raise HTTPException(404)
     with db.transaction() as con:
         actor = security.user(request, con, admin=True)
         accounts = con.execute(
-            "SELECT id,name,client_id,capabilities,checked_at,error FROM accounts"
+            "SELECT a.id,a.name,a.client_id,a.capabilities,a.checked_at,a.error,"
+            "s.last_success FROM accounts a LEFT JOIN sync_state s ON s.account_id=a.id "
+            "ORDER BY a.name"
         ).fetchall()
+        capabilities = {
+            account["id"]: json.loads(account["capabilities"]) for account in accounts
+        }
+        account_jobs = {}
+        for job in con.execute(
+            "SELECT id,kind,account_id,state,error,created_at,finished_at "
+            "FROM jobs WHERE kind IN ('probe','sync') ORDER BY id DESC"
+        ).fetchall():
+            account_jobs.setdefault(job["account_id"], job)
+        published_types = {
+            row[0] for row in con.execute(
+                "SELECT DISTINCT product_type FROM scenarios WHERE published IS NOT NULL"
+            )
+        }
+        current_settings = db.config(con)
+        retailcrm_config = retailcrm.integration(con)
+        retailcrm_capabilities = (
+            json.loads(retailcrm_config["capabilities"])
+            if retailcrm_config
+            else {}
+        )
+        retailcrm_job = con.execute(
+            "SELECT id,state,error,created_at,finished_at FROM jobs "
+            "WHERE kind='retailcrm_probe' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        onboarding = {
+            "connection": bool(accounts),
+            "capabilities": any(
+                all(caps.get(key) for key in ("account", "orders", "list", "history"))
+                for caps in capabilities.values()
+            ),
+            "mappings": bool(con.execute("SELECT 1 FROM mappings LIMIT 1").fetchone()),
+            "scenarios": published_types == set(scenarios.TYPES),
+            "automation": bool(current_settings.get("automation_enabled")),
+        }
         return render(
             request,
             con,
             actor,
             "settings.html",
             accounts=accounts,
+            account_capabilities=capabilities,
+            account_jobs=account_jobs,
+            retailcrm_config=retailcrm_config,
+            retailcrm_capabilities=retailcrm_capabilities,
+            retailcrm_job=retailcrm_job,
+            section=section,
+            onboarding=onboarding,
             users=con.execute(
                 "SELECT u.*,NOT EXISTS(SELECT 1 FROM revoked_users r WHERE r.user_id=u.id) AS enabled FROM users u"
             ).fetchall(),
         )
 
 
-@app.post("/settings")
-async def save_settings(request: Request):
+@app.post("/settings/ozon")
+async def save_ozon_policy(request: Request):
     form = await request.form()
     security.csrf(request, form.get("csrf"))
     with db.transaction() as con:
         actor = security.user(request, con, admin=True)
         settings = dict(db.config(con))
-        for key in (
-            "handoff_hours",
-            "http_timeout",
-            "request_interval",
-            "sync_minutes",
-        ):
-            settings[key] = number(
-                form, key, 0 if key == "handoff_hours" else 0.001, optional=True
-            )
-        for key in ("media_max_bytes", "message_max_chars"):
-            settings[key] = number(form, key, 1, True, optional=True)
-        for key in (
-            "send_enabled",
-            "start_enabled",
-            "automation_enabled",
-            "sync_enabled",
-            "manager_resume",
-        ):
-            settings[key] = form.get(key) == "on"
-        for key, options in {
-            "manager_scope": {"all", "assigned"},
-            "timer_origin": {"confirmation", "review"},
-        }.items():
-            value = form.get(key)
-            if value not in options:
-                raise scenarios.Invalid(f"Выберите {key}")
-            settings[key] = value
+        settings["sync_minutes"] = number(
+            form, "sync_minutes", 0.001, optional=True
+        )
+
+
+        settings["sync_enabled"] = form.get("sync_enabled") == "on"
         since = str(form.get("sync_since", "")).strip()
         if since:
             try:
@@ -439,11 +524,116 @@ async def save_settings(request: Request):
                 settings["sync_since"] = parsed.isoformat()
             except ValueError:
                 raise scenarios.Invalid("Неверная дата начала синхронизации") from None
-        settings["media_mimes"] = [
-            m
-            for m in form.getlist("media_mimes")
-            if m in {"image/jpeg", "image/png", "image/webp"}
-        ]
+        else:
+            settings["sync_since"] = None
+        if settings["sync_enabled"] and not all(
+            settings.get(k)
+            for k in ("sync_minutes", "sync_since")
+        ):
+            raise scenarios.Invalid(
+                "Для периодической синхронизации укажите дату начала импорта и период"
+            )
+        con.execute("UPDATE settings SET value=? WHERE id=1", (db.dump(settings),))
+        db.audit(con, actor["id"], "settings.ozon_updated", "settings", 1)
+    return redirect("/settings/ozon")
+
+
+@app.post("/settings/retailcrm")
+async def save_retailcrm(request: Request):
+    form = await request.form()
+    security.csrf(request, form.get("csrf"))
+    with db.transaction() as con:
+        actor = security.user(request, con, admin=True)
+        try:
+            base_url = retailcrm.normalize_base_url(required(form, "base_url"))
+        except ValueError as exc:
+            raise scenarios.Invalid(str(exc)) from exc
+        site = required(form, "site")
+        key = str(form.get("api_key", "")).strip()
+        current = retailcrm.integration(con)
+        if not current and not key:
+            raise scenarios.Invalid("Введите API-ключ RetailCRM")
+        changed = (
+            not current
+            or base_url != current["base_url"]
+            or site != current["site"]
+            or bool(key)
+        )
+        if changed and con.execute(
+            "SELECT 1 FROM jobs WHERE kind='retailcrm_create' AND state='running'"
+        ).fetchone():
+            raise scenarios.Invalid(
+                "Дождитесь завершения текущего создания сделки перед сменой подключения RetailCRM"
+            )
+        secret = (
+            security.cipher().encrypt(key.encode()).decode()
+            if key
+            else current["secret"]
+        )
+        if current:
+            con.execute(
+                "UPDATE retailcrm_integrations SET base_url=?,site=?,secret=?,"
+                "capabilities=?,checked_at=?,error=?,revision=revision+1 WHERE id=1",
+                (
+                    base_url,
+                    site,
+                    secret,
+                    "{}" if changed else current["capabilities"],
+                    None if changed else current["checked_at"],
+                    None if changed else current["error"],
+                ),
+            )
+        else:
+            con.execute(
+                "INSERT INTO retailcrm_integrations(id,base_url,site,secret) "
+                "VALUES(1,?,?,?)",
+                (base_url, site, secret),
+            )
+        db.audit(con, actor["id"], "settings.retailcrm_updated", "settings", 1)
+    return redirect("/settings/retailcrm")
+
+
+@app.post("/settings/retailcrm/probe")
+async def probe_retailcrm(request: Request):
+    form = await request.form()
+    security.csrf(request, form.get("csrf"))
+    with db.transaction() as con:
+        actor = security.user(request, con, admin=True)
+        if not retailcrm.integration(con):
+            raise scenarios.Invalid("Сначала сохраните подключение RetailCRM")
+        db.job(con, "retailcrm_probe")
+        db.audit(
+            con,
+            actor["id"],
+            "integration.queued_retailcrm_probe",
+            "retailcrm_integration",
+            1,
+        )
+    return redirect("/settings/retailcrm")
+
+
+@app.post("/settings/automation")
+async def save_automation(request: Request):
+    form = await request.form()
+    security.csrf(request, form.get("csrf"))
+    with db.transaction() as con:
+        actor = security.user(request, con, admin=True)
+        settings = dict(db.config(con))
+        settings["handoff_hours"] = number(
+            form, "handoff_hours", 0, optional=True
+        )
+        settings["send_enabled"] = form.get("send_enabled") == "on"
+        settings["start_enabled"] = form.get("start_enabled") == "on"
+        settings["automation_enabled"] = form.get("automation_enabled") == "on"
+        settings["manager_resume"] = form.get("manager_resume") == "on"
+        for key, options in {
+            "manager_scope": {"all", "assigned"},
+            "timer_origin": {"confirmation", "review"},
+        }.items():
+            value = form.get(key)
+            if value not in options:
+                raise scenarios.Invalid("Выберите один из предложенных вариантов")
+            settings[key] = value
         settings["start_statuses"] = [
             value.strip()
             for value in str(form.get("start_statuses", "")).splitlines()
@@ -453,21 +643,50 @@ async def save_settings(request: Request):
             raise scenarios.Invalid(
                 "Укажите статусы заказов Ozon, для которых разрешено начинать диалог"
             )
-        settings["media_hosts"] = [
-            h.strip().lower()
-            for h in str(form.get("media_hosts", "")).splitlines()
-            if h.strip()
-        ]
-        if settings["send_enabled"] and not settings.get("message_max_chars"):
-            raise scenarios.Invalid("Перед включением отправки задайте лимит текста")
-        if settings["sync_enabled"] and not all(
-            settings.get(k)
-            for k in ("sync_minutes", "sync_since", "http_timeout", "request_interval")
-        ):
-            raise scenarios.Invalid("Заполните дату начала, период и HTTP-лимиты")
+        if settings["automation_enabled"]:
+            if not settings["send_enabled"]:
+                raise scenarios.Invalid(
+                    "Перед автоматизацией включите отправку и подтвердите её в тестовом чате"
+                )
+            account_rows = con.execute(
+                "SELECT capabilities FROM accounts WHERE checked_at IS NOT NULL AND error IS NULL"
+            ).fetchall()
+            required_capabilities = [
+                "account",
+                "orders",
+                "list",
+                "history",
+                "send",
+                "attachments",
+            ]
+            if settings["start_enabled"]:
+                required_capabilities.append("start")
+            if not any(
+                all(json.loads(row[0]).get(key) for key in required_capabilities)
+                for row in account_rows
+            ):
+                raise scenarios.Invalid(
+                    "Для автоматизации подтвердите кабинет, заказы, чтение и отправку чатов, получение вложений"
+                    + (
+                        " и создание чата"
+                        if settings["start_enabled"]
+                        else ""
+                    )
+                )
+            published_types = {
+                row[0] for row in con.execute(
+                    "SELECT DISTINCT product_type FROM scenarios WHERE published IS NOT NULL"
+                )
+            }
+            if published_types != set(scenarios.TYPES):
+                raise scenarios.Invalid(
+                    "Опубликуйте проверенные сценарии для всех трёх типов товаров"
+                )
+            if not con.execute("SELECT 1 FROM mappings LIMIT 1").fetchone():
+                raise scenarios.Invalid("Добавьте хотя бы одну привязку SKU к сценарию")
         con.execute("UPDATE settings SET value=? WHERE id=1", (db.dump(settings),))
-        db.audit(con, actor["id"], "settings.updated", "settings", 1)
-    return redirect("/settings")
+        db.audit(con, actor["id"], "settings.automation_updated", "settings", 1)
+    return redirect("/settings/automation")
 
 
 @app.post("/accounts")
@@ -498,10 +717,13 @@ async def save_account(request: Request):
                 if key
                 else old["secret"]
             )
-            con.execute(
-                "UPDATE accounts SET name=?,client_id=?,secret=?,capabilities='{}',checked_at=NULL,error=NULL,revision=revision+1 WHERE id=?",
-                (name, client, secret, aid),
-            )
+            if key or client != old["client_id"]:
+                con.execute(
+                    "UPDATE accounts SET name=?,client_id=?,secret=?,capabilities='{}',checked_at=NULL,error=NULL,revision=revision+1 WHERE id=?",
+                    (name, client, secret, aid),
+                )
+            else:
+                con.execute("UPDATE accounts SET name=? WHERE id=?", (name, aid))
         else:
             if not key:
                 raise scenarios.Invalid("Введите API-ключ")
@@ -510,7 +732,7 @@ async def save_account(request: Request):
                 (name, client, security.cipher().encrypt(key.encode()).decode()),
             ).lastrowid
         db.audit(con, actor["id"], "account.saved", "account", aid)
-    return redirect("/settings")
+    return redirect("/settings/ozon")
 
 
 @app.post("/accounts/{account_id}/{action}")
@@ -522,11 +744,15 @@ async def account_action(request: Request, account_id: int, action: str):
         get_record(con, "accounts", account_id)
         if action not in {"probe", "sync"}:
             raise HTTPException(404)
+        if action == "sync" and not db.config(con).get("sync_since"):
+            raise scenarios.Invalid(
+                "Укажите дату начала импорта на странице Ozon перед синхронизацией"
+            )
         db.job(con, action, account_id)
         db.audit(
             con, actor["id"], f"integration.queued_{action}", "account", account_id
         )
-    return redirect("/audit")
+    return redirect("/settings/ozon")
 
 
 @app.post("/users")
@@ -541,7 +767,7 @@ async def save_user(request: Request):
             required(form, "role"),
         )
         if role not in {"admin", "manager"}:
-            raise scenarios.Invalid("Допустимы только admin и manager")
+            raise scenarios.Invalid("Допустимы только роли «Администратор» и «Менеджер»")
         enabled = form.get("enabled") == "on"
         if uid == actor["id"] and (role != "admin" or not enabled):
             raise scenarios.Invalid("Нельзя снять собственные права администратора")
@@ -554,7 +780,7 @@ async def save_user(request: Request):
         else:
             con.execute("INSERT OR IGNORE INTO revoked_users VALUES(?)", (uid,))
         db.audit(con, actor["id"], "user.updated", "user", uid)
-    return redirect("/settings")
+    return redirect("/settings/users")
 
 
 @app.get("/scenarios")
@@ -563,6 +789,14 @@ def scenario_page(request: Request, scenario_id: int | None = None):
     with db.transaction() as con:
         actor = security.user(request, con, admin=True)
         record = get_record(con, "scenarios", scenario_id) if scenario_id else None
+        if record:
+            graph = json.loads(record["draft"])
+            if scenarios.normalize(graph, record["product_type"]):
+                con.execute(
+                    "UPDATE scenarios SET draft=?,revision=revision+1 WHERE id=?",
+                    (db.dump(graph), scenario_id),
+                )
+                record = get_record(con, "scenarios", scenario_id)
         versions = con.execute(
             "SELECT id,number,author,created_at FROM versions WHERE scenario_id=? ORDER BY number DESC",
             (scenario_id,),
@@ -601,30 +835,77 @@ async def create_scenario(request: Request):
 
 
 def graph_from_form(form):
-    nodes = []
-    for i, node_id in enumerate(form.getlist("node_id")):
+    serialized = str(form.get("graph_json", "")).strip()
+    if not serialized:
+        raise scenarios.Invalid(
+            "Не удалось получить данные визуальной схемы. Обновите страницу и повторите сохранение."
+        )
+    try:
+        graph = json.loads(serialized)
+    except json.JSONDecodeError as exc:
+        raise scenarios.Invalid("Данные визуальной схемы повреждены") from exc
+    if not isinstance(graph, dict) or not isinstance(graph.get("nodes"), list):
+        raise scenarios.Invalid("Визуальная схема должна содержать список шагов")
+    return graph
 
-        def value(key, index=i):
-            values = form.getlist(key)
-            return str(values[index]).strip() if index < len(values) else ""
 
-        node = {
-            "id": str(node_id).strip(),
-            "kind": value("kind"),
-            "text": value("text"),
-            "field": value("field"),
-            "next": value("next"),
-            "otherwise": value("otherwise"),
-            "error": value("error"),
-            "equals": value("equals"),
-            "accept": value("accept"),
-            "required": value("required") == "yes",
-            "choices": [v.strip() for v in value("choices").splitlines() if v.strip()],
-        }
-        for key in ("min", "max", "max_length"):
-            node[key] = number({key: value(key)}, key, 1, True, True)
-        nodes.append(node)
-    return {"nodes": nodes}
+def preview_history(form):
+    serialized = str(form.get("history_json", "[]"))
+    try:
+        history = json.loads(serialized)
+    except json.JSONDecodeError as exc:
+        raise scenarios.Invalid("История тестового диалога повреждена") from exc
+    if not isinstance(history, list) or len(history) > 100:
+        raise scenarios.Invalid("Начните тестовый диалог заново")
+    clean = []
+    for event in history:
+        if not isinstance(event, dict) or event.get("kind") not in {
+            "text",
+            "photo",
+            "finish_photos",
+        }:
+            raise scenarios.Invalid("История тестового диалога повреждена")
+        if event["kind"] == "text":
+            value = str(event.get("value", "")).strip()
+            if not value or len(value) > policy.MESSAGE_MAX_CHARS:
+                raise scenarios.Invalid("Тестовое сообщение должно содержать от 1 до 1000 символов")
+            clean.append({"kind": "text", "value": value})
+        elif event["kind"] == "photo":
+            clean.append({"kind": "photo", "count": 1})
+        else:
+            clean.append({"kind": "finish_photos"})
+    return clean
+
+
+def render_preview(request, con, actor, record, history):
+    from .simulation import simulate
+
+    graph = json.loads(record["draft"])
+    scenarios.normalize(graph, record["product_type"])
+    try:
+        result = simulate(graph, record["product_type"], history)
+        problem = None
+    except scenarios.Invalid as exc:
+        result = None
+        problem = str(exc)
+    return render(
+        request,
+        con,
+        actor,
+        "preview.html",
+        result=result,
+        record=record,
+        history=history,
+        problem=problem,
+    )
+
+
+@app.get("/scenarios/{scenario_id}/preview")
+def scenario_preview(request: Request, scenario_id: int):
+    with db.transaction() as con:
+        actor = security.user(request, con, admin=True)
+        record = get_record(con, "scenarios", scenario_id)
+        return render_preview(request, con, actor, record, [])
 
 
 @app.post("/scenarios/{scenario_id}/{action}")
@@ -660,6 +941,7 @@ async def scenario_action(request: Request, scenario_id: int, action: str):
             if number(form, "revision", 1, True) != record["revision"]:
                 raise HTTPException(409, "Черновик изменён другим администратором")
             graph = graph_from_form(form)
+            scenarios.normalize(graph, record["product_type"])
             if action == "validate":
                 scenarios.validate(graph, record["product_type"])
             con.execute(
@@ -667,16 +949,26 @@ async def scenario_action(request: Request, scenario_id: int, action: str):
                 (db.dump(graph), scenario_id),
             )
         elif action == "preview":
-            graph = json.loads(record["draft"])
-            scenarios.validate(graph, record["product_type"])
-            from .simulation import simulate
-
-            result = simulate(
-                graph, record["product_type"], str(form.get("answers", "")).splitlines()
-            )
-            return render(
-                request, con, actor, "preview.html", result=result, record=record
-            )
+            history = [] if form.get("preview_action") == "reset" else preview_history(form)
+            action_value = str(form.get("preview_action", "start"))
+            if len(history) >= 100 and action_value not in {"start", "reset"}:
+                raise scenarios.Invalid(
+                    "В тестовом диалоге слишком много шагов. Начните его заново"
+                )
+            if action_value == "reply":
+                message = str(form.get("message", "")).strip()
+                if not message or len(message) > policy.MESSAGE_MAX_CHARS:
+                    raise scenarios.Invalid(
+                        "Тестовое сообщение должно содержать от 1 до 1000 символов"
+                    )
+                history.append({"kind": "text", "value": message})
+            elif action_value == "photo":
+                history.append({"kind": "photo", "count": 1})
+            elif action_value == "finish_photos":
+                history.append({"kind": "finish_photos"})
+            elif action_value not in {"start", "reset"}:
+                raise scenarios.Invalid("Неизвестное действие тестового диалога")
+            return render_preview(request, con, actor, record, history)
         else:
             raise HTTPException(404)
         db.audit(con, actor["id"], f"scenario.{action}", "scenario", scenario_id)
@@ -693,7 +985,11 @@ def catalog_page(request: Request):
             actor,
             "catalog.html",
             accounts=con.execute("SELECT id,name FROM accounts").fetchall(),
-            mappings=con.execute("SELECT * FROM mappings").fetchall(),
+            mappings=con.execute(
+                "SELECT m.*,a.name AS account_name,s.name AS scenario_name "
+                "FROM mappings m JOIN accounts a ON a.id=m.account_id "
+                "JOIN scenarios s ON s.id=m.scenario_id ORDER BY a.name,m.sku"
+            ).fetchall(),
             records=con.execute("SELECT * FROM scenarios").fetchall(),
             catalog=con.execute("SELECT * FROM templates").fetchall(),
         )
@@ -716,24 +1012,24 @@ async def mapping_save(request: Request):
                 raise scenarios.Invalid("Выбран неактивный шаблон")
         if scenario["product_type"] == "template_art" and not tids:
             raise scenarios.Invalid("Выберите разрешённые шаблоны")
-        offer = required(form, "offer_id")
+        sku = required(form, "sku")
         con.execute(
-            "INSERT INTO mappings(account_id,offer_id,product_type,scenario_id,template_ids) VALUES(?,?,?,?,?) ON CONFLICT(account_id,offer_id) DO UPDATE SET product_type=excluded.product_type,scenario_id=excluded.scenario_id,template_ids=excluded.template_ids",
+            "INSERT INTO mappings(account_id,sku,product_type,scenario_id,template_ids) VALUES(?,?,?,?,?) ON CONFLICT(account_id,sku) DO UPDATE SET product_type=excluded.product_type,scenario_id=excluded.scenario_id,template_ids=excluded.template_ids",
             (
                 account_id,
-                offer,
+                sku,
                 scenario["product_type"],
                 scenario["id"],
                 db.dump(tids),
             ),
         )
         mid = con.execute(
-            "SELECT id FROM mappings WHERE account_id=? AND offer_id=?",
-            (account_id, offer),
+            "SELECT id FROM mappings WHERE account_id=? AND sku=?",
+            (account_id, sku),
         ).fetchone()[0]
         con.execute(
-            "UPDATE items SET mapping_id=? WHERE account_id=? AND offer_id=? AND id NOT IN (SELECT item_id FROM instances)",
-            (mid, account_id, offer),
+            "UPDATE items SET mapping_id=? WHERE account_id=? AND sku=? AND id NOT IN (SELECT item_id FROM instances)",
+            (mid, account_id, sku),
         )
         db.audit(con, actor["id"], "mapping.updated", "mapping", mid)
     return redirect("/catalog")
@@ -750,10 +1046,11 @@ async def template_save(request: Request):
         mid = get_record(con, "templates", tid)["media_id"] if tid else None
         upload = form.get("file")
         if hasattr(upload, "read") and upload.filename:
-            maximum = db.config(con).get("media_max_bytes")
-            if not maximum:
-                raise scenarios.Invalid("Сначала настройте лимит файлов")
-            mid = media.store(con, await upload.read(maximum + 1), db.config(con))
+            mid = media.store(
+                con,
+                await upload.read(policy.IMAGE_MAX_BYTES + 1),
+                db.config(con),
+            )
         if not mid:
             raise scenarios.Invalid("Добавьте превью шаблона")
         if tid:
@@ -780,9 +1077,14 @@ def orders_page(request: Request):
             actor,
             "orders.html",
             items=con.execute(
-                "SELECT i.*,s.status AS brief_status,s.id AS instance_id FROM items i LEFT JOIN instances s ON s.item_id=i.id ORDER BY i.id DESC"
+                "SELECT i.*,a.name AS account_name,s.status AS brief_status,s.id AS instance_id "
+                "FROM items i JOIN accounts a ON a.id=i.account_id "
+                "LEFT JOIN instances s ON s.item_id=i.id ORDER BY i.id DESC"
             ).fetchall(),
-            chats=con.execute("SELECT * FROM chats").fetchall(),
+            chats=con.execute(
+                "SELECT c.*,a.name AS account_name FROM chats c "
+                "JOIN accounts a ON a.id=c.account_id ORDER BY c.updated_at DESC"
+            ).fetchall(),
             users=con.execute("SELECT * FROM users WHERE role='manager'").fetchall(),
         )
 
@@ -878,7 +1180,8 @@ def audit_page(request: Request):
                 "SELECT * FROM audit ORDER BY id DESC LIMIT 300"
             ).fetchall(),
             jobs=con.execute(
-                "SELECT id,kind,account_id,state,error,created_at,finished_at FROM jobs ORDER BY id DESC LIMIT 100"
+                "SELECT j.id,j.kind,j.account_id,j.state,j.error,j.created_at,j.finished_at,a.name AS account_name "
+                "FROM jobs j LEFT JOIN accounts a ON a.id=j.account_id ORDER BY j.id DESC LIMIT 100"
             ).fetchall(),
             outgoing=con.execute(
                 "SELECT id,chat_id,state,error,external_id FROM outbox WHERE state IN ('unknown','failed')"
@@ -896,7 +1199,17 @@ async def resolve_send(request: Request, outbox_id: int):
         if record["state"] not in {"unknown", "failed"}:
             raise scenarios.Invalid("Сообщение уже обработано")
         external_id = str(form.get("external_id", "")).strip()
-        if external_id:
+        if form.get("retry") == "yes":
+            if record["state"] != "failed":
+                raise scenarios.Invalid(
+                    "Неопределённую отправку нельзя повторять без сверки истории"
+                )
+            con.execute(
+                "UPDATE outbox SET state='pending',error=NULL,external_id=NULL WHERE id=?",
+                (outbox_id,),
+            )
+            audit_action = "outbound.retry_queued"
+        elif external_id:
             match = con.execute(
                 "SELECT * FROM messages WHERE chat_id=? AND external_id=? AND actor='seller' AND body=?",
                 (record["chat_id"], external_id, record["body"]),
@@ -909,16 +1222,18 @@ async def resolve_send(request: Request, outbox_id: int):
                 "UPDATE outbox SET state='sent',external_id=?,error=NULL WHERE id=?",
                 (external_id, outbox_id),
             )
+            audit_action = "outbound.reconciled"
         elif form.get("cancel") == "yes":
             con.execute("UPDATE outbox SET state='cancelled' WHERE id=?", (outbox_id,))
+            audit_action = "outbound.reconciled"
         else:
             raise scenarios.Invalid(
-                "Укажите подтверждённый message_id или закройте попытку без повтора"
+                "Выберите безопасный повтор, укажите подтверждённый ID сообщения или закройте попытку"
             )
         db.audit(
             con,
             actor["id"],
-            "outbound.reconciled",
+            audit_action,
             "outbox",
             outbox_id,
             record["chat_id"],
@@ -936,6 +1251,10 @@ async def retry_job(request: Request, job_id: int):
         if record["state"] != "failed":
             raise scenarios.Invalid(
                 "Повтор разрешён только для заведомо неуспешной операции. Неопределённый результат требует ручной сверки."
+            )
+        if record["kind"] == "retailcrm_create":
+            raise scenarios.Invalid(
+                "Ошибка создания сделки уже обработана веткой сценария. Повторите действие из RetailCRM или запустите новый сценарий после исправления причины."
             )
         con.execute(
             "UPDATE jobs SET state='pending',error=NULL,finished_at=NULL WHERE id=?",

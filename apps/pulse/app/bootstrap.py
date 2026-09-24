@@ -4,7 +4,7 @@ import calendar
 from datetime import date, timedelta
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import func, inspect, select, text
 from sqlalchemy.orm import Session
 
 from app.clock import utc_now
@@ -20,6 +20,12 @@ from app.services.sync import persist_payload
 async def initialize_database(engine, session_factory, settings: Settings) -> None:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(engine)
+    # create_all does not add columns to existing SQLite installations.
+    if "access_scope" not in {column["name"] for column in inspect(engine).get_columns("users")}:
+        with engine.begin() as connection:
+            connection.execute(
+                text("ALTER TABLE users ADD COLUMN access_scope VARCHAR(32) NOT NULL DEFAULT 'all'")
+            )
 
 
 async def ensure_demo_data(session: Session, user: User, settings: Settings) -> None:

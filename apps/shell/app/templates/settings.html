@@ -23,10 +23,14 @@
     <div class="settings-card-head"><span class="product-icon">{{ icon('proof', 22) }}</span><div><h2 class="section-title">Proof</h2><p class="section-copy">Workers, presets и интеграция с amoCRM.</p></div></div>
     <div class="settings-actions"><a class="button button-secondary" href="/proof/workers">Workers</a><a class="button button-secondary" href="/proof/integrations">Интеграция</a></div>
   </article>
+  <article class="card settings-card">
+    <div class="settings-card-head"><span class="product-icon">{{ icon('echo', 22) }}</span><div><h2 class="section-title">Folio</h2><p class="section-copy">Ключ Ozon, время ожидания N, сценарии и права сотрудников. Для администраторов Folio.</p></div></div>
+    <div class="settings-actions"><a class="button button-secondary" href="/folio/settings">Кабинет Folio</a><a class="button button-secondary" href="/folio/scenarios">Сценарии</a></div>
+  </article>
 </section>
 
 <section class="card account-card shell-enter">
-  <div><span class="badge badge-positive">Единая авторизация активна</span><h2 class="section-title">Аккаунт {{ username }}</h2><p class="section-copy">Сессия действует для BellenneOne, Pulse, Echo, Vector, Nest и Proof. Повторный вход между модулями не требуется.</p></div>
+  <div><span class="badge badge-positive">Единая авторизация активна</span><h2 class="section-title">Аккаунт {{ username }}</h2><p class="section-copy">Сессия действует для BellenneOne, Pulse, Echo, Vector, Nest, Proof и Folio. Повторный вход между модулями не требуется. Доступ к Folio определяется назначенной ролью.</p></div>
   <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ platform_csrf_token }}"><button class="button button-secondary" type="submit">{{ icon('logout', 18) }}<span>Выйти из BellenneOne</span></button></form>
 </section>
 {% endblock %}

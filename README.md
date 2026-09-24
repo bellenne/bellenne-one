@@ -1,6 +1,6 @@
 # BellenneOne
 
-BellenneOne объединяет пять самостоятельных продуктов за одним адресом и одной авторизацией:
+BellenneOne объединяет шесть самостоятельных продуктов за одним адресом и одной авторизацией:
 
 - `/` — отдельная оболочка BellenneOne с описанием модулей;
 - `/settings` — общий центр настроек;
@@ -10,7 +10,11 @@ BellenneOne объединяет пять самостоятельных про�
 - `/nest/` — BellenneNest, конфигурация и аудит API раскладки.
 - `/proof/` — BellenneProof, оркестрация производственных заданий, Workers и доставки результатов.
 
-Снаружи публикуется только nginx-шлюз. Shell и пять продуктовых контейнеров доступны только во внутренней Docker-сети.
+- `/folio/` — BellenneFolio, чаты Ozon, сценарии и подготовка брифов.
+
+Снаружи публикуется только nginx-шлюз. Shell, шесть продуктовых сервисов и worker Folio доступны только во внутренней Docker-сети.
+
+Folio входит в Compose-проект `bellenneone`: контейнеры `bellenneone-folio` и `bellenneone-folio-worker`. Существующий аккаунт Bellenne с числовым ID из `FOLIO_ADMIN_USER_ID` получает роль администратора Folio. Доступ существующих аккаунтов к Folio и роли `admin`/`manager` настраиваются в интерфейсе модуля. API-ключ Ozon и N часов также настраиваются в кабинете Folio. См. [инструкцию Folio](docs/FOLIO_IMPLEMENTATION.md).
 
 ## Запуск
 
@@ -36,6 +40,7 @@ docker compose up -d --build
 - `vector_data` — рекламная статистика и ключ шифрования Vector.
 - `nest_data` — пользовательские конфигурации Nest и история API-запросов.
 - `proof_data` — очередь, события, настройки интеграций и неизменяемые результаты Proof.
+- `folio_data` — база Folio, приватные вложения и ключ шифрования; общий для API и worker.
 
 Идентификатор единого аккаунта передаётся модулям через доверенные заголовки nginx. Прямой внешний доступ к контейнерам модулей не публикуется.
 
@@ -45,10 +50,10 @@ docker compose up -d --build
 
 ```powershell
 docker compose ps
-docker compose logs --tail 100 gateway shell pulse echo vector nest proof
+docker compose logs --tail 100 gateway shell pulse echo vector nest proof folio folio-worker
 ```
 
-Все семь сервисов должны иметь состояние `healthy`. Проверка шлюза доступна на `/gateway-health`.
+Восемь HTTP-сервисов должны иметь состояние `healthy`, а `folio-worker` — `running` (без HTTP healthcheck). Проверка шлюза доступна на `/gateway-health`.
 
 ## BellenneProof
 

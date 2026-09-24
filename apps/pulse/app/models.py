@@ -39,6 +39,7 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    access_scope: Mapped[str] = mapped_column(String(32), default="all")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
     accounts: Mapped[list[MarketplaceAccount]] = relationship(back_populates="user", cascade="all, delete-orphan")

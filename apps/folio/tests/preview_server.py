@@ -19,6 +19,15 @@ fixture = tempfile.TemporaryDirectory(prefix="folio-ui-")
 db.DATA = Path(fixture.name)
 db.initialize()
 with db.transaction() as con:
+    preview_graph = scenarios.initial_graph("collage")
+    for node in preview_graph["nodes"]:
+        if node["kind"] in scenarios.TEXT_KINDS:
+            node["text"] = {
+                "photos": "Пришлите фотографии для коллажа. Когда закончите, нажмите «Завершить загрузку фото».",
+                "details": "Какую надпись добавить на коллаж?",
+            }.get(node["id"], "Продолжим.")
+        if node["kind"] == "ask_photo":
+            node.update(min=1, max=8, accept="готово")
     con.execute(
         "INSERT INTO accounts(id,name,client_id,secret) VALUES(1,'Тестовый кабинет','test',?)",
         (security.cipher().encrypt(b"not-a-real-key").decode(),),
@@ -33,8 +42,14 @@ with db.transaction() as con:
     )
     con.execute(
         "INSERT INTO scenarios(name,product_type,draft) VALUES('Коллаж — черновик','collage',?)",
-        (db.dump(scenarios.initial_graph("collage")),),
+        (db.dump(preview_graph),),
     )
+    con.execute(
+        "INSERT INTO jobs(kind,account_id,state,error,created_at,finished_at) "
+        "VALUES('probe',1,'failed','legacy_probe_configuration',?,?)",
+        (db.now(), db.now()),
+    )
+    db.audit(con, "preview", "scenario.created", "scenario", 1)
 
 
 @app.middleware("http")

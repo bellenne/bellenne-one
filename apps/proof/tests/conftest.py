@@ -20,6 +20,7 @@ os.environ["PROOF_PUBLIC_BASE_URL"] = "https://one.customcraft-mes.ru"
 from app.main import app, session_factory  # noqa: E402
 from app.models import (  # noqa: E402
     ProofEvent,
+    ProofCrmNoteDelivery,
     ProofIntegration,
     ProofJob,
     ProofNotificationDelivery,
@@ -35,7 +36,7 @@ from app.models import (  # noqa: E402
 def client():
     with TestClient(app) as test_client:
         with session_factory() as session:
-            for model in (ProofNotificationDelivery, ProofEvent, ProofResultDelivery, ProofResult, WebhookReceipt, ProofJob, ProofWorker, ProofIntegration, ProofPreset):
+            for model in (ProofCrmNoteDelivery, ProofNotificationDelivery, ProofEvent, ProofResultDelivery, ProofResult, WebhookReceipt, ProofJob, ProofWorker, ProofIntegration, ProofPreset):
                 session.query(model).delete()
             session.commit()
         shutil.rmtree(TEST_DATA_DIR / "results", ignore_errors=True)

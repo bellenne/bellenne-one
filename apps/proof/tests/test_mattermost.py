@@ -6,11 +6,17 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.main import session_factory, settings
-from app.models import ProofEvent, ProofIntegration, ProofNotificationDelivery
+from app.models import (
+    ProofCrmNoteDelivery,
+    ProofEvent,
+    ProofIntegration,
+    ProofNotificationDelivery,
+)
 from app.security import decrypt_secret, encrypt_secret, new_secret, secret_parts, token_digest
 from app.services import (
     add_event,
     credential_cipher_for_settings,
+    dispatch_pending_amocrm_error_notes,
     dispatch_pending_mattermost,
     json_dump,
 )
@@ -146,7 +152,7 @@ def test_error_event_is_delivered_once_to_configured_mattermost(client: TestClie
     payload = requests[0].read().decode("utf-8")
     assert requests[0].url == MATTERMOST_URL
     assert "production-alerts" in payload
-    assert "Исходный файл не найден." in payload
+    assert "Не удалось найти исходный макет." in payload
     assert "Номер заказа" in payload
     assert "ORDER-42" in payload
     assert "Дизайнер" in payload
@@ -158,6 +164,88 @@ def test_error_event_is_delivered_once_to_configured_mattermost(client: TestClie
         delivery = session.scalar(select(ProofNotificationDelivery))
         assert delivery.status == "sent"
         assert delivery.sent_at is not None
+
+
+def test_error_event_adds_human_readable_note_to_amocrm_lead(client: TestClient) -> None:
+    setup = bootstrap()
+    add_mattermost()
+    with session_factory() as session:
+        integration = session.get(ProofIntegration, setup["integration_id"])
+        integration.configuration_json = json_dump({
+            "api_base_url": "https://company.amocrm.ru",
+            "api_timeout_seconds": 8,
+            "delivery_mode": "webhook",
+        })
+        session.commit()
+
+    webhook = client.post(f"/webhooks/amocrm/{setup['webhook_secret']}", json=webhook_payload())
+    job_id = webhook.json()["job_id"]
+    headers = worker_headers(str(setup["worker_token"]))
+    assert client.post("/api/v1/jobs/claim", headers=headers).status_code == 200
+    assert client.post(f"/api/v1/jobs/{job_id}/start", headers=headers).status_code == 200
+    failed = client.post(
+        f"/api/v1/jobs/{job_id}/fail",
+        headers=headers,
+        json={
+            "error_code": "FILE_NOT_FOUND",
+            "message": "No file beginning with 'Макет 7' was found",
+            "details": {"layout_number": 7},
+        },
+    )
+    assert failed.status_code == 200
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, request=request, json={"_embedded": {"notes": []}})
+        return httpx.Response(
+            200,
+            request=request,
+            json={"_embedded": {"notes": [{"id": 902}]}},
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
+        assert dispatch_pending_amocrm_error_notes(
+            session_factory, settings, client=http_client
+        ) == 1
+        assert dispatch_pending_amocrm_error_notes(
+            session_factory, settings, client=http_client
+        ) == 0
+
+    assert [request.method for request in requests] == ["GET", "POST"]
+    assert requests[0].url.path == "/api/v4/leads/7654321/notes"
+    posted = requests[1].read().decode("utf-8")
+    assert "BellenneProof: Произошла ошибка." in posted
+    assert "Не удалось найти макет 7." in posted
+    assert "Заказ автоматически передан в разработку дизайнерам." in posted
+    assert "Проверьте виджет BellenneProof справа" in posted
+    assert "FILE_NOT_FOUND" not in posted
+    assert job_id not in posted
+    with session_factory() as session:
+        crm_delivery = session.scalar(select(ProofCrmNoteDelivery))
+        mattermost_delivery = session.scalar(select(ProofNotificationDelivery))
+        assert crm_delivery is not None
+        assert crm_delivery.status == "sent"
+        assert crm_delivery.amo_note_id == 902
+        assert crm_delivery.sent_at is not None
+        assert mattermost_delivery is not None
+
+
+def test_error_without_amocrm_lead_does_not_queue_crm_note(client: TestClient) -> None:
+    bootstrap()
+    with session_factory() as session:
+        add_event(
+            session,
+            owner_external_user_id=17,
+            event_type="test.error",
+            source="core",
+            level="error",
+            message="A controlled test error occurred.",
+        )
+        session.commit()
+        assert session.scalar(select(ProofCrmNoteDelivery)) is None
 
 
 def test_info_event_does_not_create_mattermost_notification(client: TestClient) -> None:

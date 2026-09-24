@@ -28,6 +28,7 @@ from .amocrm import (
 from .config import AppSettings
 from .models import (
     ProofEvent,
+    ProofCrmNoteDelivery,
     ProofIntegration,
     ProofJob,
     ProofNotificationDelivery,
@@ -313,7 +314,85 @@ def add_event(
                 status="pending",
             ))
             session.info["proof_notification_pending"] = True
+        lead_id = error_event_lead_id(session, event)
+        amocrm = session.scalar(select(ProofIntegration).where(
+            ProofIntegration.owner_external_user_id == owner_external_user_id,
+            ProofIntegration.kind == "amocrm",
+            ProofIntegration.enabled.is_(True),
+        ))
+        if amocrm is not None and lead_id:
+            session.add(ProofCrmNoteDelivery(
+                id=str(uuid4()),
+                owner_external_user_id=owner_external_user_id,
+                event_id=event.id,
+                integration_id=amocrm.id,
+                lead_id=lead_id,
+                status="pending",
+            ))
+            session.info["proof_crm_note_pending"] = True
     return event
+
+
+def error_event_lead_id(session: Session, event: ProofEvent) -> str:
+    details = json_load(event.details_json, {})
+    lead_id = ""
+    if event.job_id:
+        job = session.get(ProofJob, event.job_id)
+        if job is not None and job.crm_entity_type.casefold() in {"lead", "leads"}:
+            lead_id = str(job.crm_entity_id or "").strip()
+    if not lead_id and isinstance(details, dict):
+        lead_id = str(details.get("crm_entity_id") or details.get("amo_lead_id") or "").strip()
+    return lead_id if lead_id.isdecimal() else ""
+
+
+def human_error_message(event: ProofEvent) -> str:
+    details = json_load(event.details_json, {})
+    detailed_error = details.get("error") if isinstance(details, dict) else None
+    message = (
+        detailed_error
+        if isinstance(detailed_error, str) and detailed_error.strip()
+        else event.message
+    )
+    message = sanitized_message(message).strip()
+    translations = {
+        "Source file was not found.": "Не удалось найти исходный макет.",
+        "Source file was not found": "Не удалось найти исходный макет.",
+        "Order directory was not found": "Не удалось найти папку заказа.",
+        "Output disk is unavailable.": "Диск для сохранения результата недоступен.",
+        "A controlled test error occurred.": "Произошла тестовая ошибка.",
+        "Source file no longer exists": "Исходный файл больше не существует.",
+        "Source file is not readable": "Нет доступа для чтения исходного файла.",
+        "The requested layout exists in more than one numbered order directory": "Макет найден в нескольких папках заказа.",
+        "The requested layout exists only in PSD/PSB, which this Worker cannot process": "Макет найден только в формате PSD/PSB, который Worker не может обработать.",
+        "More than one production file matches the layout in its numbered directory": "Найдено несколько файлов, подходящих под указанный макет.",
+    }
+    translated = translations.get(message)
+    if translated:
+        return translated
+    layout_match = re.search(
+        r"No file beginning with ['\"]Макет\s+(\d+)['\"] was found",
+        message,
+        re.IGNORECASE,
+    )
+    if layout_match:
+        return f"Не удалось найти макет {layout_match.group(1)}."
+    if event.error_code in {"FILE_NOT_FOUND", "SOURCE_NOT_FOUND"}:
+        layout_number = details.get("layout_number") if isinstance(details, dict) else None
+        if isinstance(layout_number, int) or str(layout_number or "").isdecimal():
+            return f"Не удалось найти макет {layout_number}."
+        return "Не удалось найти исходный макет."
+    if re.search(r"[А-Яа-яЁё]", message):
+        return message
+    return "Произошла ошибка при подготовке цветопробы."
+
+
+def amocrm_error_note_text(event: ProofEvent) -> str:
+    return "\n\n".join((
+        "BellenneProof: Произошла ошибка.",
+        human_error_message(event),
+        "Заказ автоматически передан в разработку дизайнерам.",
+        "Для дизайнеров:\nПроверьте виджет BellenneProof справа, в нём находится информация для подготовки ЦП.",
+    ))
 
 
 def mattermost_settings(
@@ -336,14 +415,7 @@ def mattermost_error_message(
         return value.replace("@", "@\u200b").replace("`", "'").strip()
 
     details = json_load(event.details_json, {})
-    detailed_error = details.get("error") if isinstance(details, dict) else None
-    message = detailed_error if isinstance(detailed_error, str) and detailed_error.strip() else event.message
-    translations = {
-        "Source file was not found.": "Исходный файл не найден.",
-        "Output disk is unavailable.": "Диск для сохранения результата недоступен.",
-        "A controlled test error occurred.": "Произошла тестовая ошибка.",
-    }
-    message = translations.get(message.strip(), message.strip())
+    message = human_error_message(event)
     message = re.sub(r"^amoCRM API returned HTTP", "amoCRM API вернул HTTP", message)
     order_id = ""
     if isinstance(details, dict):
@@ -362,6 +434,81 @@ def mattermost_error_message(
         lines.extend(("", f"**Дизайнер:** {safe(designer_name)}"))
     lines.extend(("", "⚠️ **Необходимо подготовить цветопробу вручную.**"))
     return "\n".join(lines)
+
+
+def dispatch_pending_amocrm_error_notes(
+    session_factory: sessionmaker[Session],
+    settings: AppSettings,
+    *,
+    client: httpx.Client | None = None,
+    event_id: str | None = None,
+) -> int:
+    delivered = 0
+    with session_factory() as session:
+        query = select(ProofCrmNoteDelivery).where(
+            ProofCrmNoteDelivery.status == "pending"
+        )
+        if event_id:
+            query = query.where(ProofCrmNoteDelivery.event_id == event_id)
+        pending = list(session.scalars(query.order_by(ProofCrmNoteDelivery.created_at)))
+        for delivery in pending:
+            event = delivery.event
+            integration = delivery.integration
+            note_text = amocrm_error_note_text(event)
+            try:
+                if not integration.enabled:
+                    raise RuntimeError("Интеграция amoCRM выключена.")
+                configuration = AmoIntegrationConfiguration.model_validate(
+                    json_load(integration.configuration_json, {})
+                )
+                if not configuration.api_base_url:
+                    raise RuntimeError("В интеграции amoCRM не указан адрес аккаунта.")
+                with AmoClient(
+                    configuration.api_base_url,
+                    get_amocrm_access_token(session, settings, integration, client=client),
+                    timeout_seconds=configuration.api_timeout_seconds or 0,
+                    client=client,
+                ) as amo:
+                    note = amo.find_common_note(delivery.lead_id, note_text)
+                    if note is None:
+                        note = amo.create_common_note(delivery.lead_id, note_text)
+                note_id = note.get("id") if isinstance(note, dict) else None
+                delivery.amo_note_id = note_id if isinstance(note_id, int) else None
+            except Exception as exc:
+                safe_error = sanitized_message(str(exc))[:2000]
+                delivery.status = "failed"
+                delivery.last_error = safe_error
+                add_event(
+                    session,
+                    owner_external_user_id=delivery.owner_external_user_id,
+                    job_id=event.job_id,
+                    integration_id=integration.id,
+                    event_type="amocrm.error_note.failed",
+                    source="integration",
+                    level="error",
+                    message="Не удалось добавить в сделку amoCRM примечание об ошибке.",
+                    error_code="AMOCRM_ERROR_NOTE_FAILED",
+                    details={"error": safe_error, "source_event_id": event.id},
+                    queue_notification=False,
+                )
+            else:
+                delivery.status = "sent"
+                delivery.sent_at = utc_now()
+                delivery.last_error = None
+                delivered += 1
+                add_event(
+                    session,
+                    owner_external_user_id=delivery.owner_external_user_id,
+                    job_id=event.job_id,
+                    integration_id=integration.id,
+                    event_type="amocrm.error_note.sent",
+                    source="integration",
+                    message="Примечание об ошибке добавлено в сделку amoCRM.",
+                    details={"source_event_id": event.id, "amo_note_id": delivery.amo_note_id},
+                    queue_notification=False,
+                )
+            session.commit()
+    return delivered
 
 
 def post_mattermost_message(

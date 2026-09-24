@@ -4,7 +4,7 @@ import json
 import string
 from datetime import datetime, timedelta
 
-from . import db
+from . import db, policy, retailcrm
 
 TYPES = {
     "portrait_background": "Картина + фон",
@@ -21,6 +21,7 @@ KINDS = {
     "wait": "Ожидание ответа",
     "handoff": "Менеджеру",
     "confirm": "Подтверждение покупателем",
+    "retailcrm": "Создать сделку в RetailCRM",
     "ready": "Проверка брифа",
     "end": "Конец",
 }
@@ -29,18 +30,57 @@ FIELDS = {
     "collage": {"photos", "caption", "wishes"},
     "template_art": {"photos", "template_id", "wishes"},
 }
+FIELD_LABELS = {
+    "photos": "Фотографии",
+    "background": "Пожелания к фону",
+    "caption": "Текст для коллажа",
+    "wishes": "Дополнительные пожелания",
+    "template_id": "Выбранный шаблон",
+}
 WAITING = {"ask_text", "ask_photo", "choice", "wait", "confirm"}
 TEXT_KINDS = WAITING | {"send"}
+RETAILCRM_VARIABLES = {
+    "posting",
+    "sku",
+    "offer_id",
+    "product_name",
+    "quantity",
+    "summary",
+}
 
 
 class Invalid(ValueError):
     pass
 
 
+def normalize(graph, product_type):
+    """Apply product invariants that are not administrator-facing settings."""
+    changed = False
+    nodes = graph.get("nodes", []) if isinstance(graph, dict) else []
+    photo_nodes = [
+        node
+        for node in nodes
+        if node.get("kind") == "ask_photo" and node.get("field") == "photos"
+    ]
+    if photo_nodes and not any(node.get("required") for node in photo_nodes):
+        photo_nodes[0]["required"] = True
+        changed = True
+    if product_type == "template_art":
+        template_nodes = [
+            node
+            for node in nodes
+            if node.get("kind") == "choice" and node.get("field") == "template_id"
+        ]
+        if template_nodes and not any(node.get("required") for node in template_nodes):
+            template_nodes[0]["required"] = True
+            changed = True
+    return changed
+
+
 def initial_graph(product_type):
     """Unpublished skeletons: the administrator must supply every buyer-facing text."""
     nodes = [
-        {"id": "start", "kind": "start", "next": "photos"},
+        {"id": "start", "kind": "start", "next": "photos", "position": {"x": 80, "y": 180}},
         {
             "id": "photos",
             "kind": "ask_photo",
@@ -50,6 +90,7 @@ def initial_graph(product_type):
             "min": None,
             "max": 8 if product_type == "collage" else None,
             "next": "details",
+            "position": {"x": 360, "y": 180},
         },
     ]
     field = {
@@ -65,10 +106,10 @@ def initial_graph(product_type):
             "required": True,
             "text": "",
             "choices": [],
-            "next": "confirm",
+            "next": "ready",
+            "position": {"x": 640, "y": 180},
         },
-        {"id": "confirm", "kind": "confirm", "text": "", "accept": "", "next": "ready"},
-        {"id": "ready", "kind": "ready"},
+        {"id": "ready", "kind": "ready", "position": {"x": 920, "y": 180}},
     ]
     return {"nodes": nodes}
 
@@ -96,16 +137,17 @@ def validate(graph, product_type):
         if n.get("kind") in {"ask_text", "ask_photo", "choice"}
     }
     required = {n.get("field") for n in nodes if n.get("required")}
-    if "photos" not in required or (
-        product_type == "template_art" and "template_id" not in required
-    ):
-        raise Invalid(
-            "Фото и шаблон для соответствующего типа должны быть обязательными"
-        )
-    if not any(n.get("kind") == "confirm" for n in nodes) or not any(
-        n.get("kind") == "ready" for n in nodes
-    ):
-        raise Invalid("Нужны подтверждение покупателя и проверка брифа")
+    if "photos" not in fields:
+        raise Invalid("Добавьте шаг «Запросить фото»: без исходного фото бриф нельзя проверить")
+    if "photos" not in required:
+        raise Invalid("Сделайте шаг «Запросить фото» обязательной частью брифа")
+    if product_type == "template_art" and "template_id" not in fields:
+        raise Invalid("Добавьте шаг «Предложить выбор шаблона»")
+    if product_type == "template_art" and "template_id" not in required:
+        raise Invalid("Выбор шаблона должен быть обязательной частью брифа")
+    if not any(n.get("kind") == "ready" for n in nodes):
+        raise Invalid("Нужен шаг проверки брифа")
+    requires_confirmation = any(n.get("kind") == "confirm" for n in nodes)
     for node in nodes:
         kind = node.get("kind")
         if kind not in KINDS:
@@ -128,6 +170,31 @@ def validate(graph, product_type):
                         )
             except ValueError as exc:
                 raise Invalid("Некорректные фигурные скобки в тексте") from exc
+        if kind == "retailcrm":
+            if not str(node.get("comment") or "").strip():
+                raise Invalid(
+                    f"Заполните комментарий для сделки в шаге {node['id']}"
+                )
+            try:
+                for _, variable, spec, conversion in string.Formatter().parse(
+                    node["comment"]
+                ):
+                    if variable is not None and (
+                        variable not in fields | RETAILCRM_VARIABLES
+                        or spec
+                        or conversion
+                    ):
+                        raise Invalid(
+                            "В комментарии RetailCRM используется неизвестная переменная"
+                        )
+            except ValueError as exc:
+                raise Invalid(
+                    "Некорректные фигурные скобки в комментарии RetailCRM"
+                ) from exc
+            if not node.get("error"):
+                raise Invalid(
+                    f"Укажите переход при ошибке RetailCRM для {node['id']}"
+                )
         if kind in {"ask_text", "ask_photo", "choice"}:
             if node.get("field") not in FIELDS[product_type]:
                 raise Invalid("Поле не принадлежит выбранному типу товара")
@@ -149,16 +216,28 @@ def validate(graph, product_type):
                 raise Invalid("Для набора фото укажите ответ, завершающий загрузку")
         if kind == "confirm" and not node.get("accept", "").strip():
             raise Invalid("Укажите точный ответ для подтверждения")
+        position = node.get("position")
+        if position is not None and (
+            not isinstance(position, dict)
+            or not isinstance(position.get("x"), (int, float))
+            or not isinstance(position.get("y"), (int, float))
+        ):
+            raise Invalid(f"У шага {node['id']} некорректная позиция на схеме")
         if (
             kind == "choice"
             and node.get("field") != "template_id"
             and not node.get("choices")
         ):
             raise Invalid("Добавьте варианты выбора")
-        if kind == "condition" and (
-            node.get("field") not in fields or not node.get("otherwise")
-        ):
-            raise Invalid("Условию нужны поле и переход Иначе")
+        if kind == "condition":
+            if node.get("field") not in FIELDS[product_type]:
+                raise Invalid(
+                    f"В шаге «{node.get('title') or node['id']}» выберите, какие собранные данные проверять"
+                )
+            if not node.get("otherwise"):
+                raise Invalid(
+                    f"В шаге «{node.get('title') or node['id']}» выберите переход «Если условие не выполнено»"
+                )
         targets = [node.get("next"), node.get("otherwise"), node.get("error")]
         if kind not in {"end", "ready"} and not node.get("next"):
             raise Invalid(f"Укажите следующий шаг для {node['id']}")
@@ -195,9 +274,19 @@ def validate(graph, product_type):
             confirmed = False
         if node["kind"] == "confirm":
             confirmed = True
-        if node["kind"] == "ready" and (not required <= collected or not confirmed):
+        if node["kind"] == "condition" and node["field"] not in collected:
+            label = FIELD_LABELS.get(node["field"], node["field"])
             raise Invalid(
-                "Каждый путь к готовности должен собрать обязательные поля и затем запросить подтверждение"
+                f"Шаг «{node.get('title') or node['id']}» проверяет «{label}», "
+                "но до него эти данные ещё не собраны. "
+                "Перед условием добавьте шаг «Задать вопрос и сохранить ответ» с тем же полем"
+            )
+        if node["kind"] == "ready" and (
+            not required <= collected or (requires_confirmation and not confirmed)
+        ):
+            raise Invalid(
+                "Каждый путь к готовности должен собрать обязательные поля"
+                + (" и затем запросить подтверждение" if requires_confirmation else "")
             )
         for target in (node.get("next"), node.get("otherwise")):
             if target:
@@ -232,9 +321,8 @@ def publish(con, scenario_id, actor):
 def queue_text(con, chat, instance, text, key, actor="bot"):
     if not text.strip():
         raise Invalid("Пустой текст сообщения")
-    limit = db.config(con).get("message_max_chars")
-    if not limit or len(text) > limit:
-        raise Invalid("Не настроен или превышен лимит исходящего текста")
+    if len(text) > policy.MESSAGE_MAX_CHARS:
+        raise Invalid("Исходящий текст длиннее 1000 символов")
     con.execute(
         "INSERT OR IGNORE INTO outbox(chat_id,instance_id,actor,body,dedup,epoch,created_at) VALUES(?,?,?,?,?,?,?)",
         (chat["id"], instance, actor, text, key, chat["epoch"], db.now()),
@@ -308,10 +396,15 @@ def settled(con, instance):
             "SELECT 1 FROM outbox WHERE chat_id=? AND state IN ('pending','unknown','failed')",
             (instance["chat_id"],),
         ).fetchone()
+        and not con.execute(
+            "SELECT 1 FROM retailcrm_actions WHERE instance_id=? "
+            "AND state IN ('pending','running','unknown')",
+            (instance["id"],),
+        ).fetchone()
     )
 
 
-def advance(con, instance_id, reply=None):
+def advance(con, instance_id, reply=None, *, simulate_external=False):
     instance = con.execute(
         "SELECT * FROM instances WHERE id=?", (instance_id,)
     ).fetchone()
@@ -321,7 +414,7 @@ def advance(con, instance_id, reply=None):
     if (
         chat["mode"] != "bot"
         or chat["active_item"] != instance["item_id"]
-        or instance["status"] != "collecting"
+        or instance["status"] not in {"collecting", "waiting_integration"}
     ):
         return
     item = con.execute(
@@ -452,14 +545,82 @@ def advance(con, instance_id, reply=None):
                     continue
                 status = "needs_manager"
                 break
+            db.audit(
+                con,
+                "system",
+                "answer.accepted",
+                "instance",
+                instance_id,
+                chat["id"],
+            )
             reply = None
+        if kind == "retailcrm":
+            if simulate_external:
+                db.audit(
+                    con,
+                    "simulation",
+                    "retailcrm.simulated",
+                    "instance",
+                    instance_id,
+                    chat["id"],
+                )
+                node_id = node["next"]
+                prompted = 0
+                continue
+            action = con.execute(
+                "SELECT * FROM retailcrm_actions WHERE instance_id=? AND node_id=?",
+                (instance_id, node_id),
+            ).fetchone()
+            if action is None:
+                external_id, _ = retailcrm.order_payload(con, instance_id, node)
+                action_id = con.execute(
+                    "INSERT INTO retailcrm_actions(instance_id,node_id,external_id,created_at) "
+                    "VALUES(?,?,?,?)",
+                    (instance_id, node_id, external_id, db.now()),
+                ).lastrowid
+                con.execute(
+                    "INSERT INTO jobs(kind,account_id,payload,created_at) "
+                    "VALUES('retailcrm_create',(SELECT account_id FROM items WHERE id=?),?,?)",
+                    (instance["item_id"], db.dump({"action_id": action_id}), db.now()),
+                )
+                db.audit(
+                    con,
+                    "system",
+                    "retailcrm.queued",
+                    "retailcrm_action",
+                    action_id,
+                    chat["id"],
+                )
+                status = "waiting_integration"
+                break
+            if action["state"] == "sent":
+                node_id = node["next"]
+                prompted = 0
+                continue
+            if action["state"] == "failed":
+                if node.get("error"):
+                    node_id = node["error"]
+                    prompted = 0
+                    continue
+                status = "needs_manager"
+                break
+            status = (
+                "needs_manager"
+                if action["state"] == "unknown"
+                else "waiting_integration"
+            )
+            break
         if kind == "handoff":
             status = "needs_manager"
             break
         if kind == "ready":
+            confirmation_required = any(
+                candidate.get("kind") == "confirm" for candidate in graph["nodes"]
+            )
             status = (
                 "needs_review"
-                if confirmed and complete(con, instance, graph, fields)
+                if (confirmed or not confirmation_required)
+                and complete(con, instance, graph, fields)
                 else "needs_manager"
             )
             break
@@ -533,16 +694,19 @@ def approve(con, instance_id, actor):
     hours = settings.get("handoff_hours")
     if hours is None:
         raise Invalid("Администратор должен настроить N часов в кабинете Folio")
+    confirmation_required = any(
+        node.get("kind") == "confirm" for node in graph["nodes"]
+    )
     if (
         instance["status"] != "needs_review"
-        or not instance["confirmed_at"]
+        or (confirmation_required and not instance["confirmed_at"])
         or not complete(con, instance, graph, json.loads(instance["fields"]))
         or not settled(con, instance)
     ):
-        raise Invalid("Бриф не подтверждён покупателем или не заполнен")
+        raise Invalid("Бриф не прошёл проверку комплектности")
     origin = (
         instance["confirmed_at"]
-        if settings.get("timer_origin") == "confirmation"
+        if settings.get("timer_origin") == "confirmation" and instance["confirmed_at"]
         else db.now()
     )
     eligible = (datetime.fromisoformat(origin) + timedelta(hours=hours)).isoformat()
@@ -565,8 +729,11 @@ def release_due(con):
         )
         if not settled(con, instance):
             continue
+        confirmation_required = any(
+            node.get("kind") == "confirm" for node in graph["nodes"]
+        )
         valid = (
-            instance["confirmed_at"]
+            (instance["confirmed_at"] or not confirmation_required)
             and instance["reviewed_at"]
             and complete(con, instance, graph, json.loads(instance["fields"]))
         )

@@ -1,6 +1,7 @@
 import hashlib
 import io
 import ipaddress
+import os
 import socket
 import uuid
 import warnings
@@ -9,17 +10,22 @@ from urllib.parse import urlsplit
 import httpx
 from PIL import Image
 
-from . import db
+from . import db, policy
 from .scenarios import Invalid
 
 
+ALLOWED_IMAGE_MIMES = {"image/jpeg", "image/png", "image/webp"}
+
+
+def is_ozon_host(host):
+    host = host.lower().rstrip(".")
+    return any(host == root or host.endswith(f".{root}") for root in policy.OZON_MEDIA_ROOTS)
+
+
 def validate_image(content, settings):
-    maximum = settings.get("media_max_bytes")
-    allowed = settings.get("media_mimes", [])
-    if not maximum or not allowed:
-        raise Invalid("Администратор должен настроить типы и размер изображений")
+    maximum = policy.IMAGE_MAX_BYTES
     if not content or len(content) > maximum:
-        raise Invalid("Файл пуст или превышает настроенный размер")
+        raise Invalid("Файл пуст или превышает допустимый размер")
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
@@ -36,7 +42,7 @@ def validate_image(content, settings):
         Image.DecompressionBombWarning,
     ):
         raise Invalid("Повреждённое или неподдерживаемое изображение") from None
-    if mime not in allowed or mime not in {"image/jpeg", "image/png", "image/webp"}:
+    if mime not in ALLOWED_IMAGE_MIMES:
         raise Invalid("Тип изображения не разрешён")
     return mime
 
@@ -59,7 +65,8 @@ def store(con, content, settings, chat_id=None, item_id=None):
 
 def download(url, settings):
     parsed = urlsplit(url)
-    # Only the official CDN namespace, additionally selected by the administrator.
+    # Only official Ozon DNS namespaces; redirects and private addresses remain
+    # forbidden so the convenient default does not weaken SSRF protection.
     host = parsed.hostname or ""
     if (
         parsed.scheme != "https"
@@ -68,22 +75,20 @@ def download(url, settings):
         or parsed.port not in (None, 443)
     ):
         raise Invalid("Недопустимая ссылка на вложение")
-    if host not in settings.get("media_hosts", []) or not (
-        host.endswith((".ozone.ru", ".ozon.ru"))
-    ):
-        raise Invalid("Хост вложения не подтверждён в настройках")
+    if not is_ozon_host(host):
+        raise Invalid("Ссылка на вложение ведёт не на хранилище Ozon")
     if any(
         not ipaddress.ip_address(item[4][0]).is_global
         for item in socket.getaddrinfo(host, 443)
     ):
         raise Invalid("Недопустимый адрес хранилища")
-    maximum = settings.get("media_max_bytes")
-    if not maximum:
-        raise Invalid("Не настроен размер вложений")
+    maximum = policy.IMAGE_MAX_BYTES
     data = bytearray()
-    with httpx.stream(
-        "GET", url, timeout=settings["http_timeout"], follow_redirects=False
-    ) as response:
+    request_options = {"follow_redirects": False}
+    configured_timeout = os.environ.get("FOLIO_OZON_HTTP_TIMEOUT_SECONDS", "").strip()
+    if configured_timeout:
+        request_options["timeout"] = float(configured_timeout)
+    with httpx.stream("GET", url, **request_options) as response:
         if response.status_code != 200:
             raise Invalid("Вложение недоступно")
         for chunk in response.iter_bytes():

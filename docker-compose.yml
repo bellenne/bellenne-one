@@ -23,6 +23,8 @@ services:
         condition: service_healthy
       proof:
         condition: service_healthy
+      folio:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1/gateway-health"]
       interval: 30s
@@ -142,9 +144,52 @@ services:
     expose:
       - "8000"
 
+  folio:
+    build:
+      context: .
+      dockerfile: apps/folio/Dockerfile
+    container_name: bellenneone-folio
+    restart: unless-stopped
+    init: true
+    environment:
+      MODULE_PREFIX: /folio
+      FOLIO_DATA_DIR: /data
+      FOLIO_ADMIN_USER_ID: "${FOLIO_ADMIN_USER_ID:-}"
+      FOLIO_ENCRYPTION_KEY: "${FOLIO_ENCRYPTION_KEY:-}"
+      FOLIO_OZON_HTTP_TIMEOUT_SECONDS: "${FOLIO_OZON_HTTP_TIMEOUT_SECONDS:-}"
+      FOLIO_RETAILCRM_HTTP_TIMEOUT_SECONDS: "${FOLIO_RETAILCRM_HTTP_TIMEOUT_SECONDS:-20}"
+    volumes:
+      - folio_data:/data
+    expose:
+      - "8000"
+
+  folio-worker:
+    build:
+      context: .
+      dockerfile: apps/folio/Dockerfile
+    container_name: bellenneone-folio-worker
+    restart: unless-stopped
+    init: true
+    command: ["python", "-m", "app.worker"]
+    healthcheck:
+      disable: true
+    environment:
+      FOLIO_DATA_DIR: /data
+      FOLIO_ENCRYPTION_KEY: "${FOLIO_ENCRYPTION_KEY:-}"
+      FOLIO_WORKER_IDLE_SECONDS: "${FOLIO_WORKER_IDLE_SECONDS:-1}"
+      FOLIO_OZON_HTTP_TIMEOUT_SECONDS: "${FOLIO_OZON_HTTP_TIMEOUT_SECONDS:-}"
+      FOLIO_RETAILCRM_HTTP_TIMEOUT_SECONDS: "${FOLIO_RETAILCRM_HTTP_TIMEOUT_SECONDS:-20}"
+    volumes:
+      - folio_data:/data
+    depends_on:
+      folio:
+        condition: service_healthy
+
+
 volumes:
   pulse_data:
   echo_data:
   vector_data:
   nest_data:
   proof_data:
+  folio_data:
