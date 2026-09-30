@@ -215,6 +215,24 @@ def _validate_job(payload, worker_id: str):
     return state
 
 
+def _rejection_reason(response) -> str:
+    code = f"image_worker_http_{response.status_code}"
+    if response.status_code != 422:
+        return code
+    try:
+        detail = response.json().get("detail")
+    except (ValueError, TypeError, AttributeError):
+        return code
+    if isinstance(detail, str):
+        return f"{code}: {detail[:200]}"
+    if isinstance(detail, list):
+        fields = [".".join(map(str, issue.get("loc", []))) for issue in detail[:5]
+                  if isinstance(issue, dict)]
+        if fields:
+            return f"{code}: поля {', '.join(fields)[:200]}"
+    return code
+
+
 def submit_one(*, client=None) -> bool:
     if not configured():
         return False
@@ -263,7 +281,7 @@ def submit_one(*, client=None) -> bool:
                 response = _request("POST", "/v1/jobs", client=client,
                                     files=files, data=data)
         if response.status_code != 202:
-            raise ImageTaskError(f"image_worker_http_{response.status_code}",
+            raise ImageTaskError(_rejection_reason(response),
                                  unknown=response.status_code >= 500)
         payload = response.json()
         worker_id = str(uuid.UUID(str(payload.get("id"))))
