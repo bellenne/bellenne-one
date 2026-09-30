@@ -38,7 +38,7 @@ def simulate(graph, product_type, answers):
         scenarios.publish(con, 1, "simulation")
         con.execute("INSERT INTO templates(id,name) VALUES(1,'Тестовый шаблон')")
         con.execute(
-            "INSERT INTO mappings(id,account_id,sku,product_type,scenario_id,template_ids) VALUES(1,1,'1',?,1,'[1]')",
+            "INSERT INTO mappings(id,account_id,sku,product_type,scenario_id,template_ids) VALUES(1,1,'SIMULATION',?,1,'[1]')",
             (product_type,),
         )
         con.execute(
@@ -112,6 +112,14 @@ def simulate(graph, product_type, answers):
                 timeline.append(
                     {"actor": "buyer", "body": answer_label, "kind": "text"}
                 )
+            elif event.get("kind") == "manager_photo":
+                content["manager_file_sent"] = True
+                answer_label = "Менеджер отправил тестовый макет"
+                timeline.append({"actor": "manager", "body": answer_label, "kind": "photo"})
+            elif event.get("kind") == "approval_timeout":
+                content["approval_timeout"] = True
+                answer_label = "Время ожидания истекло"
+                timeline.append({"actor": "system", "body": answer_label, "kind": "text"})
             else:
                 raise scenarios.Invalid("Неизвестное событие тестового диалога")
             scenarios.advance(con, 1, content, simulate_external=True)

@@ -3,11 +3,12 @@
 <div class="page-header"><div><h1 class="page-title">{{ record.name if record else 'Сценарии' }}</h1><p class="page-subtitle">{{ 'Настройте порядок общения с покупателем' if record else 'Выберите готовый сценарий или создайте новый' }}</p></div>{% if record %}<a class="button button-secondary" href="{{ prefix }}/scenarios">К списку сценариев</a>{% endif %}</div>
 {% if not record %}
 <section class="card card-body folio-stack folio-section">
-  <div class="table-scroll"><table class="data-table"><thead><tr><th>Сценарий</th><th>Тип товара</th><th>Состояние</th></tr></thead><tbody>
-  {% for s in records %}<tr><td><a href="{{ prefix }}/scenarios/{{ s.id }}">{{ s.name }}</a></td><td>{{ types[s.product_type] }}</td><td>{{ 'Опубликован' if s.published else 'Черновик' }}</td></tr>{% else %}<tr><td colspan="3">Создайте первый сценарий</td></tr>{% endfor %}
+  <div class="table-scroll"><table class="data-table"><thead><tr><th>Сценарий</th><th>Тип товара</th><th>Состояние</th><th>Экспорт</th></tr></thead><tbody>
+  {% for s in records %}<tr><td><a href="{{ prefix }}/scenarios/{{ s.id }}">{{ s.name }}</a></td><td>{{ types[s.product_type] }}</td><td>{{ 'Опубликован' if s.published else 'Черновик' }}</td><td><a href="{{ prefix }}/scenarios/{{ s.id }}/export?source=draft">Черновик</a>{% if s.published %} · <a href="{{ prefix }}/scenarios/{{ s.id }}/export?source=published">Опубликованная версия</a>{% endif %}</td></tr>{% else %}<tr><td colspan="4">Создайте первый сценарий</td></tr>{% endfor %}
   </tbody></table></div>
   <form method="post" action="{{ prefix }}/scenarios" class="form-grid form-grid-2">{{ token() }}<label class="field">Название<input class="input" name="name" required></label><label class="field">Тип товара<select class="select" name="product_type">{% for key,label in types.items() %}<option value="{{ key }}">{{ label }}</option>{% endfor %}</select></label><button class="button button-secondary">Создать черновик</button></form>
 </section>
+<section class="card card-body folio-stack folio-section"><h2>Импорт сценария</h2><p class="field-help">Загрузите JSON, скачанный из Folio. Сценарий создастся отдельным черновиком: проверьте его, опубликуйте и затем привяжите к артикулам на этом сервере. Действующие диалоги не изменятся.</p><form method="post" enctype="multipart/form-data" action="{{ prefix }}/scenarios/import" class="form-grid form-grid-2">{{ token() }}<label class="field">Файл сценария<input class="input" type="file" name="file" accept=".json,application/json" required></label><div class="form-actions"><button class="button button-secondary">Импортировать черновик</button></div></form></section>
 {% endif %}
 {% if record %}
 <section class="folio-builder" data-scenario-builder data-product-type="{{ record.product_type }}">
@@ -16,7 +17,7 @@
     {{ token() }}<input type="hidden" name="revision" value="{{ record.revision }}"><input type="hidden" name="graph_json" data-graph-json>
     <div class="folio-builder-toolbar card">
       <div><span class="badge">{{ types[record.product_type] }}</span><span class="folio-save-state" data-save-state>Черновик сохранён</span></div>
-      <div class="folio-actions"><button type="button" class="button button-secondary button-small" data-fit>Показать всю схему</button><button type="button" class="button button-secondary button-small" data-validate>Проверить</button><a class="button button-secondary button-small" href="{{ prefix }}/scenarios/{{ record.id }}/preview">Тестировать</a><button class="button button-primary button-small" data-save>Сохранить</button></div>
+      <div class="folio-actions"><button type="button" class="button button-secondary button-small" data-fit>Показать всю схему</button><button type="button" class="button button-secondary button-small" data-validate>Проверить</button><a class="button button-secondary button-small" href="{{ prefix }}/scenarios/{{ record.id }}/preview">Тестировать</a><a class="button button-secondary button-small" href="{{ prefix }}/scenarios/{{ record.id }}/export?source=draft">Скачать черновик</a>{% if record.published %}<a class="button button-secondary button-small" href="{{ prefix }}/scenarios/{{ record.id }}/export?source=published">Скачать опубликованный</a>{% endif %}<button class="button button-primary button-small" data-save>Сохранить</button></div>
     </div>
   </form>
   <div class="card card-body folio-builder-guide" aria-label="Как настроить сценарий"><strong>Как настроить</strong><ol><li>Добавьте нужные шаги слева.</li><li>Соедините их в порядке общения.</li><li>Выберите шаг и заполните только его настройки справа.</li><li>Сохраните, проверьте и опубликуйте.</li></ol></div>
@@ -31,21 +32,24 @@
       <label class="field">Название шага<input class="input" data-field="title"></label>
       <label class="field" data-for="text"><span data-text-label>Сообщение покупателю</span><textarea class="input" rows="5" data-field="text"></textarea><span class="field-help">Можно использовать: {posting}, {offer_id}, {summary}, {templates} и собранные данные.</span></label>
       <label class="field" data-for="field"><span data-field-label>Что сохранить в бриф</span><select class="select" data-field="field"></select><span class="field-help" data-condition-field-help hidden>Условие может проверить только ответ, уже сохранённый предыдущим шагом «Задать вопрос».</span></label>
-      <label data-for="required"><input type="checkbox" data-field="required"> Ответ обязателен для готового брифа</label>
+      <label data-for="required"><input type="checkbox" data-field="required"> <span data-required-label>Ответ обязателен для готового брифа</span></label>
       <div class="form-grid form-grid-2" data-for="photo"><label class="field">Минимум фото<input class="input" type="number" min="1" data-field="min"></label><label class="field">Максимум фото<input class="input" type="number" min="1" data-field="max"></label></div>
       <label class="field" data-for="accept">Какой ответ завершает этот шаг<input class="input" data-field="accept"><span class="field-help">Например: «готово». Регистр не учитывается.</span></label>
       <label class="field" data-for="max_length">Максимум символов в ответе<input class="input" type="number" min="1" data-field="max_length"></label>
+      <div class="folio-stack" data-for="approval"><p class="field-help">Folio сам распознаёт ответы по готовому словарю: «да», «подтверждаю», «макет подходит», «нет», «нужны правки», «переделайте» и другие. Ничего вписывать не нужно. Регистр и знаки препинания не учитываются; противоречивый или незнакомый ответ направляется по ветке ошибки.</p><label class="field">Ожидать ответ, часов<input class="input" type="number" min="1" max="72" data-field="hours"></label><p class="field-help">Отсчёт начинается после подтверждения отправки предупреждения через Ozon. При молчании Folio только фиксирует результат и передаёт чат менеджеру.</p></div>
       <label class="field" data-for="condition">Сравнить со значением<input class="input" data-field="equals"></label>
       <div class="folio-stack" data-for="retailcrm">
-        <label class="field">Комментарий менеджеру RetailCRM<textarea class="input" rows="7" data-field="comment"></textarea><span class="field-help">Можно использовать: {posting}, {sku}, {offer_id}, {product_name}, {quantity}, {summary} и данные, собранные предыдущими шагами.</span></label>
-        <details><summary>Дополнительные поля RetailCRM</summary><div class="folio-stack">
-          <label class="field">Статус заказа<input class="input" data-field="status"><span class="field-help">Символьный код статуса. Оставьте пустым для стандартного статуса RetailCRM.</span></label>
+        <label class="field"><span data-retailcrm-comment-label>Комментарий менеджеру RetailCRM</span><textarea class="input" rows="7" data-field="comment"></textarea><span class="field-help">Можно использовать: {posting}, {sku}, {offer_id}, {product_name}, {quantity}, {summary}, {approval_outcome} и собранные данные.</span></label>
+        <label class="field">Статус заказа после этого шага<select class="select" data-field="status"><option value="">Не менять статус</option>{% for status in retailcrm_statuses %}<option value="{{ status.code }}">{{ status.name }} ({{ status.code }})</option>{% endfor %}</select><span class="field-help">{% if retailcrm_statuses %}Выберите активный статус RetailCRM или оставьте текущий.{% else %}Статусы не загружены. Откройте настройки RetailCRM и нажмите «Проверить подключение и права»; ключу нужен доступ к справочникам.{% endif %}</span></label>
+        <details data-for="retailcrm-create"><summary>Дополнительные поля RetailCRM</summary><div class="folio-stack">
           <label class="field">Тип заказа<input class="input" data-field="order_type"><span class="field-help">Символьный код типа заказа. Необязательно.</span></label>
           <label class="field">Способ оформления<input class="input" data-field="order_method"><span class="field-help">Символьный код способа оформления. Необязательно.</span></label>
         </div></details>
       </div>
+      <label class="field" data-for="mattermost">Сообщение в Mattermost<textarea class="input" rows="6" data-field="message"></textarea><span class="field-help">Можно использовать: {posting}, {product_name}, {approval_outcome}, {integration_error} и собранные данные. Настройте входящий webhook в разделе Mattermost.</span></label>
+      <label class="field" data-for="image-worker">Инструкция обработки изображения<textarea class="input" rows="7" maxlength="4000" data-field="prompt"></textarea><span class="field-help">Можно использовать {background}, {caption}, {wishes}, {template_id}, {summary}, {posting}, {offer_id}, {product_name}, {quantity}. Нужна ровно одна фотография. Размер берётся из конца артикула, например <code>КАРТЕСТ-01_40х60</code>; если размера нет, применяется 40×60 см.</span></label>
       <label class="field" data-for="next">Следующий шаг<select class="select" data-field="next"></select></label>
-      <label class="field" data-for="condition">Если условие не выполнено<select class="select" data-field="otherwise"></select></label>
+      <label class="field" data-for="otherwise"><span data-otherwise-label>Если условие не выполнено</span><select class="select" data-field="otherwise"></select></label>
       <label class="field" data-for="error"><span data-error-label>Если ответ не подходит</span><select class="select" data-field="error"></select></label>
       <button type="button" class="button button-secondary" data-delete-node>Удалить шаг</button>
     </div></aside>

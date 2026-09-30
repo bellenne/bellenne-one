@@ -63,7 +63,7 @@ def store(con, content, settings, chat_id=None, item_id=None):
     return mid
 
 
-def download(url, settings):
+def download(url, settings, auth_client=None):
     parsed = urlsplit(url)
     # Only official Ozon DNS namespaces; redirects and private addresses remain
     # forbidden so the convenient default does not weaken SSRF protection.
@@ -77,6 +77,11 @@ def download(url, settings):
         raise Invalid("Недопустимая ссылка на вложение")
     if not is_ozon_host(host):
         raise Invalid("Ссылка на вложение ведёт не на хранилище Ozon")
+    if host == "api-seller.ozon.ru":
+        # Chat history uses an authenticated file endpoint. Never send the
+        # cabinet's API credentials to an arbitrary URL, even under *.ozon.ru.
+        if not parsed.path.startswith("/v2/chat/file/") or auth_client is None:
+            raise Invalid("Недопустимый адрес файла Ozon")
     if any(
         not ipaddress.ip_address(item[4][0]).is_global
         for item in socket.getaddrinfo(host, 443)
@@ -88,7 +93,12 @@ def download(url, settings):
     configured_timeout = os.environ.get("FOLIO_OZON_HTTP_TIMEOUT_SECONDS", "").strip()
     if configured_timeout:
         request_options["timeout"] = float(configured_timeout)
-    with httpx.stream("GET", url, **request_options) as response:
+    stream = (
+        auth_client.stream("GET", url, **request_options)
+        if host == "api-seller.ozon.ru"
+        else httpx.stream("GET", url, **request_options)
+    )
+    with stream as response:
         if response.status_code != 200:
             raise Invalid("Вложение недоступно")
         for chunk in response.iter_bytes():

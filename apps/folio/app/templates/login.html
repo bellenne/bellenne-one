@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Вход в BellenneFolio</title>
+  <link rel="stylesheet" href="{{ prefix }}/shared/css/theme.css">
+  <link rel="stylesheet" href="{{ prefix }}/shared/css/app.css">
+  <link rel="stylesheet" href="{{ prefix }}/static/folio.css">
+</head>
+<body class="folio-login-page">
+  <main class="card card-body folio-login-card folio-stack">
+    <h1 class="page-title">BellenneFolio</h1>
+    <p class="page-subtitle">Вход для менеджера</p>
+    {% if error %}<p class="status status-error" role="alert">{{ error }}</p>{% endif %}
+    <form class="folio-stack" method="post" action="{{ prefix }}/login">
+      <label class="field">Логин<input class="input" name="username" autocomplete="username" required></label>
+      <label class="field">Пароль<input class="input" name="password" type="password" autocomplete="current-password" required></label>
+      <button class="button button-primary">Войти в Folio</button>
+    </form>
+    <a href="/login">Вход через BellenneOne</a>
+  </main>
+</body>
+</html>

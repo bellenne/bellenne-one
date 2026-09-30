@@ -5,6 +5,7 @@ require the administrator's explicit activation; successful writes are recorded
 as evidence, never inferred from a successful list request.
 """
 
+import base64
 import os
 
 import httpx
@@ -16,8 +17,10 @@ SELLER_INFO_PATH = "/v1/seller/info"
 CHAT_LIST_PATH = "/v3/chat/list"
 CHAT_HISTORY_PATH = "/v3/chat/history"
 CHAT_SEND_MESSAGE_PATH = "/v1/chat/send/message"
+CHAT_SEND_FILE_PATH = "/v1/chat/send/file"
 CHAT_START_PATH = "/v1/chat/start"
 FBS_POSTING_LIST_PATH = "/v4/posting/fbs/list"
+PRODUCT_LIST_PATH = "/v3/product/list"
 
 
 class OzonError(Exception):
@@ -31,6 +34,7 @@ class OzonAdapter:
     def __init__(self, account, settings=None, transport=None):
         client_options = {}
         configured_timeout = os.environ.get("FOLIO_OZON_HTTP_TIMEOUT_SECONDS", "").strip()
+        self.write_timeout = None
         if configured_timeout:
             try:
                 timeout = float(configured_timeout)
@@ -39,6 +43,10 @@ class OzonAdapter:
             if timeout <= 0:
                 raise RuntimeError("FOLIO_OZON_HTTP_TIMEOUT_SECONDS must be a positive number")
             client_options["timeout"] = timeout
+        else:
+            # Ozon can take longer than httpx's five-second default to confirm
+            # a write. Keep the short connection limit and never retry a write.
+            self.write_timeout = httpx.Timeout(30.0, connect=5.0)
         self.client = httpx.Client(
             base_url="https://api-seller.ozon.ru",
             headers={
@@ -55,9 +63,25 @@ class OzonAdapter:
 
     def post(self, path, body, write=False):
         try:
-            response = self.client.post(path, json=body)
-        except (httpx.ConnectError, httpx.ConnectTimeout):
+            options = {"timeout": self.write_timeout} if write and self.write_timeout else {}
+            response = self.client.post(path, json=body, **options)
+        except httpx.ConnectError:
             raise OzonError("connection_failed") from None
+        except httpx.ConnectTimeout:
+            raise OzonError(
+                "transport_unknown" if write else "connection_failed",
+                unknown=write,
+            ) from None
+        except httpx.ReadTimeout:
+            raise OzonError(
+                "read_timeout_unknown" if write else "transport_failed",
+                unknown=write,
+            ) from None
+        except httpx.WriteTimeout:
+            raise OzonError(
+                "write_timeout_unknown" if write else "transport_failed",
+                unknown=write,
+            ) from None
         except httpx.RequestError:
             raise OzonError(
                 "transport_unknown" if write else "transport_failed", unknown=write
@@ -102,15 +126,20 @@ class OzonAdapter:
         result = self.post(
             FBS_POSTING_LIST_PATH,
             {
-                "dir": "ASC",
+                "sort_dir": "ASC",
                 "filter": {"since": since, "to": until},
                 "limit": 1,
-                "offset": 0,
+                "cursor": "",
             },
         )
-        if not isinstance(result.get("postings"), list):
+        page = (
+            result.get("result")
+            if isinstance(result.get("result"), dict)
+            else result
+        )
+        if not isinstance(page.get("postings"), list):
             raise OzonError("orders_contract_changed")
-        return result
+        return page
 
     def chats(self):
         cursor, seen = "", set()
@@ -148,34 +177,90 @@ class OzonAdapter:
         for rows, _ in self.order_pages(since, until):
             yield from rows
 
-    def order_pages(self, since, until, offset=0):
+    def products(self):
+        """Read seller articles from the paginated product catalogue."""
+        last_id, seen = "", set()
         while True:
+            result = self.post(
+                PRODUCT_LIST_PATH,
+                {"filter": {"visibility": "ALL"}, "last_id": last_id, "limit": 100},
+            )
+            page = result.get("result") if isinstance(result.get("result"), dict) else result
+            rows = page.get("items")
+            if not isinstance(rows, list):
+                raise OzonError("product_list_contract_changed")
+            yield from rows
+            cursor = page.get("last_id")
+            if not cursor:
+                return
+            if not rows or cursor in seen:
+                raise OzonError("product_cursor_stalled")
+            seen.add(cursor)
+            last_id = cursor
+
+    def order_pages(self, since, until, cursor="", order_numbers=None):
+        # Numeric offsets belonged to the retired v3 contract. Restarting an
+        # interrupted legacy page is safe because imports are idempotent.
+        cursor = cursor if isinstance(cursor, str) else ""
+        seen = set()
+        while True:
+            filters = {"since": since, "to": until}
+            if order_numbers:
+                filters["order_numbers"] = list(order_numbers)
             result = self.post(
                 FBS_POSTING_LIST_PATH,
                 {
-                    "dir": "ASC",
-                    "filter": {"since": since, "to": until},
+                    "sort_dir": "ASC",
+                    "filter": filters,
                     "limit": 100,
-                    "offset": offset,
+                    "cursor": cursor,
                 },
             )
-            rows = result.get("postings")
+            page = (
+                result.get("result")
+                if isinstance(result.get("result"), dict)
+                else result
+            )
+            rows = page.get("postings")
             if not isinstance(rows, list):
                 raise OzonError("orders_contract_changed")
-            yield rows, offset + len(rows) if result.get("has_next") else None
-            if not result.get("has_next"):
+            next_cursor = page.get("cursor") if page.get("has_next") else None
+            yield rows, next_cursor
+            if not page.get("has_next"):
                 return
-            if not rows:
+            if not rows or not next_cursor or next_cursor in seen:
                 raise OzonError("orders_cursor_stalled")
-            offset += len(rows)
+            seen.add(next_cursor)
+            cursor = next_cursor
 
     def send(self, chat_id, text):
         result = self.post(
             CHAT_SEND_MESSAGE_PATH, {"chat_id": chat_id, "text": text}, write=True
         )
-        message_id = (result.get("result") or result).get("message_id")
-        if not message_id:
+        payload = result.get("result", result)
+        # A string can be either a real message ID or merely an acknowledgement
+        # such as "success". Never persist an acknowledgement as a message ID:
+        # the actual seller message must be matched from chat history.
+        message_id = payload.get("message_id") if isinstance(payload, dict) else payload
+        if (isinstance(message_id, bool)
+                or not isinstance(message_id, (str, int))
+                or not message_id
+                or str(message_id).casefold() in {"success", "ok"}):
             raise OzonError("send_result_unknown", unknown=True)
+        return str(message_id)
+
+    def send_file(self, chat_id, filename, content):
+        result = self.post(
+            CHAT_SEND_FILE_PATH,
+            {"chat_id": chat_id, "name": filename,
+             "base64_content": base64.b64encode(content).decode("ascii")},
+            write=True,
+        )
+        payload = result.get("result", result)
+        message_id = payload.get("message_id") if isinstance(payload, dict) else payload
+        if (isinstance(message_id, bool) or not isinstance(message_id, (str, int))
+                or not message_id or str(message_id).casefold() in {"success", "ok"}):
+            raise OzonError("send_file_result_unknown", unknown=True)
         return str(message_id)
 
     def start(self, posting):

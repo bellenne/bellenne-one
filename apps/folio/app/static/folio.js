@@ -3,8 +3,13 @@
 const NODE_LABELS = {
   start: "Начало", send: "Отправить без ожидания", ask_text: "Задать вопрос",
   ask_photo: "Запросить фото", choice: "Предложить выбор шаблона",
+  ask_input: "Принять текст или фото",
   condition: "Проверить условие", wait: "Ждать ответ", handoff: "Передать менеджеру",
   confirm: "Попросить подтверждение", retailcrm: "Создать сделку в RetailCRM",
+  await_mockup: "Ждать макет менеджера", approval: "Согласовать макет",
+  retailcrm_note: "Записать итог в RetailCRM",
+  mattermost: "Сообщение в Mattermost",
+  image_worker: "Создать макет через воркер",
   ready: "Проверить готовность", end: "Завершить"
 };
 const NODE_HELP = {
@@ -12,12 +17,18 @@ const NODE_HELP = {
   send: "Отправляет текст и сразу идёт дальше. Ответ покупателя не ожидается и не сохраняется.",
   ask_text: "Отправляет вопрос, ждёт ответ покупателя и сохраняет его в бриф.",
   ask_photo: "Запрашивает и сохраняет фотографии покупателя.",
+  ask_input: "Один ответ: текст сохранится в выбранное поле, фото — в фотографии. Для каждого типа ответа настройте свой переход.",
   choice: "Показывает разрешённые для SKU шаблоны и сохраняет выбор.",
   condition: "Выбирает дальнейший путь по уже собранному значению.",
   wait: "Останавливает сценарий до следующего ответа покупателя.",
   handoff: "Останавливает бота и переводит диалог менеджеру.",
   confirm: "Просит покупателя подтвердить собранный бриф.",
   retailcrm: "Создаёт заказ в RetailCRM по собранному брифу и продолжает сценарий после подтверждения API.",
+  await_mockup: "Ожидает, пока менеджер отправит покупателю изображение макета из чата Folio.",
+  approval: "После отправки макета отправляет настраиваемый текст и ждёт подтверждение, отказ или истечение срока.",
+  retailcrm_note: "Дописывает итог в комментарий клиента той же сделки RetailCRM, сохраняя старый текст.",
+  mattermost: "Отправляет текст в чат Mattermost через настроенный входящий webhook. При ошибке следует по отдельной ветке.",
+  image_worker: "После получения одного фото ставит обработку в очередь. Следующий шаг начнётся после результата воркера.",
   ready: "Проверяет обязательные данные перед готовностью брифа.",
   end: "Завершает сценарий без дополнительных действий."
 };
@@ -30,8 +41,8 @@ const PRODUCT_FIELDS = {
   collage: ["photos", "caption", "wishes"],
   template_art: ["photos", "template_id", "wishes"]
 };
-const TEXT_KINDS = new Set(["send", "ask_text", "ask_photo", "choice", "wait", "confirm"]);
-const FIELD_KINDS = new Set(["ask_text", "ask_photo", "choice"]);
+const TEXT_KINDS = new Set(["send", "ask_text", "ask_photo", "ask_input", "choice", "wait", "confirm", "approval"]);
+const FIELD_KINDS = new Set(["ask_text", "ask_photo", "ask_input", "choice"]);
 const TERMINAL_KINDS = new Set(["ready", "end", "handoff"]);
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -97,7 +108,7 @@ function initializeBuilder(root) {
   function renderEdges() {
     edgeLayer.replaceChildren();
     graph.nodes.forEach((source) => {
-      [["next", "Далее"], ["otherwise", "Иначе"], ["error", "Ошибка"]].forEach(([field, label]) => {
+      [["next", source.kind === "ask_input" ? "Текст" : "Далее"], ["otherwise", source.kind === "ask_input" ? "Фото" : "Иначе"], ["error", "Ошибка"]].forEach(([field, label]) => {
         const target = nodeById(source[field]);
         if (!target) return;
         const group = svgElement("g", { class: `folio-edge folio-edge-${field}` });
@@ -186,7 +197,7 @@ function initializeBuilder(root) {
     const fieldSelect = inspector.querySelector('[data-field="field"]');
     if (fieldSelect) {
       const fields = (PRODUCT_FIELDS[productType] || []).filter((field) =>
-        node.kind === "ask_text" ? !["photos", "template_id"].includes(field) : true
+        ["ask_text", "ask_input"].includes(node.kind) ? !["photos", "template_id"].includes(field) : true
       );
       fieldSelect.replaceChildren(new Option("Выберите данные", ""));
       fields.forEach((field) => fieldSelect.add(new Option(FIELD_LABELS[field], field)));
@@ -196,31 +207,53 @@ function initializeBuilder(root) {
       if (["next", "otherwise", "error"].includes(key)) targetOptions(control, node[key]);
       else if (key === "required") control.checked = Boolean(node[key]);
       else if (key === "choices") control.value = (node[key] || []).join("\n");
+      else if (key === "status") {
+        const value = node[key] || "";
+        const retained = control.querySelector('[data-retained-status]');
+        if (retained) retained.remove();
+        if (value && !Array.from(control.options).some((option) => option.value === value)) {
+          const option = new Option(`${value} (сохранённый код)`, value);
+          option.dataset.retainedStatus = "";
+          control.add(option);
+        }
+        control.value = value;
+      }
       else control.value = node[key] ?? "";
     });
     inspector.querySelectorAll("[data-for]").forEach((element) => {
       const kind = node.kind;
       const rule = element.dataset.for;
       const visible = (rule === "text" && TEXT_KINDS.has(kind)) ||
-        (rule === "field" && ["ask_text", "condition"].includes(kind)) ||
-        (rule === "required" && kind === "ask_text") ||
-        (rule === "photo" && kind === "ask_photo") ||
+        (rule === "field" && ["ask_text", "ask_input", "condition"].includes(kind)) ||
+        (rule === "required" && ["ask_text", "ask_input"].includes(kind)) ||
+        (rule === "photo" && ["ask_photo", "ask_input"].includes(kind)) ||
         (rule === "accept" && ["ask_photo", "confirm"].includes(kind)) ||
-        (rule === "max_length" && kind === "ask_text") ||
+        (rule === "max_length" && ["ask_text", "ask_input"].includes(kind)) ||
         (rule === "condition" && kind === "condition") ||
-        (rule === "retailcrm" && kind === "retailcrm") ||
+        (rule === "otherwise" && ["condition", "ask_input"].includes(kind)) ||
+        (rule === "retailcrm" && ["retailcrm", "retailcrm_note"].includes(kind)) ||
+        (rule === "retailcrm-create" && kind === "retailcrm") ||
+        (rule === "mattermost" && kind === "mattermost") ||
+        (rule === "image-worker" && kind === "image_worker") ||
+        (rule === "approval" && kind === "approval") ||
         (rule === "next" && !TERMINAL_KINDS.has(kind)) ||
-        (rule === "error" && ["ask_text", "ask_photo", "choice", "confirm", "retailcrm"].includes(kind));
+        (rule === "error" && ["ask_text", "ask_photo", "ask_input", "choice", "confirm", "approval", "retailcrm", "retailcrm_note", "mattermost", "image_worker"].includes(kind));
       element.hidden = !visible;
     });
     const textLabel = inspector.querySelector("[data-text-label]");
-    if (textLabel) textLabel.textContent = ["ask_text", "ask_photo", "choice", "confirm", "wait"].includes(node.kind) ? "Вопрос покупателю" : "Сообщение покупателю";
+    if (textLabel) textLabel.textContent = ["ask_text", "ask_photo", "ask_input", "choice", "confirm", "wait", "approval"].includes(node.kind) ? "Вопрос покупателю" : "Сообщение покупателю";
     const fieldLabel = inspector.querySelector("[data-field-label]");
-    if (fieldLabel) fieldLabel.textContent = node.kind === "condition" ? "Какие собранные данные проверить" : "Что сохранить в бриф";
+    if (fieldLabel) fieldLabel.textContent = node.kind === "condition" ? "Какие собранные данные проверить" : node.kind === "ask_input" ? "Куда сохранить текстовый ответ" : "Что сохранить в бриф";
+    const otherwiseLabel = inspector.querySelector("[data-otherwise-label]");
+    if (otherwiseLabel) otherwiseLabel.textContent = node.kind === "ask_input" ? "Если покупатель отправил фото" : "Если условие не выполнено";
+    const requiredLabel = inspector.querySelector("[data-required-label]");
+    if (requiredLabel) requiredLabel.textContent = node.kind === "ask_input" ? "Полученное фото обязательно для готового брифа" : "Ответ обязателен для готового брифа";
     const conditionHelp = inspector.querySelector("[data-condition-field-help]");
     if (conditionHelp) conditionHelp.hidden = node.kind !== "condition";
     const errorLabel = inspector.querySelector("[data-error-label]");
-    if (errorLabel) errorLabel.textContent = node.kind === "retailcrm" ? "Если RetailCRM отклонила создание" : "Если ответ не подходит";
+    if (errorLabel) errorLabel.textContent = ["retailcrm", "retailcrm_note"].includes(node.kind) ? "Если RetailCRM отклонила действие" : node.kind === "mattermost" ? "Если Mattermost отклонил сообщение" : node.kind === "image_worker" ? "Если обработка не удалась" : "Если ответ не подходит";
+    const crmCommentLabel = inspector.querySelector("[data-retailcrm-comment-label]");
+    if (crmCommentLabel) crmCommentLabel.textContent = node.kind === "retailcrm_note" ? "Итог в комментарии клиента RetailCRM" : "Комментарий менеджеру RetailCRM";
   }
 
   function renderStepList() {
@@ -257,14 +290,21 @@ function initializeBuilder(root) {
         required: false
       });
     }
-    if (kind === "ask_photo") Object.assign(node, { min: null, max: null, accept: "" });
+    if (["ask_photo", "ask_input"].includes(kind)) Object.assign(node, { min: null, max: null, accept: "" });
+    if (kind === "ask_input") node.otherwise = "";
     if (kind === "ask_text") node.max_length = null;
     if (kind === "condition") Object.assign(node, { field: "", equals: "", otherwise: "" });
     if (kind === "confirm") node.accept = "";
+    if (kind === "approval") Object.assign(node, { dictionary_version: 1, hours: 6, error: "" });
     if (kind === "retailcrm") Object.assign(node, {
       comment: "Заказ Ozon: {posting}\nТовар: {product_name}\nSKU: {sku}\nКоличество: {quantity}\n\n{summary}",
       status: "", order_type: "", order_method: "", error: ""
     });
+    if (kind === "retailcrm_note") Object.assign(node, {
+      comment: "Согласование макета: {approval_outcome}. Отправление: {posting}.", status: "", error: ""
+    });
+    if (kind === "mattermost") Object.assign(node, { message: "", error: "" });
+    if (kind === "image_worker") Object.assign(node, { prompt: "", error: "" });
     return node;
   }
 
@@ -282,21 +322,27 @@ function initializeBuilder(root) {
     const add = (node, message) => problems.push({ node, message });
     const starts = graph.nodes.filter((node) => node.kind === "start");
     if (starts.length !== 1) add(starts[0] || graph.nodes[0], "На схеме должен быть ровно один старт.");
-    if (!graph.nodes.some((node) => node.kind === "ready")) add(graph.nodes[0], "Добавьте шаг проверки брифа.");
+    if (!graph.nodes.some((node) => ["ready", "approval"].includes(node.kind))) add(graph.nodes[0], "Добавьте шаг проверки брифа или согласования макета.");
     graph.nodes.forEach((node) => {
       if (TEXT_KINDS.has(node.kind) && !(node.text || "").trim()) add(node, "Заполните текст шага.");
       if (!TERMINAL_KINDS.has(node.kind) && !node.next) add(node, "Укажите следующий шаг.");
       ["next", "otherwise", "error"].forEach((key) => {
         if (node[key] && !ids.has(node[key])) add(node, `Переход «${key}» ведёт на отсутствующий шаг.`);
       });
-      if (node.kind === "ask_photo" && (!node.min || !node.max || node.min > node.max)) add(node, "Проверьте минимум и максимум фотографий.");
-      if (node.kind === "ask_photo" && productType === "collage" && node.max > 8) add(node, "Для коллажа разрешено не более 8 фотографий.");
+      if (["ask_photo", "ask_input"].includes(node.kind) && (!node.min || !node.max || node.min > node.max)) add(node, "Проверьте минимум и максимум фотографий.");
+      if (["ask_photo", "ask_input"].includes(node.kind) && productType === "collage" && node.max > 8) add(node, "Для коллажа разрешено не более 8 фотографий.");
+      if (node.kind === "ask_input" && !node.otherwise) add(node, "Укажите переход для фотографии.");
       if (node.kind === "confirm" && !(node.accept || "").trim()) add(node, "Укажите ответ, подтверждающий бриф.");
+      if (node.kind === "approval" && (!(node.hours > 0) || node.hours > 72)) add(node, "Укажите срок ожидания до 72 часов.");
       if (node.kind === "condition" && !node.field) add(node, "Выберите собранные данные для проверки.");
       if (node.kind === "condition" && node.field && !graph.nodes.some((candidate) => FIELD_KINDS.has(candidate.kind) && candidate.field === node.field && reaches(candidate.id, node.id))) add(node, `До этого условия ни один шаг «Задать вопрос» не сохраняет «${FIELD_LABELS[node.field] || node.field}».`);
       if (node.kind === "condition" && !node.otherwise) add(node, "Выберите переход «Если условие не выполнено».");
-      if (node.kind === "retailcrm" && !(node.comment || "").trim()) add(node, "Заполните комментарий для сделки RetailCRM.");
-      if (node.kind === "retailcrm" && !node.error) add(node, "Выберите переход на случай отказа RetailCRM.");
+      if (["retailcrm", "retailcrm_note"].includes(node.kind) && !(node.comment || "").trim()) add(node, "Заполните комментарий для сделки RetailCRM.");
+      if (["retailcrm", "retailcrm_note"].includes(node.kind) && !node.error) add(node, "Выберите переход на случай отказа RetailCRM.");
+      if (node.kind === "mattermost" && !(node.message || "").trim()) add(node, "Заполните сообщение Mattermost.");
+      if (node.kind === "mattermost" && !node.error) add(node, "Выберите переход на случай отказа Mattermost.");
+      if (node.kind === "image_worker" && !(node.prompt || "").trim()) add(node, "Заполните инструкцию обработки.");
+      if (node.kind === "image_worker" && !node.error) add(node, "Выберите переход на случай ошибки воркера.");
     });
     const results = root.querySelector("[data-validation-results]");
     results.replaceChildren();
@@ -337,9 +383,9 @@ function initializeBuilder(root) {
   }
   const palette = root.querySelector("[data-node-palette]");
   const advancedPalette = root.querySelector("[data-node-palette-advanced]");
-  ["send", "ask_text", "ask_photo", ...(productType === "template_art" ? ["choice"] : []), "retailcrm", "handoff", "ready", "end"]
+  ["send", "ask_text", "ask_photo", "ask_input", ...(productType === "template_art" ? ["choice"] : []), "retailcrm", "image_worker", "await_mockup", "approval", "retailcrm_note", "handoff", "ready", "end"]
     .forEach((kind) => addPaletteButton(palette, kind));
-  ["condition", "wait", "confirm"].forEach((kind) => addPaletteButton(advancedPalette, kind));
+  ["condition", "wait", "confirm", "mattermost"].forEach((kind) => addPaletteButton(advancedPalette, kind));
 
   inspector.addEventListener("input", (event) => {
     const node = nodeById(selected);
@@ -348,7 +394,7 @@ function initializeBuilder(root) {
     const key = control.dataset.field;
     if (key === "required") node[key] = control.checked;
     else if (key === "choices") node[key] = control.value.split("\n").map((item) => item.trim()).filter(Boolean);
-    else if (["min", "max", "max_length"].includes(key)) node[key] = control.value ? Number(control.value) : null;
+    else if (["min", "max", "max_length", "hours"].includes(key)) node[key] = control.value ? Number(control.value) : null;
     else node[key] = control.value;
     markDirty();
     renderEdges();
@@ -454,6 +500,129 @@ document.querySelectorAll("[data-mapping-form]").forEach((form) => {
   };
   scenario.addEventListener("change", update);
   update();
+
+  const account = form.querySelector("[data-catalog-account]");
+  const search = form.querySelector("[data-article-search]");
+  const value = form.querySelector("[data-article-value]");
+  const list = form.querySelector("[data-article-options]");
+  const status = document.querySelector("[data-catalog-status]");
+  const refreshAccount = document.querySelector("[data-refresh-account]");
+  if (!account || !search || !value || !list || !status) return;
+  let articles = [];
+  let requestNumber = 0;
+
+  function closeList() {
+    list.hidden = true;
+    search.setAttribute("aria-expanded", "false");
+  }
+
+  function selectArticle(article) {
+    search.value = article;
+    value.value = article;
+    search.setCustomValidity("");
+    closeList();
+  }
+
+  function showMatches() {
+    list.replaceChildren();
+    const query = search.value.trim().toLocaleLowerCase();
+    const matches = articles.filter((article) => article.toLocaleLowerCase().includes(query));
+    matches.slice(0, 50).forEach((article) => {
+      const option = document.createElement("button");
+      option.type = "button";
+      option.className = "folio-article-option";
+      option.setAttribute("role", "option");
+      option.textContent = article;
+      option.addEventListener("mousedown", (event) => event.preventDefault());
+      option.addEventListener("click", () => selectArticle(article));
+      list.appendChild(option);
+    });
+    if (!matches.length) {
+      const empty = document.createElement("span");
+      empty.className = "folio-article-empty";
+      empty.textContent = articles.length ? "Артикул не найден" : "Список товаров пока пуст";
+      list.appendChild(empty);
+    } else if (matches.length > 50) {
+      const hint = document.createElement("span");
+      hint.className = "folio-article-empty";
+      hint.textContent = "Показаны первые 50 — уточните поиск";
+      list.appendChild(hint);
+    }
+    list.hidden = false;
+    search.setAttribute("aria-expanded", "true");
+  }
+
+  async function loadArticles(resetSelection = true) {
+    const current = ++requestNumber;
+    if (resetSelection) {
+      articles = [];
+      search.value = "";
+      value.value = "";
+      closeList();
+    }
+    if (refreshAccount) refreshAccount.value = account.value;
+    if (!account.value) {
+      status.textContent = "Сначала подключите кабинет Ozon.";
+      return;
+    }
+    status.textContent = "Загружаем список товаров Ozon…";
+    try {
+      const response = await fetch(`${form.dataset.productsUrl}?account_id=${encodeURIComponent(account.value)}`);
+      if (!response.ok) throw new Error("catalog_request_failed");
+      const data = await response.json();
+      if (current !== requestNumber) return;
+      articles = Array.isArray(data.products) ? data.products : [];
+      if (data.state === "pending" || data.state === "running") {
+        status.textContent = articles.length
+          ? `Доступно ${articles.length} артикулов; обновление продолжается…`
+          : "Получаем товары из Ozon…";
+        window.setTimeout(() => { if (current === requestNumber) loadArticles(false); }, 1500);
+      } else if (data.state === "failed") {
+        status.textContent = articles.length
+          ? `Доступно ${articles.length} ранее загруженных артикулов. Не удалось обновить список; проверьте доступ к Ozon и повторите.`
+          : "Не удалось получить товары. Проверьте доступ к Ozon и нажмите «Обновить товары из Ozon».";
+      } else {
+        status.textContent = articles.length
+          ? `Доступно ${articles.length} артикулов продавца.`
+          : "В этом кабинете товары не найдены. Проверьте кабинет или обновите список.";
+      }
+    } catch (_) {
+      if (current === requestNumber) status.textContent = "Не удалось загрузить список. Обновите страницу и повторите.";
+    }
+  }
+
+  account.addEventListener("change", () => loadArticles());
+  search.addEventListener("focus", showMatches);
+  search.addEventListener("input", () => {
+    value.value = "";
+    search.setCustomValidity("");
+    showMatches();
+  });
+  search.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeList();
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      if (list.hidden) showMatches();
+      list.querySelector("button")?.focus();
+    }
+  });
+  list.addEventListener("keydown", (event) => {
+    const options = [...list.querySelectorAll("button")];
+    const index = options.indexOf(document.activeElement);
+    if (event.key === "Escape") { closeList(); search.focus(); }
+    if (event.key === "ArrowDown") { event.preventDefault(); options[Math.min(index + 1, options.length - 1)]?.focus(); }
+    if (event.key === "ArrowUp") { event.preventDefault(); if (index <= 0) search.focus(); else options[index - 1].focus(); }
+  });
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest(".folio-article-field")) closeList();
+  });
+  form.addEventListener("submit", (event) => {
+    if (value.value && articles.includes(value.value)) return;
+    event.preventDefault();
+    search.setCustomValidity("Выберите артикул из списка Ozon");
+    search.reportValidity();
+  });
+  loadArticles();
 });
 
 document.querySelectorAll("[data-open-drawer]").forEach((button) => {

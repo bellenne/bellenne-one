@@ -1,9 +1,11 @@
 {% extends "base.html" %}{% block content %}
-<div class="page-header"><div><h1 class="page-title">Настройки Folio</h1><p class="page-subtitle">Подключения Ozon и RetailCRM, права и запуск автоматизации</p></div></div>
+<div class="page-header"><div><h1 class="page-title">Настройки Folio</h1><p class="page-subtitle">Подключения, права и запуск автоматизации</p></div></div>
 <nav class="folio-settings-nav" aria-label="Разделы настроек">
   <a class="button button-secondary" href="{{ prefix }}/settings">Проверка и запуск</a>
   <a class="button button-secondary" href="{{ prefix }}/settings/ozon">Ozon</a>
   <a class="button button-secondary" href="{{ prefix }}/settings/retailcrm">RetailCRM</a>
+  <a class="button button-secondary" href="{{ prefix }}/settings/mattermost">Mattermost</a>
+  <a class="button button-secondary" href="{{ prefix }}/settings/image-worker">Воркер изображений</a>
   <a class="button button-secondary" href="{{ prefix }}/catalog">Товары и шаблоны</a>
   <a class="button button-secondary" href="{{ prefix }}/scenarios">Сценарии</a>
   <a class="button button-secondary" href="{{ prefix }}/settings/automation">Автоматизация</a>
@@ -18,7 +20,7 @@
     <li class="{{ 'is-complete' if onboarding.connection }}"><a href="{{ prefix }}/settings/ozon">1. Подключить Ozon</a><span>{{ 'Готово' if onboarding.connection else 'Требуется настройка' }}</span></li>
     <li class="{{ 'is-complete' if onboarding.capabilities }}"><a href="{{ prefix }}/settings/ozon">2. Проверить доступ</a><span>{{ 'Подтверждено' if onboarding.capabilities else 'Не подтверждено' }}</span></li>
     <li class="{{ 'is-complete' if onboarding.mappings }}"><a href="{{ prefix }}/catalog">3. Сопоставить товары</a><span>{{ 'Настроено' if onboarding.mappings else 'Нет привязок' }}</span></li>
-    <li class="{{ 'is-complete' if onboarding.scenarios }}"><a href="{{ prefix }}/scenarios">4. Подготовить сценарии</a><span>{{ 'Готово' if onboarding.scenarios else 'Не все типы готовы' }}</span></li>
+    <li class="{{ 'is-complete' if onboarding.scenarios }}"><a href="{{ prefix }}/scenarios">4. Подготовить сценарии</a><span>{{ 'Готово' if onboarding.scenarios else 'Нет опубликованного сценария для привязанного артикула' }}</span></li>
     <li><a href="{{ prefix }}/scenarios">5. Выполнить симуляцию</a><span>Без отправки в Ozon</span></li>
     <li class="{{ 'is-complete' if onboarding.automation }}"><a href="{{ prefix }}/settings/automation">6. Включить автоматизацию</a><span>{{ 'Включена' if onboarding.automation else 'Выключена' }}</span></li>
   </ol>
@@ -33,10 +35,13 @@
   {% for account in accounts %}
     {% set caps = account_capabilities[account.id] %}
     {% set last_job = account_jobs.get(account.id) %}
+    {% set error_job = account_error_jobs.get(account.id) %}
+    {% set uncertain_starts = account_unknown_starts.get(account.id, []) %}
     <article class="folio-account-card">
       <div class="folio-account-head"><div><h3>{{ account.name }}</h3><p>Client ID: {{ account.client_id }} · API-ключ настроен</p></div><div class="folio-account-meta">{% if account.checked_at %}<span class="field-help">Проверено {{ account.checked_at|folio_time }}</span>{% endif %}<span class="field-help">Последняя синхронизация: {{ account.last_success|folio_time if account.last_success else 'ещё не выполнялась' }}</span></div></div>
       {% if last_job and last_job.state in ['pending','running'] %}<div class="status status-warning">{{ job_labels.get(last_job.kind, 'Операция') }}: {{ state_labels.get(last_job.state, 'Выполняется') }}. Обновите страницу через несколько секунд.</div>{% endif %}
-      {% if account.error %}{% set problem = error_details(account.error) %}<div class="status status-negative"><strong>{{ problem.title }}</strong><span>{{ problem.action }}</span>{% if last_job %}<details><summary>Технические детали</summary><span>Операция Folio №{{ last_job.id }} · {{ last_job.finished_at|folio_time }}</span></details>{% endif %}</div>{% endif %}
+      {% if account.error and (not error_job or error_job.kind != 'start_chat') %}{% set problem = error_details(account.error) %}<div class="status status-negative"><strong>{{ problem.title }}</strong><span>{{ problem.action }}</span>{% if error_job %}<details><summary>Технические детали</summary><span>Операция Folio №{{ error_job.id }} · {{ error_job.finished_at|folio_time }}</span></details>{% endif %}</div>{% endif %}
+      {% for start in uncertain_starts %}{% set problem = operation_error_details('start_chat', start.state, start.error) %}<div class="status status-warning"><strong>{{ problem.title }} — отправление {{ start.posting }}</strong><span>{{ problem.action }}</span><details><summary>Технические детали</summary><span>Операция Folio №{{ start.id }} · {{ start.finished_at|folio_time }} · {{ start.error }}</span></details></div>{% endfor %}
       <div class="folio-capabilities" aria-label="Результаты проверки доступа">
         {% for key, title in [('account','Кабинет'),('orders','Заказы'),('list','Чтение чатов'),('history','История сообщений'),('send','Отправка сообщений'),('attachments','Вложения'),('start','Создание чата')] %}
           {% set value = caps.get(key) %}
@@ -65,10 +70,11 @@
 {% if section == 'retailcrm' %}
 <section class="card card-body folio-stack folio-section">
   <div><h2>Подключение RetailCRM</h2><p class="field-help">Folio создаёт заказ на отдельном шаге опубликованного сценария. API-ключ должен иметь права чтения и изменения заказов.</p></div>
+  {% if retailcrm_media_url_error %}{% set media_problem = error_details(retailcrm_media_url_error) %}<div class="status status-warning"><strong>{{ media_problem.title }}</strong><p>{{ media_problem.action }}</p><p>Если сценарий передаёт фото через «{summary}» или «{photos}», сделка не будет создана, пока адрес недоступен.</p></div>{% endif %}
   {% if retailcrm_config %}
     {% set caps = retailcrm_capabilities %}
     <div class="folio-capabilities" aria-label="Результаты проверки RetailCRM">
-      {% for key, title in [('order_read','Чтение заказов'),('order_write','Создание заказов'),('site','Доступ к магазину')] %}
+      {% for key, title in [('order_read','Чтение заказов'),('order_write','Изменение заказов'),('reference_read','Справочник статусов'),('site','Доступ к магазину')] %}
         {% set value = caps.get(key) %}
         <div class="folio-capability-item"><span class="badge {{ 'badge-positive' if value is sameas true else 'badge-negative' if value is sameas false else 'badge-neutral' }}">{{ title }}: {{ 'доступно' if value is sameas true else 'недоступно' if value is sameas false else 'не проверено' }}</span></div>
       {% endfor %}
@@ -86,22 +92,51 @@
 </section>
 {% endif %}
 
+{% if section == 'mattermost' %}
+<section class="card card-body folio-stack folio-section">
+  <div><h2>Mattermost</h2><p class="field-help">Создайте входящий webhook в Mattermost и сохраните его здесь. Сообщения отправляются только из опубликованного сценария при прохождении узла «Сообщение в Mattermost».</p></div>
+  <div class="status {{ 'status-success' if mattermost_config else 'status-warning' }}">{{ 'Webhook настроен. Адрес скрыт; для замены введите новый.' if mattermost_config else 'Webhook ещё не настроен.' }}</div>
+  <form method="post" action="{{ prefix }}/settings/mattermost" class="folio-stack">{{ token() }}
+    <label class="field">{{ 'Заменить входящий webhook' if mattermost_config else 'Входящий webhook' }}<input class="input" type="password" name="webhook_url" autocomplete="new-password" {{ '' if mattermost_config else 'required' }} placeholder="https://mattermost.example.com/hooks/…"><span class="field-help">HTTPS-адрес из настроек Incoming Webhooks Mattermost. Пустое поле сохраняет существующий адрес.</span></label>
+    <div class="form-actions"><button class="button button-primary">Сохранить webhook</button></div>
+  </form>
+</section>
+{% endif %}
+
+{% if section == 'image-worker' %}
+<section class="card card-body folio-stack folio-section">
+  <div><h2>Воркер изображений</h2><p class="field-help">Подключение FolioImageWorker для страницы «Задания на макеты». Сохранение и проверка не создают задания и не отправляют фото.</p></div>
+  {% if image_worker_config %}
+    {% if image_worker_config.checked_at %}<div class="status {{ 'status-error' if image_worker_config.error else 'status-success' }}" role="status"><strong>{{ 'Подключение не подтверждено' if image_worker_config.error else 'Воркер доступен, API-ключ подходит' }}</strong><p>Последняя проверка: {{ image_worker_config.checked_at|folio_time }}</p>{% if image_worker_config.error %}<p>{{ {'image_worker_health_failed':'Воркер ответил некорректно на проверку состояния.', 'image_worker_auth_failed':'API-ключ не принят воркером. Проверьте ключ на обеих сторонах.', 'image_worker_probe_failed':'Не удалось подтвердить доступ к API заданий.', 'image_worker_unreachable':'Воркер недоступен по указанному адресу.', 'image_worker_credentials_unavailable':'Не удалось расшифровать сохранённые ключи. Введите их заново.'}.get(image_worker_config.error, 'Проверьте настройки подключения и повторите проверку.') }}</p>{% endif %}</div>
+    {% else %}<div class="status status-warning">Подключение сохранено, но ещё не проверено.</div>{% endif %}
+  {% else %}<div class="status status-warning">Воркер изображений ещё не подключён.</div>{% endif %}
+  <form method="post" action="{{ prefix }}/settings/image-worker" class="folio-stack">{{ token() }}
+    <div class="form-grid form-grid-2">
+      <label class="field">Адрес API воркера<input class="input" type="url" name="base_url" value="{{ image_worker_config.base_url if image_worker_config else '' }}" placeholder="http://192.168.1.10:8000" required><span class="field-help">Адрес ПК с воркером, доступный серверу Folio. Без пути <code>/v1</code>.</span></label>
+      <label class="field">{{ 'Заменить ключ воркера' if image_worker_config else 'Ключ воркера' }}<input class="input" type="password" name="api_key" autocomplete="new-password" {{ '' if image_worker_config else 'required' }} placeholder="{{ 'Оставьте пустым, чтобы сохранить текущий' if image_worker_config else '' }}"><span class="field-help">Значение <code>WORKER_API_KEY</code> из .env воркера.</span></label>
+    </div>
+    <div class="form-actions"><button class="button button-primary">Сохранить подключение</button></div>
+  </form>
+  {% if image_worker_config %}<form method="post" action="{{ prefix }}/settings/image-worker/probe">{{ token() }}<button class="button button-secondary">Проверить доступ и API-ключ</button></form>{% endif %}
+  <p class="field-help">Folio сам формирует ссылки на исходное фото и адреса уведомлений из <code>FOLIO_PUBLIC_BASE_URL</code>. Дополнительные токены вводить не нужно.</p>
+</section>
+{% endif %}
+
 {% if section == 'automation' %}
 <section class="card card-body folio-stack folio-section"><h2>Правила работы</h2><form method="post" action="{{ prefix }}/settings/automation" class="folio-stack">{{ token() }}<div class="form-grid form-grid-2">
-  <label class="field">N часов до готовности к передаче<input class="input" name="handoff_hours" type="number" min="0" step="any" value="{{ settings.handoff_hours if settings.handoff_hours is defined and settings.handoff_hours is not none else '' }}"></label>
-  <label class="field">Отсчитывать N от<select class="select" name="timer_origin" required><option value="">Выберите</option><option value="confirmation" {{ 'selected' if settings.timer_origin == 'confirmation' }}>Подтверждения покупателем, если шаг есть</option><option value="review" {{ 'selected' if settings.timer_origin == 'review' }}>Проверки менеджером</option></select></label>
+  <label class="field">Пауза перед готовностью брифа, часы<input class="input" name="handoff_hours" type="number" min="0" step="any" value="{{ settings.handoff_hours if settings.handoff_hours is defined and settings.handoff_hours is not none else '' }}"><span class="field-help">После проверки брифа Folio подождёт указанное время перед внутренним статусом «Готов». Ноль — без паузы. Это не перевод заказа Ozon или RetailCRM в печать.</span></label>
+  <label class="field">Начало паузы<select class="select" name="timer_origin" required><option value="">Выберите</option><option value="confirmation" {{ 'selected' if settings.timer_origin == 'confirmation' }}>С подтверждения покупателем, если этот шаг есть</option><option value="review" {{ 'selected' if settings.timer_origin == 'review' }}>С проверки брифа менеджером</option></select><span class="field-help">Отправка макета на согласование пока не отслеживается Folio и не запускает этот таймер.</span></label>
   <label class="field">Доступ менеджеров к чатам<select class="select" name="manager_scope" required><option value="">Выберите</option><option value="assigned" {{ 'selected' if settings.manager_scope == 'assigned' }}>Только назначенные</option><option value="all" {{ 'selected' if settings.manager_scope == 'all' }}>Все чаты Folio</option></select></label>
-  <label class="field">Статусы Ozon для начала диалога<textarea class="input" name="start_statuses" rows="3">{{ settings.get('start_statuses',[])|join('\n') }}</textarea><span class="field-help">Используйте только фактические статусы синхронизированных заказов.</span></label>
 </div>
 <label><input name="manager_resume" type="checkbox" {{ 'checked' if settings.manager_resume }}> Менеджер может явно возвращать чат боту</label>
 <label><input type="checkbox" name="send_enabled" {{ 'checked' if settings.send_enabled }}> Разрешить отправку текста через Ozon API</label>
-<label><input type="checkbox" name="start_enabled" {{ 'checked' if settings.start_enabled }}> Инициировать чаты для сопоставленных заказов</label>
-<label><input type="checkbox" name="automation_enabled" {{ 'checked' if settings.automation_enabled }}> Запускать опубликованный сценарий при однозначной связи позиции и чата</label>
+<label><input type="checkbox" name="auto_start_enabled" {{ 'checked' if settings.automation_enabled and settings.start_enabled }}> Автоматически начинать чат и сценарий по новому заказу</label>
+<p class="field-help">После включения Folio при очередной синхронизации ищет новые заказы Ozon с привязанным артикулом продавца, создаёт чат и отправляет первое сообщение опубликованного сценария. Ручной выбор статуса заказа больше не нужен. Уже оформленные до включения заказы автоматически не запускаются; отменённые заказы пропускаются. Для работы нужна включённая отправка текста и подтверждённое чтение кабинета, заказов и списка чатов. Возможность создать чат и отправить первое сообщение проверится на первом подходящем заказе — это реальное сообщение покупателю.</p>
 <p class="field-help">Подтверждение покупателем требуется только в сценариях с соответствующим узлом. Проверка менеджером и комплектность брифа обязательны всегда.</p><button class="button button-primary">Сохранить правила</button></form></section>
 <div class="form-actions"><a class="button button-secondary" href="{{ prefix }}/scenarios">Назад к сценариям</a><a class="button button-primary" href="{{ prefix }}/settings">Вернуться к проверке запуска</a></div>
 {% endif %}
 
 {% if section == 'users' %}
-<section class="card card-body folio-stack"><h2>Пользователи Folio</h2><p class="field-help">Укажите ID существующего аккаунта Bellenne. Пароль остаётся в общей системе авторизации.</p><div class="table-scroll"><table class="data-table"><thead><tr><th>ID Bellenne</th><th>Имя</th><th>Роль</th></tr></thead><tbody>{% for u in users %}<tr><td>{{ u.id }}</td><td>{{ u.name }}</td><td>{{ role_labels.get(u.role, 'Неизвестная роль') }} · {{ 'Доступен' if u.enabled else 'Доступ закрыт' }}</td></tr>{% endfor %}</tbody></table></div><form method="post" action="{{ prefix }}/users" class="form-grid form-grid-2">{{ token() }}<label class="field">ID Bellenne<input class="input" name="id" required></label><label class="field">Имя<input class="input" name="name" required></label><label class="field">Роль<select class="select" name="role"><option value="manager">Менеджер</option><option value="admin">Администратор</option></select></label><label><input type="checkbox" name="enabled" checked> Доступ включён</label><div class="form-actions"><button class="button button-primary">Сохранить доступ</button></div></form></section>
+<section class="card card-body folio-stack"><h2>Пользователи Folio</h2><p class="field-help">Администратор может добавить отдельный вход для менеджера. Такие учётные записи имеют доступ только к Folio.</p><div class="table-scroll"><table class="data-table"><thead><tr><th>ID / логин</th><th>Имя</th><th>Роль</th></tr></thead><tbody>{% for u in users %}<tr><td>{{ u.local_login or u.id }}</td><td>{{ u.name }}</td><td>{{ role_labels.get(u.role, 'Неизвестная роль') }} · {{ 'Доступен' if u.enabled else 'Доступ закрыт' }}</td></tr>{% endfor %}</tbody></table></div><h3>Отдельный вход менеджера</h3><form method="post" action="{{ prefix }}/users/local" class="form-grid form-grid-2">{{ token() }}<label class="field">Логин<input class="input" name="username" autocomplete="off" required minlength="3" maxlength="40"></label><label class="field">Имя<input class="input" name="name" required maxlength="100"></label><label class="field">Пароль<input class="input" name="password" type="password" autocomplete="new-password" required minlength="12" maxlength="128"></label><div class="form-actions"><button class="button button-primary">Создать / заменить пароль</button></div></form><details><summary>Доступ через общий аккаунт BellenneOne</summary><form method="post" action="{{ prefix }}/users" class="form-grid form-grid-2">{{ token() }}<label class="field">ID Bellenne<input class="input" name="id" required></label><label class="field">Имя<input class="input" name="name" required></label><label class="field">Роль<select class="select" name="role"><option value="manager">Менеджер</option><option value="admin">Администратор</option></select></label><label><input type="checkbox" name="enabled" checked> Доступ включён</label><div class="form-actions"><button class="button button-secondary">Сохранить доступ</button></div></form></details></section>
 {% endif %}
 {% endblock %}

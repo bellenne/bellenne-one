@@ -1,2 +1,26 @@
-{% extends "base.html" %}{% block content %}<div class="page-header"><h1 class="page-title">Заказы и брифы</h1></div><section class="card card-body folio-stack folio-section"><div class="table-scroll"><table class="data-table"><thead><tr><th>Отправление</th><th>Кабинет</th><th>Товар</th><th>Количество</th><th>Статус Ozon</th><th>Бриф</th><th>Действия</th></tr></thead><tbody>{% for item in items %}<tr><td>{{ item.posting }}</td><td>{{ item.account_name }}</td><td>{{ item.name }}<br><span class="field-help">offer_id {{ item.offer_id }} · SKU {{ item.sku }}</span></td><td>{{ item.quantity }}</td><td>{{ item.external_status or 'Не указан' }}</td><td>{{ instance_labels.get(item.brief_status, 'Не начат' if item.mapping_id else 'Товар не сопоставлен') }}</td><td>{% if item.brief_status == 'ready' %}<a href="{{ prefix }}/briefs/{{ item.instance_id }}/export">Экспортировать бриф</a>{% endif %}</td></tr>{% else %}<tr><td colspan="7">Заказы появятся после синхронизации Ozon.</td></tr>{% endfor %}</tbody></table></div></section>
-<section class="card card-body folio-stack"><h2>Подтвердить связь чата и позиции</h2><form method="post" action="{{ prefix }}/links" class="form-grid form-grid-2">{{ token() }}<label class="field">Позиция<select class="select" name="item_id" required>{% for item in items %}<option value="{{ item.id }}">{{ item.posting }} · {{ item.name }} · {{ item.offer_id }}</option>{% endfor %}</select></label><label class="field">Чат<select class="select" name="chat_id" required>{% for c in chats %}<option value="{{ c.id }}">{{ c.account_name }} · {{ c.title }}</option>{% endfor %}</select></label><label class="field">Назначить менеджера<select class="select" name="manager_id"><option value="">Без назначения</option>{% for u in users %}<option value="{{ u.id }}">{{ u.name }}</option>{% endfor %}</select></label><button class="button button-primary">Подтвердить связь</button></form><p class="field-help">Несколько позиций могут быть связаны с одним чатом; активный контекст выбирается явно в чате.</p></section>{% endblock %}
+{% extends "base.html" %}{% block content %}
+<div class="page-header"><div><h1 class="page-title">Заказы и брифы</h1><p class="page-subtitle">Только позиции с артикулом продавца, привязанным к опубликованному сценарию</p></div></div>
+<section class="card card-body folio-stack folio-section">
+  <p class="field-help">Folio сам начинает чат по подходящему отправлению Ozon. Вручную связывать заказ с чатом не требуется.</p>
+  <div class="table-scroll"><table class="data-table"><thead><tr><th>Отправление</th><th>Кабинет</th><th>Товар</th><th>Количество</th><th>Статус Ozon</th><th>Чат Folio</th><th>Бриф</th><th>Действия</th></tr></thead><tbody>
+    {% for item in items %}<tr>
+      <td>{{ item.posting }}</td><td>{{ item.account_name }}</td>
+      <td>{{ item.name }}<br><span class="field-help">Артикул продавца: {{ item.offer_id }} · SKU Ozon: {{ item.sku }}</span></td>
+      <td>{{ item.quantity }}</td><td>{{ item.external_status or 'Не указан' }}</td>
+      <td>
+        {% if item.folio_chat_id %}<a href="{{ prefix }}/chats/{{ item.folio_chat_id }}">Открыть чат</a>
+        {% elif item.external_status == 'cancelled' %}<span class="field-help">Заказ отменён. Бот не начинает и не продолжает диалог.</span>
+        {% elif item.managed_count > 1 %}<span class="badge badge-warning">Несколько настроенных позиций</span><span class="field-help">Автоматический запуск для такого отправления не выполняется.</span>
+        {% elif item.start_state in ['failed','unknown'] %}{% set issue = operation_error_details('start_chat', item.start_state, item.start_error) %}<span class="badge {{ 'badge-warning' if item.start_state == 'unknown' else 'badge-negative' }}">{{ 'Старт не подтверждён' if item.start_state == 'unknown' else 'Не удалось начать чат' }}</span><span class="field-help">{{ issue.title }}. {{ issue.action }}</span>
+        {% elif item.start_state in ['pending','running'] %}<span class="badge badge-neutral">Создание чата в очереди</span>
+        {% elif not settings.automation_enabled or not settings.start_enabled %}<span class="field-help">Автозапуск выключен в настройках Folio.</span>
+        {% elif not item.order_started_at %}<span class="field-help">Ozon не передал время появления заказа. Автоматический старт остановлен для безопасности.</span>
+        {% elif not settings.get('automation_enabled_at') or item.order_started_at < settings.automation_enabled_at %}<span class="field-help">Заказ оформлен до включения автоматизации.</span>
+        {% else %}<span class="field-help">Ожидает следующей синхронизации и проверки прав Ozon.</span>{% endif %}
+      </td>
+      <td>{{ instance_labels.get(item.brief_status, 'Не начат') }}</td>
+      <td>{% if item.brief_status == 'ready' %}<a href="{{ prefix }}/briefs/{{ item.instance_id }}/export">Экспортировать бриф</a>{% endif %}</td>
+    </tr>{% else %}<tr><td colspan="8">Подходящих заказов пока нет. Настройте артикул и сценарий, затем синхронизируйте Ozon.</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+{% endblock %}

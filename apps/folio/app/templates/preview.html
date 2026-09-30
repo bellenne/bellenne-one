@@ -27,20 +27,25 @@
     <div class="folio-test-event"><span>Поступил новый заказ. Folio запустил сценарий.</span></div>
     {% for message in result.timeline %}
       <article class="folio-message {{ 'is-outgoing' if message.actor == 'buyer' }}">
-        <strong>{{ 'Вы' if message.actor == 'buyer' else 'Folio-бот' }}</strong>
+        <strong>{{ 'Вы' if message.actor == 'buyer' else ('Менеджер' if message.actor == 'manager' else ('Система' if message.actor == 'system' else 'Folio-бот')) }}</strong>
         <div class="folio-text">{% if message.kind == 'photo' %}Тестовое изображение · {% endif %}{{ message.body }}</div>
       </article>
     {% endfor %}
     {% if not result.timeline %}<div class="empty-state">Бот не сформировал сообщение. Проверьте первый переход сценария.</div>{% endif %}
   </div>
 
-  {% if result.instance.status == 'collecting' %}
+  {% if result.instance.status in ['collecting', 'waiting_mockup', 'waiting_approval'] %}
   <div class="folio-test-composer">
     {% if result.current_node and result.current_node.kind == 'choice' %}
       <div class="folio-test-notice"><strong>Бот ожидает выбор шаблона</strong><span>Введите номер варианта из сообщения бота{% if result.templates %}: {% for template in result.templates %}{{ template.id }} — {{ template.name }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}.</span></div>
-    {% elif result.current_node and result.current_node.kind == 'ask_photo' %}
+    {% elif result.current_node and result.current_node.kind in ['ask_photo', 'ask_input'] %}
       <div class="folio-test-notice"><strong>Бот ожидает фотографию</strong><span>Добавьте тестовое фото. Оно существует только во время этой проверки.</span></div>
+    {% elif result.current_node and result.current_node.kind == 'await_mockup' %}
+      <div class="folio-test-notice"><strong>Ожидание макета</strong><span>Сымитируйте отправку изображения менеджером.</span></div>
+    {% elif result.current_node and result.current_node.kind == 'approval' %}
+      <div class="folio-test-notice"><strong>Ожидание согласования</strong><span>Введите ответ покупателя или проверьте истечение срока.</span></div>
     {% endif %}
+    {% if result.current_node and result.current_node.kind != 'await_mockup' %}
     <form method="post" action="{{ prefix }}/scenarios/{{ record.id }}/preview" class="folio-test-reply">
       {{ token() }}
       <textarea hidden name="history_json">{{ history|tojson }}</textarea>
@@ -48,12 +53,15 @@
       <label class="field"><span>Ваш ответ</span><textarea class="input" name="message" rows="3" maxlength="{{ message_max_chars }}" placeholder="Напишите ответ покупателя" required autofocus></textarea></label>
       <button class="button button-primary">Отправить</button>
     </form>
-    {% if result.current_node and result.current_node.kind == 'ask_photo' %}
+    {% endif %}
+    {% if result.current_node and result.current_node.kind in ['ask_photo', 'ask_input'] %}
     <div class="form-actions">
       <form method="post" action="{{ prefix }}/scenarios/{{ record.id }}/preview">{{ token() }}<textarea hidden name="history_json">{{ history|tojson }}</textarea><input type="hidden" name="preview_action" value="photo"><button class="button button-secondary">Добавить тестовое фото</button></form>
       {% if result.current_node.accept %}<form method="post" action="{{ prefix }}/scenarios/{{ record.id }}/preview">{{ token() }}<textarea hidden name="history_json">{{ history|tojson }}</textarea><input type="hidden" name="preview_action" value="finish_photos"><button class="button button-secondary">Завершить загрузку фото</button></form>{% endif %}
     </div>
     {% endif %}
+    {% if result.current_node and result.current_node.kind == 'await_mockup' %}<form method="post" action="{{ prefix }}/scenarios/{{ record.id }}/preview">{{ token() }}<textarea hidden name="history_json">{{ history|tojson }}</textarea><input type="hidden" name="preview_action" value="manager_photo"><button class="button button-secondary">Отправить тестовый макет</button></form>{% endif %}
+    {% if result.current_node and result.current_node.kind == 'approval' %}<form method="post" action="{{ prefix }}/scenarios/{{ record.id }}/preview">{{ token() }}<textarea hidden name="history_json">{{ history|tojson }}</textarea><input type="hidden" name="preview_action" value="approval_timeout"><button class="button button-secondary">Проверить истечение срока</button></form>{% endif %}
   </div>
   {% else %}
   <div class="folio-test-result">

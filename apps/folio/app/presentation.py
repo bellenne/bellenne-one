@@ -26,8 +26,68 @@ ERRORS = {
         "Повторите безопасную операцию позже.",
     ),
     "transport_unknown": (
-        "Результат отправки неизвестен",
-        "Сначала синхронизируйте историю чата; не отправляйте сообщение повторно вслепую.",
+        "Folio проверяет отправку",
+        "История чата будет проверена автоматически; повторной отправки сообщения не будет.",
+    ),
+    "read_timeout_unknown": (
+        "Folio проверяет отправку",
+        "Ozon не ответил вовремя. Folio сверит историю чата без повторной отправки.",
+    ),
+    "write_timeout_unknown": (
+        "Folio проверяет отправку",
+        "Ozon не ответил вовремя. Folio сверит историю чата без повторной отправки.",
+    ),
+    "send_internal_unknown": (
+        "Folio проверяет отправку",
+        "Сообщение могло дойти до Ozon. Folio проверит историю чата и продолжит сценарий после подтверждения.",
+    ),
+    "send_file_result_unknown": (
+        "Отправка фото проверяется",
+        "Ozon принял запрос без ID сообщения. Folio сверит изображение с историей чата; повторно отправлять его не нужно.",
+    ),
+    "outbound_file_missing": (
+        "Фото для отправки недоступно",
+        "Проверьте файл в чате и загрузите его повторно после исправления причины.",
+    ),
+    "retailcrm_order_missing": (
+        "Сделка RetailCRM не найдена",
+        "Проверьте создание сделки и её внешний ID в журнале Folio.",
+    ),
+    "retailcrm_items_unverified": (
+        "Не удалось безопасно изменить сделку RetailCRM",
+        "Проверьте состав сделки в RetailCRM: Folio не будет рисковать удалением товарных позиций.",
+    ),
+    "retailcrm_status_unavailable": (
+        "Статус RetailCRM больше не доступен",
+        "Обновите список статусов в настройках RetailCRM и выберите действующий статус в сценарии.",
+    ),
+    "retailcrm_statuses_unavailable": (
+        "Не удалось получить статусы RetailCRM",
+        "Проверьте право чтения справочников и повторите проверку подключения.",
+    ),
+    "mattermost_not_configured": (
+        "Mattermost не настроен",
+        "Сохраните входящий webhook в настройках Folio.",
+    ),
+    "mattermost_credentials_unavailable": (
+        "Webhook Mattermost недоступен",
+        "Повторно сохраните входящий webhook в настройках Folio.",
+    ),
+    "mattermost_template_invalid": (
+        "Не удалось подготовить сообщение Mattermost",
+        "Проверьте переменные в узле сценария.",
+    ),
+    "mattermost_message_empty": (
+        "Сообщение Mattermost пустое",
+        "Заполните текст узла сценария.",
+    ),
+    "mattermost_transport_unknown": (
+        "Результат отправки в Mattermost неизвестен",
+        "Проверьте чат Mattermost перед повторной отправкой.",
+    ),
+    "mattermost_internal_unknown": (
+        "Результат отправки в Mattermost неизвестен",
+        "Проверьте чат Mattermost и журнал Folio; автоматического повтора не будет.",
     ),
     "invalid_response": (
         "Ozon вернул непонятный ответ",
@@ -43,11 +103,27 @@ ERRORS = {
     ),
     "chat_start_not_enabled": (
         "Создание чатов не включено",
-        "Разрешите создание чатов только после проверки кабинета и статусов заказов.",
+        "Проверьте доступ кабинета и включите автоматическое сопровождение новых заказов.",
     ),
-    "order_status_not_enabled": (
-        "Статус заказа не разрешён для начала диалога",
-        "Проверьте фактический статус заказа и правила автоматизации.",
+    "chat_start_not_verified": (
+        "Права кабинета не подтверждены",
+        "Проверьте доступ к заказам, чатам, вложениям и отправке сообщений в настройках Ozon.",
+    ),
+    "start_item_ambiguous": (
+        "Нельзя однозначно выбрать товар для чата",
+        "У отправления должна быть ровно одна позиция с настроенным артикулом и опубликованным сценарием.",
+    ),
+    "start_returned_existing_chat": (
+        "Диалог для отправления уже запущен",
+        "Обновите страницу. Если заказ не появился в чатах Folio, проверьте журнал запуска.",
+    ),
+    "order_before_automation": (
+        "Заказ оформлен до включения автоматизации",
+        "Folio не начинает задним числом чаты по старым заказам.",
+    ),
+    "order_cancelled": (
+        "Заказ отменён в Ozon",
+        "Чат по отменённому заказу не начинается.",
     ),
     "worker_interrupted": (
         "Операция прервана перезапуском сервиса",
@@ -56,10 +132,6 @@ ERRORS = {
     "worker_internal_error": (
         "Внутренняя ошибка обработки",
         "Повторите безопасную операцию. Если ошибка сохранится, проверьте журнал контейнера Folio Worker.",
-    ),
-    "send_internal_unknown": (
-        "Результат отправки неизвестен",
-        "Синхронизируйте историю чата и выполните ручную сверку.",
     ),
     "event_processing_failed": (
         "Не удалось обработать входящее сообщение",
@@ -92,6 +164,14 @@ ERRORS = {
     "orders_cursor_stalled": (
         "Ozon не продолжил выдачу заказов",
         "Синхронизация остановлена, чтобы не зациклить запросы.",
+    ),
+    "product_list_contract_changed": (
+        "Изменился формат списка товаров Ozon",
+        "Обновление каталога остановлено; проверьте актуальную версию Seller API.",
+    ),
+    "product_cursor_stalled": (
+        "Ozon не продолжил выдачу товаров",
+        "Обновление каталога остановлено, чтобы не сохранить неполный список.",
     ),
     "chat_list_contract_changed": (
         "Изменился формат списка чатов Ozon",
@@ -165,6 +245,18 @@ ERRORS = {
         "Комментарий RetailCRM не удалось сформировать",
         "Проверьте переменные комментария в опубликованном сценарии.",
     ),
+    "retailcrm_public_base_url_missing": (
+        "Адрес Folio для ссылок на фото не настроен",
+        "Укажите FOLIO_PUBLIC_BASE_URL — внешний адрес BellenneOne. Эта сделка не будет создана повторно автоматически.",
+    ),
+    "retailcrm_public_base_url_invalid": (
+        "Адрес Folio для ссылок на фото некорректен",
+        "Проверьте FOLIO_PUBLIC_BASE_URL: нужен HTTPS-адрес BellenneOne без пути.",
+    ),
+    "retailcrm_media_missing": (
+        "Фото для передачи в RetailCRM недоступно",
+        "Проверьте вложение в чате Folio и передайте заказ менеджеру.",
+    ),
     "retailcrm_internal_unknown": (
         "Результат создания заказа RetailCRM неизвестен",
         "Проверьте заказ в RetailCRM по externalId перед повторными действиями.",
@@ -175,9 +267,12 @@ ERRORS = {
 JOB_LABELS = {
     "probe": "Проверка подключения",
     "sync": "Синхронизация заказов и чатов",
+    "catalog_sync": "Обновление товаров Ozon",
     "start_chat": "Создание чата с покупателем",
     "retailcrm_probe": "Проверка подключения RetailCRM",
     "retailcrm_create": "Создание сделки в RetailCRM",
+    "retailcrm_note": "Запись результата в RetailCRM",
+    "mattermost_send": "Отправка в Mattermost",
 }
 
 STATE_LABELS = {
@@ -185,7 +280,7 @@ STATE_LABELS = {
     "running": "Выполняется",
     "done": "Завершено",
     "failed": "Требует внимания",
-    "unknown": "Результат необходимо сверить",
+    "unknown": "Результат не подтверждён",
     "sent": "Отправлено",
     "cancelled": "Закрыто без повтора",
     "processed": "Обработано",
@@ -206,6 +301,8 @@ INSTANCE_LABELS = {
     "collecting": "Сбор данных",
     "waiting_reply": "Ожидается ответ покупателя",
     "waiting_integration": "Создание сделки в RetailCRM",
+    "waiting_mockup": "Ожидает макет от менеджера",
+    "waiting_approval": "Ожидает ответа покупателя о макете",
     "needs_manager": "Требуется менеджер",
     "needs_review": "Бриф ожидает проверки",
     "waiting_release": "Проверен, ожидает передачи",
@@ -240,6 +337,7 @@ OBJECT_LABELS = {
     "chat": "чат",
     "retailcrm_integration": "подключение RetailCRM",
     "retailcrm_action": "создание сделки RetailCRM",
+    "mattermost_action": "сообщение Mattermost",
 }
 
 AUDIT_LABELS = {
@@ -251,29 +349,35 @@ AUDIT_LABELS = {
     "user.updated": "Изменён доступ пользователя",
     "integration.queued_probe": "Запрошена проверка подключения",
     "integration.queued_sync": "Запрошена синхронизация",
+    "catalog.refresh_queued": "Запрошено обновление товаров Ozon",
     "integration.queued_retailcrm_probe": "Запрошена проверка RetailCRM",
     "integration.done": "Операция интеграции завершена",
     "integration.failed": "Операция интеграции требует внимания",
     "integration.unknown": "Результат операции интеграции требует сверки",
     "integration.retry_requested": "Запрошен безопасный повтор операции",
+    "integration.cancelled": "Попытка создания чата закрыта: заказ отменён",
     "order.imported": "Получен новый заказ Ozon",
     "order.changed": "Изменились данные заказа Ozon",
+    "order.cancelled": "Заказ отменён в Ozon, сценарий остановлен",
     "message.imported": "Получено сообщение Ozon",
     "message.duplicate": "Повторное сообщение Ozon распознано и пропущено",
     "chat.imported": "Получен новый чат Ozon",
     "event.processed": "Входящее сообщение обработано",
+    "event.ignored_cancelled": "Сообщение сохранено без ответа: заказ отменён",
     "event.failed": "Входящее сообщение передано менеджеру из-за ошибки",
     "outbound.attempt": "Выполнена попытка отправки сообщения",
     "outbound.sent": "Ozon подтвердил отправку сообщения",
     "outbound.failed": "Ozon отклонил отправку сообщения",
-    "outbound.unknown": "Результат отправки требует ручной сверки",
+    "outbound.unknown": "Folio проверяет результат отправки по истории Ozon",
     "outbound.cancelled": "Отправка отменена после перехода в ручной режим",
     "outbound.reconciled": "Результат отправки сверен вручную",
+    "outbound.reconciled_auto": "Folio подтвердил отправку по истории Ozon",
     "outbound.retry_queued": "Запрошен безопасный повтор неуспешной отправки",
     "chat.linked": "Чат связан с товарной позицией",
     "media.added": "Добавлено изображение",
     "media.accepted": "Изображение добавлено в бриф",
     "mapping.updated": "Обновлено соответствие товара",
+    "mapping.deleted": "Удалена привязка товара",
     "template.saved": "Сохранён шаблон оформления",
     "scenario.created": "Создан черновик сценария",
     "scenario.save": "Сохранён черновик сценария",
@@ -295,6 +399,7 @@ AUDIT_LABELS = {
     "answer.accepted": "Ответ покупателя принят сценарием",
     "chat.takeover": "Чат переведён в ручной режим",
     "chat.resumed": "Чат возвращён боту",
+    "chat.autorecovered": "Бот продолжил диалог после подтверждения отправки",
     "brief.reviewed": "Бриф проверен менеджером",
     "brief.ready": "Бриф готов к передаче",
     "brief.needs_manager": "Бриф возвращён менеджеру",
@@ -352,6 +457,12 @@ def error_details(code):
             "title": f"RetailCRM отклонила запрос (HTTP {status})",
             "action": "Проверьте поля шага, API-ключ и настройки магазина.",
         }
+    if code.startswith("mattermost_http_"):
+        status = code.removeprefix("mattermost_http_")
+        return {
+            "title": f"Mattermost отклонил сообщение (HTTP {status})",
+            "action": "Проверьте входящий webhook и права канала Mattermost. При HTTP 5xx проверьте чат перед повтором.",
+        }
     title, action = ERRORS.get(
         code,
         (
@@ -360,6 +471,23 @@ def error_details(code):
         ),
     )
     return {"title": title, "action": action}
+
+
+def operation_error_details(kind, state, code):
+    if kind == "start_chat" and state == "cancelled":
+        return {
+            "title": "Заказ отменён",
+            "action": "Попытка запуска чата закрыта без повторного запроса к Ozon.",
+        }
+    if kind == "start_chat" and state == "unknown":
+        return {
+            "title": "Создание чата не подтверждено",
+            "action": (
+                "Folio не повторяет запрос к Ozon, чтобы не создать дубликат. "
+                "Неопределённый результат сохранён в журнале."
+            ),
+        }
+    return error_details(code)
 
 
 def label(value, labels):
