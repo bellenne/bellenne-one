@@ -10,6 +10,7 @@ const NODE_LABELS = {
   retailcrm_note: "Записать итог в RetailCRM",
   mattermost: "Сообщение в Mattermost",
   image_worker: "Создать макет через воркер",
+  send_mockup: "Отправить макет",
   ready: "Проверить готовность", end: "Завершить"
 };
 const NODE_HELP = {
@@ -28,7 +29,8 @@ const NODE_HELP = {
   approval: "После отправки макета отправляет настраиваемый текст и ждёт подтверждение, отказ или истечение срока.",
   retailcrm_note: "Дописывает итог в комментарий клиента той же сделки RetailCRM, сохраняя старый текст.",
   mattermost: "Отправляет текст в чат Mattermost через настроенный входящий webhook. При ошибке следует по отдельной ветке.",
-  image_worker: "После получения одного фото ставит обработку в очередь. Следующий шаг начнётся после результата воркера.",
+  image_worker: "После получения от одного до восьми фото ставит обработку в очередь. Следующий шаг начнётся после результата воркера.",
+  send_mockup: "Отправляет покупателю превью готового макета и продолжает сценарий после подтверждения отправки.",
   ready: "Проверяет обязательные данные перед готовностью брифа.",
   end: "Завершает сценарий без дополнительных действий."
 };
@@ -343,6 +345,7 @@ function initializeBuilder(root) {
       if (node.kind === "mattermost" && !node.error) add(node, "Выберите переход на случай отказа Mattermost.");
       if (node.kind === "image_worker" && !(node.prompt || "").trim()) add(node, "Заполните инструкцию обработки.");
       if (node.kind === "image_worker" && !node.error) add(node, "Выберите переход на случай ошибки воркера.");
+      if (node.kind === "send_mockup" && !graph.nodes.some((candidate) => candidate.kind === "image_worker" && reaches(candidate.id, node.id))) add(node, "Перед отправкой макета добавьте шаг создания макета через воркер.");
     });
     const results = root.querySelector("[data-validation-results]");
     results.replaceChildren();
@@ -383,7 +386,7 @@ function initializeBuilder(root) {
   }
   const palette = root.querySelector("[data-node-palette]");
   const advancedPalette = root.querySelector("[data-node-palette-advanced]");
-  ["send", "ask_text", "ask_photo", "ask_input", ...(productType === "template_art" ? ["choice"] : []), "retailcrm", "image_worker", "await_mockup", "approval", "retailcrm_note", "handoff", "ready", "end"]
+  ["send", "ask_text", "ask_photo", "ask_input", ...(productType === "template_art" ? ["choice"] : []), "retailcrm", "image_worker", "send_mockup", "await_mockup", "approval", "retailcrm_note", "handoff", "ready", "end"]
     .forEach((kind) => addPaletteButton(palette, kind));
   ["condition", "wait", "confirm", "mattermost"].forEach((kind) => addPaletteButton(advancedPalette, kind));
 

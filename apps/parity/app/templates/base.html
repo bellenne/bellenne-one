@@ -1,0 +1,19 @@
+{% from "icons.html" import icon %}
+<!doctype html><html lang="ru"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="dark">
+<meta name="parity-csrf" content="{{ platform_csrf_token }}">
+<title>{{ title }} · BellenneParity</title>
+<link rel="icon" href="{{ module_prefix }}/static/logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="{{ module_prefix }}/static/theme.css"><link rel="stylesheet" href="{{ module_prefix }}/static/app.css"><link rel="stylesheet" href="{{ module_prefix }}/static/parity.css">
+</head><body><div class="app-shell">
+<aside class="sidebar" aria-label="Навигация Bellenne"><a class="module-brand" href="/"><img src="{{ module_prefix }}/static/logo.svg" alt="BellenneOne"><small>Parity · Контроль цен</small></a>
+<nav class="sidebar-nav">
+{% for path,label,image in [('/', 'BellenneOne','dashboard'),('/pulse/','BellennePulse','pulse'),('/echo/','BellenneEcho','echo'),('/vector/','BellenneVector','vector'),('/nest/','BellenneNest','nest'),('/proof/','BellenneProof','proof'),('/folio/','BellenneFolio','echo')] %}<a class="sidebar-item" href="{{ path }}">{{ icon(image) }}<span>{{ label }}</span></a>{% endfor %}
+<a class="sidebar-item product-current" href="{{ module_prefix }}/">{{ icon('reports') }}<span>BellenneParity</span></a><span class="sidebar-divider" aria-hidden="true"></span>
+{% for path,label,image in [('/', 'Обзор','dashboard'),('/products','Товары','accounts'),('/discrepancies','Расхождения','reports'),('/mappings','Сопоставления','filter'),('/integrations','Интеграции','settings'),('/journal','Журнал','history')] %}
+<a class="sidebar-item {{ 'is-active' if (view|default(active)) == path.strip('/') or (path == '/' and active == 'overview') else '' }}" href="{{ module_prefix }}{{ path }}">{{ icon(image) }}<span>{{ label }}</span></a>{% endfor %}
+<span class="sidebar-divider" aria-hidden="true"></span><a class="sidebar-item" href="/settings">{{ icon('settings') }}<span>Настройки Bellenne</span></a></nav><div class="sidebar-foot">BellenneOne · Parity</div></aside>
+<div class="main-shell"><header class="topbar"><button class="button button-secondary button-small sidebar-toggle" type="button" data-sidebar-toggle>{{ icon('menu',18) }}<span>Меню</span></button><span>BellenneParity</span><div class="topbar-spacer"></div><span class="user-menu-label">{{ username }}</span><form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ platform_csrf_token }}"><button class="button button-secondary button-small">Выйти</button></form></header>
+<main class="main-content module-content" data-prefix="{{ module_prefix }}">{% block content %}{% endblock %}</main></div></div>
+<script src="{{ module_prefix }}/static/app.js" defer></script><script src="{{ module_prefix }}/static/parity.js" defer></script>
+</body></html>

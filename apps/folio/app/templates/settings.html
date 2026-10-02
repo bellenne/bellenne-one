@@ -105,20 +105,20 @@
 
 {% if section == 'image-worker' %}
 <section class="card card-body folio-stack folio-section">
-  <div><h2>Воркер изображений</h2><p class="field-help">Подключение FolioImageWorker для страницы «Задания на макеты». Сохранение и проверка не создают задания и не отправляют фото.</p></div>
+  <div><h2>Воркер изображений</h2><p class="field-help">Воркер сам опрашивает Folio и загружает сюда готовый макет. Адрес ПК указывать не нужно.</p></div>
   {% if image_worker_config %}
-    {% if image_worker_config.checked_at %}<div class="status {{ 'status-error' if image_worker_config.error else 'status-success' }}" role="status"><strong>{{ 'Подключение не подтверждено' if image_worker_config.error else 'Воркер доступен, API-ключ подходит' }}</strong><p>Последняя проверка: {{ image_worker_config.checked_at|folio_time }}</p>{% if image_worker_config.error %}<p>{{ {'image_worker_health_failed':'Воркер ответил некорректно на проверку состояния.', 'image_worker_auth_failed':'API-ключ не принят воркером. Проверьте ключ на обеих сторонах.', 'image_worker_probe_failed':'Не удалось подтвердить доступ к API заданий.', 'image_worker_unreachable':'Воркер недоступен по указанному адресу.', 'image_worker_credentials_unavailable':'Не удалось расшифровать сохранённые ключи. Введите их заново.'}.get(image_worker_config.error, 'Проверьте настройки подключения и повторите проверку.') }}</p>{% endif %}</div>
-    {% else %}<div class="status status-warning">Подключение сохранено, но ещё не проверено.</div>{% endif %}
+    {% if image_worker_config.checked_at %}<div class="status status-success" role="status"><strong>Воркер обращался к Folio</strong><p>Последний запрос: {{ image_worker_config.checked_at|folio_time }}</p></div>
+    {% else %}<div class="status status-warning">Ключ сохранён. Ожидаем первый запрос воркера.</div>{% endif %}
   {% else %}<div class="status status-warning">Воркер изображений ещё не подключён.</div>{% endif %}
   <form method="post" action="{{ prefix }}/settings/image-worker" class="folio-stack">{{ token() }}
     <div class="form-grid form-grid-2">
-      <label class="field">Адрес API воркера<input class="input" type="url" name="base_url" value="{{ image_worker_config.base_url if image_worker_config else '' }}" placeholder="http://192.168.1.10:8000" required><span class="field-help">Адрес ПК с воркером, доступный серверу Folio. Без пути <code>/v1</code>.</span></label>
+      <label class="field">Адрес Folio для воркера<input class="input" type="url" value="{{ folio_public_base }}" readonly><span class="field-help">Этот адрес задаётся через <code>FOLIO_PUBLIC_BASE_URL</code>. Впишите его в .env воркера.</span></label>
       <label class="field">{{ 'Заменить ключ воркера' if image_worker_config else 'Ключ воркера' }}<input class="input" type="password" name="api_key" autocomplete="new-password" {{ '' if image_worker_config else 'required' }} placeholder="{{ 'Оставьте пустым, чтобы сохранить текущий' if image_worker_config else '' }}"><span class="field-help">Значение <code>WORKER_API_KEY</code> из .env воркера.</span></label>
     </div>
     <div class="form-actions"><button class="button button-primary">Сохранить подключение</button></div>
   </form>
-  {% if image_worker_config %}<form method="post" action="{{ prefix }}/settings/image-worker/probe">{{ token() }}<button class="button button-secondary">Проверить доступ и API-ключ</button></form>{% endif %}
-  <p class="field-help">Folio сам формирует ссылки на исходное фото и адреса уведомлений из <code>FOLIO_PUBLIC_BASE_URL</code>. Дополнительные токены вводить не нужно.</p>
+  {% if image_worker_config %}<form method="post" action="{{ prefix }}/settings/image-worker/probe">{{ token() }}<button class="button button-secondary">Проверить последний запрос воркера</button></form>{% endif %}
+  <p class="field-help">Секретный ключ должен совпадать с <code>WORKER_API_KEY</code> на ПК. Folio не подключается к ПК; изменение IP при VPN не влияет на очередь.</p>
 </section>
 {% endif %}
 

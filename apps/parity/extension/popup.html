@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BellenneParity — сбор цен</title><link rel="stylesheet" href="theme.css"><link rel="stylesheet" href="app.css"><link rel="stylesheet" href="parity.css"><link rel="stylesheet" href="popup.css"></head>
+<body><main class="panel stack">
+<h1 class="section-title">BellenneParity</h1>
+<p id="state" role="status">Получаем состояние…</p>
+<section class="stack" id="job" hidden>
+<strong id="counts"></strong><progress id="progress" max="1" value="0" aria-label="Обработано карточек"></progress>
+<p id="results"></p><p id="current"></p><p id="activity" class="muted"></p>
+<p id="message" class="notice" role="alert" hidden></p>
+<div class="form-actions"><button class="button button-secondary" id="pause">Пауза</button><button class="button button-primary" id="resume">Продолжить</button><button class="button button-secondary" id="skip">Пропустить карточку</button></div>
+<button class="button button-secondary" id="card">Открыть карточку</button>
+</section>
+<p id="error" class="error-copy" role="alert" hidden></p>
+<button class="button button-secondary" id="open">Открыть Parity</button>
+<p class="muted">WB Кошелёк · Ozon Карта. Оставьте вкладку Parity открытой.</p>
+</main><script src="popup.js"></script></body></html>

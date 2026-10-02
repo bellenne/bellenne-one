@@ -1666,9 +1666,7 @@ def tick():
         return True
     if send_one():
         return True
-    if image_tasks.poll_one():
-        return True
-    return image_tasks.submit_one()
+    return False
 
 
 def schedule():

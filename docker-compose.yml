@@ -25,6 +25,8 @@ services:
         condition: service_healthy
       folio:
         condition: service_healthy
+      parity:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1/gateway-health"]
       interval: 30s
@@ -190,6 +192,46 @@ services:
         condition: service_healthy
 
 
+  parity:
+    build:
+      context: .
+      dockerfile: apps/parity/Dockerfile
+    container_name: bellenneone-parity
+    restart: unless-stopped
+    init: true
+    environment: &parity_environment
+      MODULE_PREFIX: /parity
+      PARITY_DATA_DIR: /data
+      DATABASE_URL: sqlite:////data/parity.db
+      PARITY_ENCRYPTION_KEY: "${PARITY_ENCRYPTION_KEY:-}"
+      PARITY_HTTP_TIMEOUT_SECONDS: "${PARITY_HTTP_TIMEOUT_SECONDS:-30}"
+      PARITY_RETRY_ATTEMPTS: "${PARITY_RETRY_ATTEMPTS:-3}"
+      PARITY_JOB_LEASE_SECONDS: "${PARITY_JOB_LEASE_SECONDS:-300}"
+      PARITY_WORKER_IDLE_SECONDS: "${PARITY_WORKER_IDLE_SECONDS:-1}"
+    volumes:
+      - parity_data:/data
+    expose:
+      - "8000"
+
+  parity-worker:
+    build:
+      context: .
+      dockerfile: apps/parity/Dockerfile
+      target: worker
+    container_name: bellenneone-parity-worker
+    restart: unless-stopped
+    init: true
+    shm_size: 256mb
+    command: ["python", "-m", "app.worker"]
+    healthcheck:
+      disable: true
+    environment: *parity_environment
+    volumes:
+      - parity_data:/data
+    depends_on:
+      parity:
+        condition: service_healthy
+
 volumes:
   pulse_data:
   echo_data:
@@ -197,3 +239,4 @@ volumes:
   nest_data:
   proof_data:
   folio_data:
+  parity_data:

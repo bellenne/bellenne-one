@@ -30,6 +30,7 @@ KINDS = {
     "retailcrm_note": "Записать итог в RetailCRM",
     "mattermost": "Сообщение в Mattermost",
     "image_worker": "Создать макет через воркер",
+    "send_mockup": "Отправить макет",
     "ready": "Проверка брифа",
     "end": "Конец",
 }
@@ -502,6 +503,10 @@ def validate(graph, product_type):
             raise Invalid(
                 f"До шага «{node.get('title') or node['id']}» нужно получить фотографию покупателя"
             )
+        if node["kind"] == "image_worker":
+            collected = collected | {"_worker_mockup"}
+        if node["kind"] == "send_mockup" and "_worker_mockup" not in collected:
+            raise Invalid("Перед отправкой макета добавьте шаг создания макета через воркер")
         if node["kind"] == "ready" and (
             not required <= collected or (requires_confirmation and not confirmed)
         ):
@@ -882,12 +887,12 @@ def advance(con, instance_id, reply=None, *, simulate_external=False):
             ).fetchone()
             if action is None:
                 photos = fields.get("photos") or []
-                if len(photos) != 1:
+                if not 1 <= len(photos) <= 8:
                     fields["integration_error"] = (
                         "В брифе нет исходного фото" if not photos
-                        else image_tasks.ERROR_LABELS["image_worker_photo_ambiguous"]
+                        else "В брифе больше восьми фотографий"
                     )
-                    if photos:
+                    if len(photos) > 8:
                         status = "needs_manager"
                         break
                     node_id, prompted = node["error"], 0
@@ -933,6 +938,35 @@ def advance(con, instance_id, reply=None, *, simulate_external=False):
                 node_id, prompted = node["error"], 0
                 continue
             status = "waiting_integration"
+            break
+        if kind == "send_mockup":
+            if simulate_external:
+                node_id, prompted = node["next"], 0
+                continue
+            job = con.execute(
+                "SELECT preview_media_id FROM image_jobs WHERE instance_id=? "
+                "AND state='completed' AND preview_media_id IS NOT NULL ORDER BY id DESC LIMIT 1",
+                (instance_id,),
+            ).fetchone()
+            if not job:
+                fields["integration_error"] = "Готовое превью макета не найдено"
+                status = "needs_manager"
+                break
+            key = f"mockup:{instance_id}:{node_id}"
+            outgoing = con.execute("SELECT state FROM outbox WHERE dedup=?", (key,)).fetchone()
+            if outgoing is None:
+                con.execute(
+                    "INSERT INTO outbox(chat_id,instance_id,actor,body,dedup,epoch,created_at,kind,media_id) "
+                    "VALUES(?,?,?,?,?,?,?,'file',?)",
+                    (chat["id"], instance_id, "bot", "Макет для согласования", key,
+                     chat["epoch"], db.now(), job["preview_media_id"]),
+                )
+                status = "waiting_integration"
+                break
+            if outgoing["state"] == "sent":
+                node_id, prompted = node["next"], 0
+                continue
+            status = "needs_manager" if outgoing["state"] in {"failed", "unknown", "cancelled"} else "waiting_integration"
             break
         if kind in {"retailcrm", "retailcrm_note"}:
             if simulate_external:
@@ -1146,6 +1180,8 @@ def outgoing_confirmed(con, outbox_id):
     node = next((item for item in graph["nodes"] if item["id"] == instance["node"]), None)
     if row["kind"] == "file" and node and node["kind"] == "await_mockup" and instance["status"] == "waiting_mockup":
         advance(con, instance["id"], {"manager_file_sent": True})
+    elif row["kind"] == "file" and node and node["kind"] == "send_mockup" and instance["status"] == "waiting_integration":
+        advance(con, instance["id"])
     elif (row["kind"] == "text" and node and node["kind"] == "approval"
           and row["dedup"].endswith(f":{node['id']}")
           and instance["status"] == "waiting_approval"):

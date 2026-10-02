@@ -1,6 +1,6 @@
 # BellenneOne
 
-BellenneOne объединяет шесть самостоятельных продуктов за одним адресом и одной авторизацией:
+BellenneOne объединяет семь самостоятельных продуктов за одним адресом и одной авторизацией:
 
 - `/` — отдельная оболочка BellenneOne с описанием модулей;
 - `/settings` — общий центр настроек;
@@ -11,8 +11,9 @@ BellenneOne объединяет шесть самостоятельных пр�
 - `/proof/` — BellenneProof, оркестрация производственных заданий, Workers и доставки результатов.
 
 - `/folio/` — BellenneFolio, чаты Ozon, сценарии и подготовка брифов.
+- `/parity/` — BellenneParity, сопоставление товаров, расхождения и история цен WB/Ozon.
 
-Снаружи публикуется только nginx-шлюз. Shell, шесть продуктовых сервисов и worker Folio доступны только во внутренней Docker-сети.
+Снаружи публикуется только nginx-шлюз. Shell, семь продуктовых сервисов и workers Folio/Parity доступны только во внутренней Docker-сети.
 
 Folio входит в Compose-проект `bellenneone`: контейнеры `bellenneone-folio` и `bellenneone-folio-worker`. Существующий аккаунт Bellenne с числовым ID из `FOLIO_ADMIN_USER_ID` получает роль администратора Folio. Доступ существующих аккаунтов к Folio и роли `admin`/`manager` настраиваются в интерфейсе модуля. API-ключ Ozon и N часов также настраиваются в кабинете Folio. См. [инструкцию Folio](docs/FOLIO_IMPLEMENTATION.md).
 
@@ -41,6 +42,7 @@ docker compose up -d --build
 - `nest_data` — пользовательские конфигурации Nest и история API-запросов.
 - `proof_data` — очередь, события, настройки интеграций и неизменяемые результаты Proof.
 - `folio_data` — база Folio, приватные вложения и ключ шифрования; общий для API и worker.
+- `parity_data` — каталог, связи, снимки цен, очередь и ключ шифрования Parity; общий для API и worker.
 
 Идентификатор единого аккаунта передаётся модулям через доверенные заголовки nginx. Прямой внешний доступ к контейнерам модулей не публикуется.
 
@@ -50,10 +52,20 @@ docker compose up -d --build
 
 ```powershell
 docker compose ps
-docker compose logs --tail 100 gateway shell pulse echo vector nest proof folio folio-worker
+docker compose logs --tail 100 gateway shell pulse echo vector nest proof folio folio-worker parity parity-worker
 ```
 
-Восемь HTTP-сервисов должны иметь состояние `healthy`, а `folio-worker` — `running` (без HTTP healthcheck). Проверка шлюза доступна на `/gateway-health`.
+Девять HTTP-сервисов должны иметь состояние `healthy`, а `folio-worker` и `parity-worker` — `running` (без HTTP healthcheck). Проверка шлюза доступна на `/gateway-health`.
+
+## BellenneParity
+
+Настройки WB API token и Ozon Client ID/API Key доступны в `/parity/integrations`.
+Ключи шифруются и маскируются и используются для импорта каталога. Цены собираются Chromium с покупательских страниц для Москвы: WB Кошелёк / Ozon Карта.
+Здесь же настраиваются ежедневное время, часовой пояс и срок актуальности данных,
+запускается ручная синхронизация. Каталог загружает `parity-worker`, основной сбор
+цен выполняет расширение Chrome/Edge в текущем браузерном профиле.
+См. [инструкцию Parity](apps/parity/README.md), [установку расширения](docs/PARITY_EXTENSION.md)
+и [серверный сбор и его ограничения](docs/PARITY_STOREFRONT.md).
 
 ## BellenneProof
 

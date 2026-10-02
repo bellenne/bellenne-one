@@ -9,3 +9,6 @@ __pycache__/
 data/
 outputs/
 .venv/
+apps/parity/app/static/bellenne-parity-extension.zip
+apps/parity/extension/unpacked/
+apps/parity/test-artifacts/

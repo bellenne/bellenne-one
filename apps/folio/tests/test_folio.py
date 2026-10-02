@@ -3802,9 +3802,9 @@ class FolioIntegrationsTest(unittest.TestCase):
             with patch("app.main.image_tasks.probe", return_value=(True, None)):
                 self.assertEqual(self.client.post("/settings/image-worker/probe", headers=self.admin,
                                                   data={"csrf": "csrf"}, follow_redirects=False).status_code, 303)
-            self.assertIn("Воркер доступен", self.client.get("/settings/image-worker", headers=self.admin).text)
+            self.assertIn("Ожидаем первый запрос воркера", self.client.get("/settings/image-worker", headers=self.admin).text)
 
-    def test_image_worker_probe_checks_key_without_creating_job(self):
+    def test_image_worker_probe_checks_recent_pull(self):
         values = {
             "FOLIO_IMAGE_WORKER_URL": "https://worker.example.com",
             "FOLIO_IMAGE_WORKER_API_KEY": "PROBE_KEY",
@@ -3812,18 +3812,10 @@ class FolioIntegrationsTest(unittest.TestCase):
             "FOLIO_IMAGE_WORKER_WEBHOOK_URL": "https://one.example.com/folio/image-worker/webhook",
         }
         with self.image_worker_settings(values):
-            paths = []
-            def handler(request):
-                paths.append(request.url.path)
-                if request.url.path == "/health":
-                    return httpx.Response(200, json={"ok": True})
-                self.assertEqual(request.headers["authorization"], "Bearer PROBE_KEY")
-                return httpx.Response(404)
-            with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-                self.assertEqual(image_tasks.probe(client=client), (True, None))
-            self.assertEqual(paths[0], "/health")
-            self.assertEqual(len(paths), 2)
-            self.assertTrue(paths[1].startswith("/v1/jobs/"))
+            self.assertEqual(image_tasks.probe(), (False, "image_worker_no_recent_poll"))
+            response = self.client.get("/image-worker/next", headers={"Authorization": "Bearer PROBE_KEY"})
+            self.assertEqual(response.status_code, 204)
+            self.assertEqual(image_tasks.probe(), (True, None))
     def test_approval_dictionary_uses_exact_safe_phrases(self):
         node = {"dictionary_version": 1, "accept": "СЛУЧАЙНАЯ ФРАЗА", "reject": "СЛУЧАЙНЫЙ ОТКАЗ"}
         self.assertIn(scenarios.approval_phrase("Да!"), scenarios.approval_variants(node, "accept"))
@@ -4010,9 +4002,8 @@ class FolioIntegrationsTest(unittest.TestCase):
         self.assertEqual(edited[0][2], [{"id": 11}])
         self.assertEqual(edited[0][3:], ("approved",))
 
-    def test_image_job_queue_submit_webhook_preview_and_rbac(self):
+    def test_image_job_worker_pulls_and_uploads_preview(self):
         instance_id, item_id, chat_id, _ = self.setup_instance()
-        worker_id = "924539a0-d73e-4d62-a16d-2d35ce91a2cf"
         config = {
             "FOLIO_IMAGE_WORKER_URL": "https://worker.example.com",
             "FOLIO_IMAGE_WORKER_API_KEY": "TEST_WORKER_KEY",
@@ -4021,49 +4012,88 @@ class FolioIntegrationsTest(unittest.TestCase):
         }
         with self.image_worker_settings(config):
             with db.transaction() as con:
-                mid = self.image(con, chat_id, item_id)
+                mids = [self.image(con, chat_id, item_id) for _ in range(8)]
                 con.execute("UPDATE instances SET fields=? WHERE id=?",
-                            (db.dump({"photos": [mid]}), instance_id))
+                            (db.dump({"photos": mids}), instance_id))
             self.assertEqual(self.client.get("/image-jobs", headers=self.manager).status_code, 403)
             listed = self.client.get("/image-jobs", headers=self.admin)
             self.assertEqual(listed.status_code, 200)
             with db.transaction() as con:
-                image_tasks.enqueue(con, item_id, mid, "Новый фон", 40, 60, "1")
+                image_tasks.enqueue(con, item_id, mids, "Новый фон", 40, 60, "1")
                 job = con.execute("SELECT * FROM image_jobs").fetchone()
                 self.assertEqual(job["state"], "pending")
                 self.assertEqual(job["item_id"], item_id)
             self.assertIn("ORDER", self.client.get("/image-jobs", headers=self.admin).text)
-
-            def handler(request):
-                self.assertEqual(request.headers["authorization"], "Bearer TEST_WORKER_KEY")
-                self.assertEqual(request.url.path, "/v1/jobs")
-                self.assertIn(b'prompt=', request.content)
-                return httpx.Response(202, json={"id": worker_id, "status": "queued"})
-            with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-                self.assertTrue(image_tasks.submit_one(client=client))
-                self.assertFalse(image_tasks.submit_one(client=client))
+            self.assertEqual(self.client.get("/image-worker/next").status_code, 401)
+            auth = {"Authorization": "Bearer TEST_WORKER_KEY"}
+            response = self.client.get("/image-worker/next", headers=auth)
+            self.assertEqual(response.status_code, 200, response.text)
+            pulled = response.json()
+            self.assertEqual(pulled["id"], job["id"])
+            self.assertEqual(len(pulled["image_urls"]), 8)
+            self.assertEqual(self.client.get("/image-worker/next", headers=auth).json(), pulled)
+            for url in pulled["image_urls"]:
+                self.assertEqual(self.client.get(url.replace("https://one.example.ru/folio", "")).status_code, 200)
             with db.transaction() as con:
-                self.assertEqual(con.execute("SELECT state,worker_id FROM image_jobs").fetchone()["worker_id"], worker_id)
-
-            payload = {"id": worker_id, "status": "completed", "print_file": "\\\\server\\prints\\file.tif"}
-            raw = json.dumps(payload, separators=(",", ":")).encode()
-            headers = {"X-Folio-Event": "job.completed", "X-Folio-Delivery-Id": worker_id,
-                       "X-Folio-Signature": "sha256=" + hmac.new(b"TEST_WORKER_KEY", raw, hashlib.sha256).hexdigest()}
-            bad = self.client.post("/image-worker/webhook", content=raw,
-                                   headers={**headers, "X-Folio-Signature": "sha256=bad"})
-            self.assertEqual(bad.status_code, 401)
-            accepted = self.client.post("/image-worker/webhook", content=raw, headers=headers)
-            self.assertEqual(accepted.status_code, 200)
-            self.assertEqual(self.client.post("/image-worker/webhook", content=raw, headers=headers).status_code, 200)
+                self.assertEqual(con.execute("SELECT state FROM image_jobs").fetchone()["state"], "queued")
+            endpoint = f"/image-worker/jobs/{job['id']}"
+            self.assertEqual(self.client.post(endpoint, data={"worker_id": pulled["worker_id"], "status": "generating"}).status_code, 401)
+            self.assertEqual(self.client.post(endpoint, headers=auth, data={"worker_id": pulled["worker_id"], "status": "generating"}).status_code, 200)
+            preview = io.BytesIO()
+            Image.new("RGB", (667, 1000), "blue").save(preview, format="JPEG")
+            data = {"worker_id": pulled["worker_id"], "status": "completed", "print_file": r"\\server\prints\file.tif"}
+            files = {"preview": ("preview.jpg", preview.getvalue(), "image/jpeg")}
+            accepted = self.client.post(endpoint, headers=auth, data=data, files=files)
+            self.assertEqual(accepted.status_code, 200, accepted.text)
+            self.assertEqual(self.client.post(endpoint, headers=auth, data=data, files=files).status_code, 200)
             with db.transaction() as con:
-                result = con.execute("SELECT state,print_file FROM image_jobs").fetchone()
+                result = con.execute("SELECT state,print_file,preview_media_id FROM image_jobs").fetchone()
                 self.assertEqual(result["state"], "completed")
-                self.assertEqual(result["print_file"], payload["print_file"])
+                self.assertEqual(result["print_file"], data["print_file"])
+                self.assertIsNotNone(result["preview_media_id"])
+                self.assertEqual(con.execute("SELECT COUNT(*) FROM media WHERE id=?", (result["preview_media_id"],)).fetchone()[0], 1)
             self.assertEqual(self.client.get(f"/image-jobs/{job['id']}/preview", headers=self.manager).status_code, 403)
-            with patch("app.main.image_tasks.preview", return_value=b"jpeg"):
-                response = self.client.get(f"/image-jobs/{job['id']}/preview", headers=self.admin)
+            response = self.client.get(f"/image-jobs/{job['id']}/preview", headers=self.admin)
             self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.content, b"jpeg")
+            self.assertEqual(response.content, preview.getvalue())
+            self.assertEqual(self.client.get("/image-worker/next", headers=auth).status_code, 204)
+
+    def test_send_mockup_block_sends_worker_preview(self):
+        instance_id, item_id, chat_id, _ = self.setup_instance()
+        with self.image_worker_settings({
+            "FOLIO_IMAGE_WORKER_URL": "https://unused.example.com",
+            "FOLIO_IMAGE_WORKER_API_KEY": "MOCKUP_KEY",
+        }):
+            with db.transaction() as con:
+                mid = self.image(con, chat_id, item_id)
+                version = con.execute("SELECT version_id FROM instances WHERE id=?", (instance_id,)).fetchone()[0]
+                value = json.loads(con.execute("SELECT graph FROM versions WHERE id=?", (version,)).fetchone()[0])
+                value["nodes"].extend([
+                    {"id": "make", "kind": "image_worker", "prompt": "Новый фон", "next": "mockup", "error": "ready"},
+                    {"id": "mockup", "kind": "send_mockup", "next": "ready"},
+                ])
+                con.execute("UPDATE versions SET graph=? WHERE id=?", (db.dump(value), version))
+                con.execute("UPDATE instances SET node='make',status='waiting_integration',fields=? WHERE id=?",
+                            (db.dump({"photos": [mid], "background": "Синий"}), instance_id))
+                image_tasks.enqueue(con, item_id, mid, "Новый фон", 40, 60, "1",
+                                    instance_id=instance_id, node_id="make")
+            auth = {"Authorization": "Bearer MOCKUP_KEY"}
+            pulled = self.client.get("/image-worker/next", headers=auth).json()
+            preview = io.BytesIO()
+            Image.new("RGB", (667, 1000), "blue").save(preview, format="JPEG")
+            response = self.client.post(f"/image-worker/jobs/{pulled['id']}", headers=auth,
+                data={"worker_id": pulled["worker_id"], "status": "completed", "print_file": "local.tif"},
+                files={"preview": ("preview.jpg", preview.getvalue(), "image/jpeg")})
+            self.assertEqual(response.status_code, 200, response.text)
+            with db.transaction() as con:
+                instance = con.execute("SELECT node,status FROM instances WHERE id=?", (instance_id,)).fetchone()
+                self.assertEqual((instance["node"], instance["status"]), ("mockup", "waiting_integration"))
+                outgoing = con.execute("SELECT * FROM outbox WHERE instance_id=? AND kind='file'", (instance_id,)).fetchone()
+                self.assertIsNotNone(outgoing)
+                self.assertEqual(outgoing["media_id"], con.execute("SELECT preview_media_id FROM image_jobs").fetchone()[0])
+                con.execute("UPDATE outbox SET state='sent' WHERE id=?", (outgoing["id"],))
+                scenarios.outgoing_confirmed(con, outgoing["id"])
+                self.assertEqual(con.execute("SELECT node FROM instances WHERE id=?", (instance_id,)).fetchone()[0], "ready")
 
     def test_image_job_uncertain_submit_is_never_repeated(self):
         instance_id, item_id, chat_id, _ = self.setup_instance()

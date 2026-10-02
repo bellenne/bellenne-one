@@ -1,0 +1,10 @@
+body { width: calc(var(--bp-sidebar-width) + var(--bp-space-12) * 2); min-height: 0; }
+body::before { content: none; }
+.panel { padding: var(--bp-space-4); }
+.stack { gap: var(--bp-space-3); }
+.form-actions { gap: var(--bp-space-2); }
+.panel p, .panel h1 { margin: 0; }
+[hidden] { display: none !important; }
+progress { width: 100%; height: var(--bp-space-2); accent-color: var(--product-accent); }
+#current, #message, #error { overflow-wrap: anywhere; }
+#counts { font-variant-numeric: tabular-nums; }

@@ -9,5 +9,10 @@
 !apps/nest/tests/**
 !apps/proof/tests
 !apps/proof/tests/**
+!apps/parity/tests
+!apps/parity/tests/**
 **/data
 **/outputs
+apps/parity/extension/unpacked
+apps/parity/test-artifacts
+apps/parity/app/static/bellenne-parity-extension.zip

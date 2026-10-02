@@ -691,6 +691,7 @@ def settings_page(request: Request, section: str = "overview"):
             retailcrm_config=retailcrm_config,
             mattermost_config=mattermost_config,
             image_worker_config=image_worker_config,
+            folio_public_base=os.environ.get("FOLIO_PUBLIC_BASE_URL", "").strip().rstrip("/"),
             retailcrm_capabilities=retailcrm_capabilities,
             retailcrm_job=retailcrm_job,
             retailcrm_media_url_error=retailcrm_media_url_error,
@@ -830,18 +831,17 @@ async def save_image_worker(request: Request):
         public_base = os.environ.get("FOLIO_PUBLIC_BASE_URL", "").strip().rstrip("/")
         if not public_base:
             raise scenarios.Invalid("Сначала задайте FOLIO_PUBLIC_BASE_URL — публичный HTTPS-адрес Folio")
-        callback = f"{public_base}/folio/image-worker/webhook"
-        allow_http = str(form.get("base_url") or "").strip().startswith("http://")
+        callback = f"{public_base}/folio/image-worker/vendor-callback"
         try:
-            base, callback, input_base = image_tasks.validate_urls(required(form, "base_url"), callback,
-                                                                    public_base, allow_http)
+            base, callback, input_base = image_tasks.validate_urls(public_base, callback,
+                                                                    public_base, False)
         except image_tasks.ImageTaskError as exc:
-            raise scenarios.Invalid("Проверьте адрес воркера и FOLIO_PUBLIC_BASE_URL") from exc
+            raise scenarios.Invalid("Проверьте публичный HTTPS-адрес FOLIO_PUBLIC_BASE_URL") from exc
         api_key = str(form.get("api_key") or "").strip()
         if not current and not api_key:
             raise scenarios.Invalid("Введите ключ воркера")
         changed = (not current or base != current["base_url"] or callback != current["webhook_url"]
-                   or input_base != current["input_base_url"] or allow_http != bool(current["allow_http"])
+                   or input_base != current["input_base_url"] or bool(current["allow_http"])
                    or bool(api_key))
         if changed and con.execute("SELECT 1 FROM image_jobs WHERE state='submitting' LIMIT 1").fetchone():
             raise scenarios.Invalid("Дождитесь завершения текущей передачи задания воркеру")
@@ -856,7 +856,7 @@ async def save_image_worker(request: Request):
                 "UPDATE image_worker_integrations SET base_url=?,api_key_secret=?,webhook_secret=?,"
                 "webhook_url=?,input_base_url=?,allow_http=?,vendor_token_secret=?,checked_at=?,error=?,"
                 "revision=revision+1 WHERE id=1",
-                (base, key_encrypted, webhook_encrypted, callback, input_base, int(allow_http),
+                (base, key_encrypted, webhook_encrypted, callback, input_base, 0,
                  vendor_encrypted, None if changed else current["checked_at"],
                  None if changed else current["error"]),
             )
@@ -864,7 +864,7 @@ async def save_image_worker(request: Request):
             con.execute(
                 "INSERT INTO image_worker_integrations(id,base_url,api_key_secret,webhook_secret,"
                 "webhook_url,input_base_url,allow_http,vendor_token_secret) VALUES(1,?,?,?,?,?,?,?)",
-                (base, key_encrypted, webhook_encrypted, callback, input_base, int(allow_http), vendor_encrypted),
+                (base, key_encrypted, webhook_encrypted, callback, input_base, 0, vendor_encrypted),
             )
         db.audit(con, actor["id"], "settings.image_worker_updated", "settings", 1)
     return redirect("/settings/image-worker")
@@ -886,8 +886,8 @@ async def probe_image_worker(request: Request):
         ok, error = False, exc.code
     with db.transaction() as con:
         if con.execute("SELECT revision FROM image_worker_integrations WHERE id=1").fetchone()[0] == revision:
-            con.execute("UPDATE image_worker_integrations SET checked_at=?,error=? WHERE id=1",
-                        (db.now(), None if ok else error))
+            con.execute("UPDATE image_worker_integrations SET error=? WHERE id=1",
+                        (None if ok else error,))
             db.audit(con, actor["id"], "integration.image_worker_probe", "image_worker_integration", 1)
     return redirect("/settings/image-worker")
 
@@ -1710,6 +1710,41 @@ async def image_worker_webhook(request: Request):
     return {"ok": True}
 
 
+@app.get("/image-worker/next")
+def image_worker_next(request: Request):
+    with db.transaction() as con:
+        try:
+            image_tasks.authenticate_pull(con, request.headers.get("Authorization", ""))
+            con.execute("UPDATE image_worker_integrations SET checked_at=?,error=NULL WHERE id=1", (db.now(),))
+            job = image_tasks.claim_next(con)
+        except image_tasks.ImageTaskError as exc:
+            raise HTTPException(401 if exc.code == "image_worker_auth_failed" else 503, exc.code) from exc
+    return job if job else Response(status_code=204)
+
+
+@app.post("/image-worker/jobs/{image_job_id}")
+async def image_worker_update(request: Request, image_job_id: int):
+    form = await request.form()
+    upload = form.get("preview")
+    preview_bytes = None
+    if upload is not None:
+        if not hasattr(upload, "read"):
+            raise HTTPException(422, "preview must be a JPEG file")
+        preview_bytes = await upload.read(10 * 1024 * 1024 + 1)
+        await upload.close()
+    with db.transaction() as con:
+        try:
+            image_tasks.authenticate_pull(con, request.headers.get("Authorization", ""))
+            con.execute("UPDATE image_worker_integrations SET checked_at=?,error=NULL WHERE id=1", (db.now(),))
+            image_tasks.receive_update(con, image_job_id, str(form.get("worker_id") or ""),
+                                       str(form.get("status") or ""), str(form.get("print_file") or ""),
+                                       str(form.get("error") or ""), preview_bytes)
+        except image_tasks.ImageTaskError as exc:
+            status = 401 if exc.code == "image_worker_auth_failed" else 404 if exc.code == "image_worker_job_unknown" else 409 if exc.code == "image_worker_result_conflict" else 422
+            raise HTTPException(status, exc.code) from exc
+    return {"ok": True}
+
+
 @app.get("/image-worker/input/{token}")
 def image_worker_input(token: str):
     return image_worker_input_at(token, 0)
@@ -1757,14 +1792,12 @@ def image_job_preview(request: Request, image_job_id: int):
     with db.transaction() as con:
         security.user(request, con, admin=True)
         record = get_record(con, "image_jobs", image_job_id)
-        if record["state"] != "completed" or not record["worker_id"]:
+        if record["state"] != "completed" or not record["preview_media_id"]:
             raise HTTPException(404, "Предпросмотр ещё не готов")
-        worker_id = record["worker_id"]
-    try:
-        content = image_tasks.preview(worker_id)
-    except image_tasks.ImageTaskError:
-        raise HTTPException(503, "Предпросмотр сейчас недоступен") from None
-    return Response(content, media_type="image/jpeg")
+        path = db.DATA / "media" / record["preview_media_id"]
+        if not path.is_file():
+            raise HTTPException(404, "Предпросмотр ещё не готов")
+    return FileResponse(path, media_type="image/jpeg")
 
 
 @app.get("/audit")

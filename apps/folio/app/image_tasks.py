@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import io
 import json
 import math
 import os
@@ -16,6 +17,7 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 import httpx
+from PIL import Image
 
 from . import db, security
 
@@ -122,25 +124,12 @@ def vendor_token() -> str:
 
 
 def probe(*, client=None) -> tuple[bool, str | None]:
-    base, key, _, _ = configuration()
-    owned = client is None
-    client = client or httpx.Client(timeout=10, follow_redirects=False)
-    try:
-        health = client.get(base + "/health")
-        if health.status_code != 200 or not isinstance(health.json(), dict) or health.json().get("ok") is not True:
-            return False, "image_worker_health_failed"
-        # The worker authenticates before looking up a job. 404 confirms the
-        # key without creating a job or sending data to an external provider.
-        check = client.get(base + f"/v1/jobs/{uuid.uuid4()}",
-                           headers={"Authorization": f"Bearer {key}"})
-        if check.status_code == 404:
-            return True, None
-        return False, "image_worker_auth_failed" if check.status_code in {401, 403} else "image_worker_probe_failed"
-    except (httpx.HTTPError, ValueError, TypeError):
-        return False, "image_worker_unreachable"
-    finally:
-        if owned:
-            client.close()
+    with closing(db.connect()) as con:
+        row = integration(con)
+    if not row or not row["checked_at"]:
+        return False, "image_worker_no_recent_poll"
+    recent = datetime.fromisoformat(row["checked_at"]) >= datetime.now(timezone.utc) - timedelta(minutes=10)
+    return (True, None) if recent else (False, "image_worker_no_recent_poll")
 
 
 def dimensions_from_article(article: str) -> tuple[int, int]:
@@ -396,3 +385,94 @@ def preview(worker_id: str, *, client=None) -> bytes:
     if len(response.content) > 10 * 1024 * 1024:
         raise ImageTaskError("image_worker_preview_unavailable")
     return response.content
+
+
+def authenticate_pull(con, authorization: str) -> None:
+    row = integration(con)
+    if not row:
+        raise ImageTaskError("image_worker_not_configured")
+    try:
+        key = security.cipher().decrypt(row["api_key_secret"].encode()).decode()
+    except Exception as exc:
+        raise ImageTaskError("image_worker_credentials_unavailable") from exc
+    if not key or not hmac.compare_digest(authorization, f"Bearer {key}"):
+        raise ImageTaskError("image_worker_auth_failed")
+
+
+def claim_next(con) -> dict | None:
+    """Return the same claimed job until its terminal result is acknowledged."""
+    row = con.execute(
+        "SELECT j.*,i.external_status FROM image_jobs j JOIN items i ON i.id=j.item_id "
+        "WHERE j.pull_claimed=1 AND j.state NOT IN ('completed','failed') ORDER BY j.id LIMIT 1"
+    ).fetchone()
+    if not row:
+        row = con.execute(
+            "SELECT j.*,i.external_status FROM image_jobs j JOIN items i ON i.id=j.item_id "
+            "WHERE j.pull_claimed=0 AND j.worker_id IS NOT NULL "
+            "AND j.state NOT IN ('completed','failed') ORDER BY j.id LIMIT 1"
+        ).fetchone()
+    if not row:
+        row = con.execute(
+            "SELECT j.*,i.external_status FROM image_jobs j JOIN items i ON i.id=j.item_id "
+            "WHERE j.state='pending' ORDER BY j.id LIMIT 1"
+        ).fetchone()
+    if not row:
+        return None
+    if row["external_status"] == "cancelled":
+        con.execute("UPDATE image_jobs SET state='failed',error=?,updated_at=? WHERE id=?",
+                    ("image_worker_order_cancelled", db.now(), row["id"]))
+        return None
+    public_base = os.environ.get("FOLIO_PUBLIC_BASE_URL", "").rstrip("/")
+    if urlsplit(public_base).scheme != "https":
+        raise ImageTaskError("image_worker_url_invalid")
+    worker_id = row["worker_id"] or str(uuid.uuid5(uuid.NAMESPACE_URL, f"{public_base}/folio/image-jobs/{row['id']}"))
+    if not row["pull_claimed"]:
+        con.execute("UPDATE image_jobs SET state=?,pull_claimed=1,worker_id=?,updated_at=? WHERE id=?",
+                    ("queued" if row["state"] == "pending" else row["state"], worker_id, db.now(), row["id"]))
+    media_ids = json.loads(row["media_ids"]) or [row["media_id"]]
+    prefix = os.environ.get("MODULE_PREFIX", "/folio").rstrip("/")
+    return {"id": row["id"], "worker_id": worker_id, "prompt": row["prompt"],
+            "width_cm": row["width_cm"], "height_cm": row["height_cm"],
+            "image_urls": [f"{public_base}{prefix}/image-worker/input/{quote(row['input_token'], safe='')}/{index}"
+                           for index in range(len(media_ids))]}
+
+
+def receive_update(con, job_id: int, worker_id: str, state: str,
+                   print_file: str = "", error: str = "", preview_bytes: bytes | None = None) -> None:
+    row = con.execute("SELECT j.*,inst.chat_id FROM image_jobs j "
+                      "LEFT JOIN instances inst ON inst.id=j.instance_id WHERE j.id=?", (job_id,)).fetchone()
+    if not row or not row["pull_claimed"] or row["worker_id"] != worker_id:
+        raise ImageTaskError("image_worker_job_unknown")
+    if row["state"] in TERMINAL:
+        if row["state"] != state:
+            raise ImageTaskError("image_worker_result_conflict")
+        return
+    ranks = {"queued": 0, "generating": 1, "waiting_topaz": 2, "composing": 3,
+             "completed": 4, "failed": 4}
+    if state not in ranks:
+        raise ImageTaskError("image_worker_response_invalid")
+    if ranks[state] < ranks.get(row["state"], 0):
+        return
+    preview_media_id = None
+    if state == "completed":
+        if not print_file.strip() or len(print_file) > 1000 or not preview_bytes:
+            raise ImageTaskError("image_worker_result_incomplete")
+        if len(preview_bytes) > 10 * 1024 * 1024:
+            raise ImageTaskError("image_worker_preview_invalid")
+        try:
+            with Image.open(io.BytesIO(preview_bytes)) as image:
+                if image.format != "JPEG" or max(image.size) != 1000:
+                    raise ImageTaskError("image_worker_preview_invalid")
+        except OSError as exc:
+            raise ImageTaskError("image_worker_preview_invalid") from exc
+        from . import media, scenarios
+        try:
+            preview_media_id = media.store(con, preview_bytes, db.config(con), row["chat_id"], row["item_id"])
+        except scenarios.Invalid as exc:
+            raise ImageTaskError("image_worker_preview_invalid") from exc
+    con.execute("UPDATE image_jobs SET state=?,error=?,print_file=?,preview_media_id=COALESCE(?,preview_media_id),updated_at=? WHERE id=?",
+                (state, error[:500] if state == "failed" else None,
+                 print_file if state == "completed" else None, preview_media_id, db.now(), job_id))
+    if state in TERMINAL:
+        db.audit(con, "system", f"image_job.{state}", "image_job", job_id, row["chat_id"])
+        _resume_scenario(con, row)

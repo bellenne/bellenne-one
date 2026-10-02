@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, account_id INTEGER NOT
 CREATE TABLE IF NOT EXISTS outbox(id INTEGER PRIMARY KEY, chat_id INTEGER NOT NULL REFERENCES chats(id), instance_id INTEGER REFERENCES instances(id), actor TEXT NOT NULL, body TEXT NOT NULL, dedup TEXT NOT NULL UNIQUE, epoch INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','sent','failed','unknown','cancelled')), external_id TEXT, error TEXT, created_at TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'text', media_id TEXT REFERENCES media(id));
 CREATE TABLE IF NOT EXISTS retailcrm_actions(id INTEGER PRIMARY KEY, instance_id INTEGER NOT NULL REFERENCES instances(id), node_id TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','running','sent','failed','unknown')), external_id TEXT NOT NULL, retailcrm_id INTEGER, error TEXT, created_at TEXT NOT NULL, finished_at TEXT, kind TEXT NOT NULL DEFAULT 'create');
 CREATE TABLE IF NOT EXISTS mattermost_actions(id INTEGER PRIMARY KEY, instance_id INTEGER NOT NULL REFERENCES instances(id), node_id TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','running','sent','failed','unknown')), error TEXT, created_at TEXT NOT NULL, finished_at TEXT, UNIQUE(instance_id,node_id));
-CREATE TABLE IF NOT EXISTS image_jobs(id INTEGER PRIMARY KEY, item_id INTEGER NOT NULL REFERENCES items(id), media_id TEXT NOT NULL REFERENCES media(id), media_ids TEXT NOT NULL DEFAULT '[]', input_token TEXT UNIQUE, prompt TEXT NOT NULL, width_cm REAL NOT NULL, height_cm REAL NOT NULL, state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','submitting','unknown','queued','generating','waiting_topaz','composing','webhook_pending','completed','failed')), worker_id TEXT UNIQUE, error TEXT, print_file TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, next_poll_at TEXT, instance_id INTEGER REFERENCES instances(id), node_id TEXT);
+CREATE TABLE IF NOT EXISTS image_jobs(id INTEGER PRIMARY KEY, item_id INTEGER NOT NULL REFERENCES items(id), media_id TEXT NOT NULL REFERENCES media(id), media_ids TEXT NOT NULL DEFAULT '[]', input_token TEXT UNIQUE, prompt TEXT NOT NULL, width_cm REAL NOT NULL, height_cm REAL NOT NULL, state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','submitting','unknown','queued','generating','waiting_topaz','composing','webhook_pending','completed','failed')), worker_id TEXT UNIQUE, error TEXT, print_file TEXT, preview_media_id TEXT REFERENCES media(id), pull_claimed INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, next_poll_at TEXT, instance_id INTEGER REFERENCES instances(id), node_id TEXT);
 CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY, kind TEXT NOT NULL, account_id INTEGER REFERENCES accounts(id), payload TEXT NOT NULL DEFAULT '{}', state TEXT NOT NULL DEFAULT 'pending', error TEXT, created_at TEXT NOT NULL, finished_at TEXT);
 CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY, actor TEXT NOT NULL, action TEXT NOT NULL, object_type TEXT NOT NULL, object_id TEXT NOT NULL, chat_id INTEGER, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS pending_outbox ON outbox(state,id);
@@ -179,7 +179,9 @@ def initialize():
             "retailcrm_actions": {"kind": "TEXT NOT NULL DEFAULT 'create'"},
             "retailcrm_integrations": {"statuses": "TEXT NOT NULL DEFAULT '[]'"},
             "image_jobs": {"instance_id": "INTEGER REFERENCES instances(id)", "node_id": "TEXT",
-                           "media_ids": "TEXT NOT NULL DEFAULT '[]'"},
+                           "media_ids": "TEXT NOT NULL DEFAULT '[]'",
+                           "preview_media_id": "TEXT REFERENCES media(id)",
+                           "pull_claimed": "INTEGER NOT NULL DEFAULT 0"},
         }
         for table, expected in upgrades.items():
             present = {
