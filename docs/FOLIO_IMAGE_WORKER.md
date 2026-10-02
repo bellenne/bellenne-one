@@ -7,7 +7,7 @@ Folio хранит очередь заданий. Когда сценарий д
 ## Настройка
 
 1. В BellenneOne укажите `FOLIO_PUBLIC_BASE_URL=https://<публичный-домен>` и разверните новую версию приложения и gateway.
-2. В `.env` воркера укажите тот же `FOLIO_PUBLIC_BASE_URL`, общий `WORKER_API_KEY`, `NANOBANANA_MODE=live` и оплаченный `NANOBANANA_API_KEY`. Если UNC-папки пока нет, оставьте `PRINT_SHARE_PATH` пустым: TIFF останется в локальном `spool`.
+2. В Folio → **Настройки → Воркер изображений** скопируйте полную ссылку для опроса. В `.env` воркера задайте `FOLIO_POLL_URL=<эта ссылка>`, общий `WORKER_API_KEY`, `NANOBANANA_MODE=live` и оплаченный `NANOBANANA_API_KEY`. Если UNC-папки пока нет, оставьте `PRINT_SHARE_PATH` пустым: TIFF останется в локальном `spool`.
 3. В Folio откройте **Настройки → Воркер изображений** и введите только тот же ключ. Адрес ПК не нужен. Запустите `Start Worker.cmd` на ПК. Последний запрос воркера появится на странице настроек.
 
 Gateway пропускает `GET /folio/image-worker/next`, `POST /folio/image-worker/jobs/{id}` и `GET /folio/image-worker/input/{token}/{index}` без браузерной сессии. Первые два метода проверяют Bearer-ключ, ссылка на фото проверяется случайным токеном. Nano Banana Pro требует `callBackUrl`, поэтому `POST /folio/image-worker/vendor-callback/{token}` отвечает ему; результат генерации воркер узнаёт собственным опросом `record-info`.

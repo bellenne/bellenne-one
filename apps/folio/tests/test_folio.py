@@ -3782,6 +3782,7 @@ class FolioIntegrationsTest(unittest.TestCase):
             self.assertEqual(page.status_code, 200)
             self.assertNotIn("PRIVATE_WORKER_KEY", page.text)
             self.assertNotIn("PRIVATE_WEBHOOK_SECRET", page.text)
+            self.assertIn("FOLIO_POLL_URL=https://one.example.ru/folio/image-worker/next", page.text)
             self.assertEqual(self.client.get("/settings/image-worker", headers=self.manager).status_code, 403)
             with db.transaction() as con:
                 row = image_tasks.integration(con)
