@@ -1,7 +1,7 @@
 """Package a narrowly scoped MV3 extension, sharing the server DOM parser.
 
 python apps/parity/extension/build.py [--origin https://bellenne.example]
-Multiple --origin flags are permitted; default is the local gateway.
+Multiple --origin flags are permitted; defaults cover the production and local gateways.
 """
 import argparse
 import json
@@ -10,10 +10,13 @@ from urllib.parse import urlsplit
 from zipfile import ZipFile, ZIP_DEFLATED
 
 
-def build(origins=None):
+DEFAULT_ORIGINS = ["https://one.customcraft-mes.ru", "http://localhost:17863", "http://127.0.0.1:17863"]
+
+
+def build(origins=None, target=None):
     source = Path(__file__).resolve().parent
     root = source.parent
-    origins = origins or ["http://localhost:17863", "http://127.0.0.1:17863"]
+    origins = origins or DEFAULT_ORIGINS
     matches = []
     for origin in origins:
         u = urlsplit(origin)
@@ -25,7 +28,7 @@ def build(origins=None):
     matches = list(dict.fromkeys(matches))
     markets = ["https://www.wildberries.ru/*", "https://wildberries.ru/*", "https://www.ozon.ru/*", "https://ozon.ru/*"]
     manifest = {
-        "manifest_version": 3, "name": "BellenneParity", "version": "1.2.2", "minimum_chrome_version": "120",
+        "manifest_version": 3, "name": "BellenneParity", "version": "1.2.3", "minimum_chrome_version": "120",
         "description": "Читает цены WB Кошелька и Ozon Карты в вашем браузере по заданиям BellenneParity.",
         "permissions": ["storage", "alarms"], "host_permissions": matches + markets,
         "background": {"service_worker": "worker.js"}, "action": {"default_title": "Прогресс BellenneParity", "default_popup": "popup.html"},
@@ -47,7 +50,7 @@ def build(origins=None):
     files["config.js"] = ("globalThis.PARITY_ORIGINS = " + json.dumps([s.rstrip('/') for s in origins]) + ";\nglobalThis.PARITY_PREFIX = '/parity';\n").encode()
     files["storefront-extract.js"] = (root / "app/static/storefront-extract.js").read_bytes()
     files["README.txt"] = (source / "README.txt").read_bytes()
-    target = root / "app/static/bellenne-parity-extension.zip"
+    target = Path(target) if target else root / "app/static/bellenne-parity-extension.zip"
     with ZipFile(target, "w", ZIP_DEFLATED) as archive:
         for name, contents in sorted(files.items()):
             archive.writestr("bellenne-parity-extension/" + name, contents)

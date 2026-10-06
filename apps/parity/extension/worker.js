@@ -15,6 +15,12 @@ async function progress(stage, values={}) {
     ...(values.saved > (old.saved || 0) ? {lastSavedAt:Date.now()} : {})}});
 }
 const api = async (run, operation, body) => {
+  if (run.origin) {
+    const tab = await chrome.tabs.get(run.bridgeTab);
+    if (!parityCore.bridge(tab.url) || new URL(tab.url).origin !== run.origin) {
+      throw new Error('Откройте вкладку Parity, в которой запущено это задание.');
+    }
+  }
   const value = await messageToTab(run.bridgeTab, {type:'API',jobId:run.jobId,operation,body});
   if (!value?.ok) throw Object.assign(new Error(typeof value?.detail === 'string' ? value.detail : 'Вкладка Parity недоступна.'), {status:value?.status});
   return value.data;
@@ -238,7 +244,14 @@ chrome.runtime.onMessage.addListener((message,sender,respond) => {
         if (message.target === 'card' && run?.cardTab) {
           await chrome.tabs.update(run.cardTab,{active:true});
         } else {
-          const url = `${PARITY_ORIGINS[0]}${PARITY_PREFIX}${run ? `/jobs/${run.jobId}` : '/integrations'}`;
+          let origin = run?.origin || PARITY_ORIGINS[0];
+          if (run && !run.origin) {
+            try {
+              const tab = await chrome.tabs.get(run.bridgeTab);
+              if (parityCore.bridge(tab.url)) origin = new URL(tab.url).origin;
+            } catch {}
+          }
+          const url = `${origin}${PARITY_PREFIX}${run ? `/jobs/${run.jobId}` : '/integrations'}`;
           if (run?.bridgeTab) {
             try { await chrome.tabs.update(run.bridgeTab,{active:true,url}); return {ok:true}; } catch {}
           }
@@ -250,6 +263,16 @@ chrome.runtime.onMessage.addListener((message,sender,respond) => {
     }
     if (['BRIDGE','RESET_PROFILE'].includes(message.type)) {
       if (!parityCore.bridge(sender.url)) throw new Error('Неподдерживаемая вкладка Parity.');
+      const origin = new URL(sender.url).origin;
+      // Job IDs and receipt tokens belong to one installation. Opening another
+      // allowed Parity host must not redirect an active run or its saved outbox.
+      if (run && !run.origin) {
+        try {
+          const tab = await chrome.tabs.get(run.bridgeTab);
+          if (parityCore.bridge(tab.url)) run = {...run,origin:new URL(tab.url).origin};
+        } catch {}
+      }
+      if (run?.origin && run.origin !== origin) throw new Error('В этом браузере идёт задание другой установки Parity. Завершите или остановите его в исходной вкладке.');
       if (message.type === 'RESET_PROFILE') {
         if (run) {
           const state = await api({...run,bridgeTab:sender.tab.id},'claim',{client_id:clientId});
@@ -263,8 +286,8 @@ chrome.runtime.onMessage.addListener((message,sender,respond) => {
           const state = await api({...run,bridgeTab:sender.tab.id},'claim',{client_id:clientId});
           if (state.state !== 'finished') throw new Error('В этом браузере уже идёт другое задание. Остановите или завершите его.');
         }
-        await save({run:{...(run?.jobId === message.jobId ? run : {}),jobId:message.jobId,bridgeTab:sender.tab.id}});
-      } else if (run) await save({run:{...run,bridgeTab:sender.tab.id}});
+        await save({run:{...(run?.jobId === message.jobId ? run : {}),jobId:message.jobId,bridgeTab:sender.tab.id,origin}});
+      } else if (run) await save({run:{...run,bridgeTab:sender.tab.id,origin}});
       return await pump() || {ok:true};
     }
     if (message.type === 'OBSERVATION') {

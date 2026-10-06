@@ -23,6 +23,7 @@ FROM browser-dependencies AS browser
 COPY --from=base /app/app ./app
 
 FROM browser AS browser-test
+COPY --from=base /app/extension ./extension
 COPY apps/parity/tests ./tests
 CMD ["python", "-m", "unittest", "discover", "-s", "tests", "-v"]
 

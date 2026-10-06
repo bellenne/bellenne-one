@@ -1,5 +1,6 @@
 """Real unpacked MV3 extension, intercepted synthetic pages, no live accounts."""
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.parse import urlsplit
@@ -36,6 +37,11 @@ class ExtensionTests(unittest.TestCase):
         path=url.path.removeprefix('/parity') or '/'
         headers={**request.headers,**self.headers}
         response=self.client.request(request.method,path+('?' + url.query if url.query else ''),headers=headers,content=request.post_data_buffer,follow_redirects=False)
+        if url.hostname == 'one.customcraft-mes.ru' and response.status_code == 303:
+            # A fulfilled Chromium redirect can bypass interception on its next
+            # request. Keep this HTTPS fixture offline with an explicit navigation.
+            route.fulfill(content_type='text/html; charset=utf-8', body=f'<script>location.replace({json.dumps(response.headers["location"])})</script>')
+            return
         if path.endswith('/receipt') and getattr(self,'lose_receipt_response',False) and response.status_code==200:
             self.lose_receipt_response=False
             route.fulfill(status=503,content_type='application/json',body='{"detail":"Fixture: connection interrupted after commit"}')
@@ -46,6 +52,73 @@ class ExtensionTests(unittest.TestCase):
     def unpack(self,directory):
         with ZipFile(Path(__file__).parent.parent/'app/static/bellenne-parity-extension.zip') as z:
             z.extractall(directory)
+
+    def test_production_origin_collects_prices_and_accepts_parity_root(self):
+        from playwright.sync_api import sync_playwright, expect
+        with TemporaryDirectory() as directory, sync_playwright() as runtime:
+            self.unpack(directory)
+            context = self.launch(runtime, directory)
+            context.route('https://one.customcraft-mes.ru/**', self.parity_route)
+            try:
+                page = context.new_page()
+                page.goto('https://one.customcraft-mes.ru/parity')
+                worker = context.service_workers[0]
+                urls = ['https://one.customcraft-mes.ru/parity', 'https://one.customcraft-mes.ru/parity/',
+                        'https://one.customcraft-mes.ru/parity/jobs/13', 'https://one.customcraft-mes.ru/parity-other',
+                        'https://one.customcraft-mes.ru/', 'https://one.customcraft-mes.ru.evil.example/parity',
+                        'http://one.customcraft-mes.ru/parity', 'http://localhost:9999/parity']
+                self.assertEqual(worker.evaluate('urls => urls.map(url => parityCore.bridge(url))', urls),
+                                 [True, True, True, False, False, False, False, False])
+                page.goto('https://one.customcraft-mes.ru/parity/integrations')
+                expect(page.locator('[data-extension-status]')).to_contain_text('подключено', timeout=15000)
+                page.get_by_role('button', name='Собрать цены', exact=True).click()
+                page.wait_for_url('https://one.customcraft-mes.ru/parity/jobs/*')
+                expect(page.locator('[data-job-phase]')).to_have_text('Задание завершено', timeout=30000)
+                with self.factory() as session:
+                    job = session.scalar(select(Job).order_by(Job.id.desc()))
+                    self.assertEqual((job.status, job.prices_updated), ('success', 2))
+                    self.assertEqual({str(p.loyalty_price) for p in session.scalars(select(Snapshot))}, {'2917', '3043'})
+            finally:
+                context.close()
+
+    def test_active_production_job_cannot_be_rebound_to_localhost(self):
+        from playwright.sync_api import sync_playwright, expect
+        with TemporaryDirectory() as directory, sync_playwright() as runtime:
+            self.unpack(directory)
+            context = self.launch(runtime, directory)
+            context.route('https://one.customcraft-mes.ru/**', self.parity_route)
+            held = []
+            context.route('https://www.ozon.ru/**', lambda route: held.append(route))
+            try:
+                page = context.new_page()
+                page.goto('https://one.customcraft-mes.ru/parity/integrations')
+                expect(page.locator('[data-extension-status]')).to_contain_text('подключено', timeout=15000)
+                page.get_by_role('button', name='Собрать цены', exact=True).click()
+                page.wait_for_url('https://one.customcraft-mes.ru/parity/jobs/*')
+                expect(page.locator('[data-job-phase]')).to_have_text('Сбор в вашем браузере', timeout=15000)
+                worker = context.service_workers[0]
+                before = worker.evaluate("chrome.storage.local.get(['run','outbox'])")
+                self.assertEqual(before['run']['origin'], 'https://one.customcraft-mes.ru')
+                local = context.new_page()
+                local.goto(f"http://localhost:17863/parity/jobs/{before['run']['jobId']}")
+                expect(local.locator('[data-extension-status]')).to_contain_text('другой установки', timeout=10000)
+                after = worker.evaluate("chrome.storage.local.get(['run','outbox'])")
+                self.assertEqual(after['run']['origin'], before['run']['origin'])
+                self.assertEqual(after['run']['bridgeTab'], before['run']['bridgeTab'])
+                popup = context.new_page()
+                popup.goto(worker.url.replace('/worker.js', '/popup.html'))
+                self.assertTrue(popup.evaluate("chrome.runtime.sendMessage({type:'OPEN',target:'parity'})")['ok'])
+                self.assertTrue(page.url.startswith('https://one.customcraft-mes.ru/parity/jobs/'))
+                # Navigating the assigned bridge to another host must also block
+                # background API calls even when its tab ID stays unchanged.
+                page.goto(f"http://localhost:17863/parity/jobs/{before['run']['jobId']}")
+                result = worker.evaluate("async run => {try {await api(run,'claim',{}); return 'unsafe';} catch(e) {return e.message;}}", before['run'])
+                self.assertIn('вкладку Parity', result)
+            finally:
+                for route in held:
+                    route.abort()
+                context.unroute_all(behavior='ignoreErrors')
+                context.close()
 
     def test_one_click_collects_dynamic_cards_with_real_extension(self):
         from playwright.sync_api import sync_playwright, expect

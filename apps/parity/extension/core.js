@@ -1,7 +1,7 @@
 /* Shared validation; no arbitrary pages or server endpoints. */
 globalThis.parityCore = {
   bridge(url) {
-    try { const u = new URL(url); return PARITY_ORIGINS.includes(u.origin) && u.pathname.startsWith(`${PARITY_PREFIX}/`); } catch { return false; }
+    try { const u = new URL(url); return PARITY_ORIGINS.includes(u.origin) && (u.pathname === PARITY_PREFIX || u.pathname.startsWith(`${PARITY_PREFIX}/`)); } catch { return false; }
   },
   card(task, url) {
     try {
