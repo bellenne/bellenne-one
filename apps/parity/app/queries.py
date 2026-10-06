@@ -48,7 +48,10 @@ def catalog(session, owner, *, q="", exact=False, status="", price_type="", dire
     total = session.scalar(select(func.count()).select_from(base.subquery()))
     ordering = {"updated": updated.desc(), "article": func.coalesce(wb.seller_article, ozon.seller_article).asc(), "name": func.coalesce(wb.name, ozon.name).asc(),
                 "difference": select(func.max(Comparison.difference_absolute)).where(Comparison.mapping_id == Mapping.id).scalar_subquery().desc()}.get(sort, updated.desc())
-    result = session.execute(base.order_by(ordering, Mapping.id).offset((page - 1) * page_size).limit(page_size)).all()
+    ordered = base.order_by(ordering, Mapping.id)
+    if page_size is not None:
+        ordered = ordered.offset((page - 1) * page_size).limit(page_size)
+    result = session.execute(ordered).all()
     snapshot_ids = [p.current_snapshot_id for row in result for p in (row[1], row[2]) if p and p.current_snapshot_id]
     snapshots = {s.id: s for s in session.scalars(select(Snapshot).where(Snapshot.id.in_(snapshot_ids)))}
     mapping_ids = [row[0].id for row in result]
@@ -60,7 +63,7 @@ def catalog(session, owner, *, q="", exact=False, status="", price_type="", dire
         if snapshot and policy.price_source == "storefront" and (snapshot.source_kind != "storefront" or snapshot.context_version != policy.context_version):
             return None
         return snapshot
-    return {"total": total, "page": page, "page_size": page_size, "pages": max(1, (total + page_size - 1) // page_size), "rows": [
+    return {"total": total, "page": page, "page_size": page_size, "pages": max(1, (total + page_size - 1) // page_size) if page_size else 1, "rows": [
         {"mapping": mapping, "wb": left, "ozon": right, "status": state,
          "wb_price": current_price(left),
          "ozon_price": current_price(right),

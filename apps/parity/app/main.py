@@ -8,7 +8,7 @@ from urllib.parse import unquote, urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ConfigDict, Field
@@ -21,6 +21,7 @@ from .db import database, migrate
 from .domain import PRICE_LABELS, PRICE_TYPES, now
 from .models import Account, ActiveJob, BrowserRun, Event, Job, Mapping, Policy, Product, Snapshot
 from .queries import catalog, history
+from .reporting import comparison_summary, excel_report
 from .security import account_view, cipher
 from .storefront import ERRORS as COLLECTION_ERRORS, CollectionError, product_url
 from .service import enqueue, ensure_owner, is_stale, log, manual_link, recalculate, summarize_errors, unlink, write_lock
@@ -346,10 +347,13 @@ def create_app(settings=None):
     @app.get("/products", response_class=HTMLResponse)
     @app.get("/discrepancies", response_class=HTMLResponse)
     @app.get("/mappings", response_class=HTMLResponse)
+    @app.get("/products/export.xlsx")
+    @app.get("/discrepancies/export.xlsx")
+    @app.get("/mappings/export.xlsx")
     def product_list(request: Request, q: str = Query("", max_length=500), exact: bool = False, status: str = "", price_type: str = "", direction: str = "", min_percent: str = Query("", max_length=32), updated_since: str = "", sort: str = "updated", availability: str = "", page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=100), owner=Depends(identity), session=Depends(db)):
         if not session.get(Policy, owner):
             return redirect("/")
-        active = request.url.path.strip("/")
+        active = request.url.path.strip("/").split("/")[0]
         try:
             percent = Decimal(min_percent) if min_percent else None
             if percent is not None and (not percent.is_finite() or not 0 <= percent <= 1000000):
@@ -365,8 +369,20 @@ def create_app(settings=None):
             except ValueError:
                 raise HTTPException(422, "Укажите корректную дату обновления.") from None
         filters = dict(q=q, exact=exact, status="mismatch" if active == "discrepancies" else status, price_type=price_type, direction=direction, min_percent=percent, updated_since=since, sort=sort, availability=availability, page=page, page_size=page_size)
-        data = catalog(session, owner, **filters)
-        return render(request, session, "catalog", {"products": "Товары", "discrepancies": "Расхождения", "mappings": "Сопоставления"}[active], view=active, data=data, filters=filters, updated_since=updated_since,
+        policy = session.get(Policy, owner)
+        title = {"products": "Товары", "discrepancies": "Расхождения", "mappings": "Сопоставления"}[active]
+        data = catalog(session, owner, **{**filters, "page": 1, "page_size": None})
+        if request.url.path.endswith("/export.xlsx"):
+            labels = {"base_price": "Зачёркнутая", "discount_price": "Обычная", "loyalty_price": "Кошелёк / карта"} if policy.price_source == "storefront" else PRICE_LABELS
+            return Response(excel_report(data["rows"], policy, filters, labels, STATUS_LABELS, title),
+                            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            headers={"Content-Disposition": f'attachment; filename="bellenne-parity-{active}-{now():%Y%m%d-%H%M%S}.xlsx"'})
+        focus_price = price_type or ("loyalty_price" if policy.price_source == "storefront" else "discount_price")
+        summary = comparison_summary(data["rows"], focus_price)
+        data.update(page=page, page_size=page_size, pages=max(1, (data["total"] + page_size - 1) // page_size), rows=data["rows"][(page-1)*page_size:page*page_size])
+        export_query = urlencode([(k,v) for k,v in request.query_params.multi_items() if k not in ("page", "page_size")])
+        return render(request, session, "catalog", title, view=active, data=data, filters=filters, updated_since=updated_since, summary=summary, focus_price=focus_price,
+                      export_link=f"{settings.module_prefix}/{active}/export.xlsx" + ("?" + export_query if export_query else ""),
                       page_link=lambda p: settings.module_prefix + request.url.path + pagination_query(request, p),
                       busy=bool(session.get(ActiveJob, owner)))
 

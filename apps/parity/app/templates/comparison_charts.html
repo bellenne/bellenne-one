@@ -1,0 +1,21 @@
+<section class="kpi-grid" aria-label="Итоги сравнения по всем результатам фильтра" data-comparison-summary>
+{% for key,label,help in [('wb_cheaper','WB дешевле','Цена Ozon выше'),('ozon_cheaper','Ozon дешевле','Цена WB выше'),('equal','Цены совпадают','Актуальные пары'),('unavailable','Без сравнения','Нет актуальных цен или связи')] %}
+<article class="card metric"><span class="kpi-label">{{ label }}</span><strong class="kpi-value" data-comparison-count="{{ key }}">{{ summary.counts[key] }}</strong><span class="muted">{{ help }}</span></article>
+{% endfor %}</section>
+<div class="charts-grid comparison-charts">
+<section class="card panel chart-card"><h2 class="section-title">Где цена ниже</h2><p class="section-copy">{{ price_labels[focus_price] }} · все {{ summary.total }} результатов фильтра.</p>
+{% if summary.total %}<div class="table-scroll"><svg class="comparison-chart" viewBox="0 0 520 250" role="img" aria-labelledby="distribution-title"><title id="distribution-title">{{ summary.counts.wb_cheaper }} товаров дешевле на WB, {{ summary.counts.ozon_cheaper }} дешевле на Ozon, {{ summary.counts.equal }} с одинаковой ценой, {{ summary.counts.unavailable }} без сравнения.</title>
+{% for key,label,series in [('wb_cheaper','WB дешевле','wb'),('ozon_cheaper','Ozon дешевле','ozon'),('equal','Совпадают','equal'),('unavailable','Без сравнения','missing')] %}{% set y=24+loop.index0*54 %}
+<text x="0" y="{{ y+13 }}" class="chart-axis-label">{{ label }}</text><rect x="155" y="{{ y }}" width="300" height="22" class="comparison-track"/><rect x="155" y="{{ y }}" width="{{ 300*summary.counts[key]/summary.total }}" height="22" class="comparison-bar comparison-{{ series }}"/><text x="515" y="{{ y+16 }}" text-anchor="end" class="chart-axis-label">{{ summary.counts[key] }}</text>
+{% endfor %}</svg></div>{% else %}<p class="empty-state">Нет товаров по выбранным фильтрам.</p>{% endif %}
+<p class="muted">Сравнено {{ summary.compared }} из {{ summary.total }}. Устаревшие, пропущенные и недоступные цены исключены из актуального сравнения.</p></section>
+<section class="card panel chart-card"><h2 class="section-title">Цены рядом</h2><p class="section-copy">{{ summary.top|length }} из {{ summary.rub_total }} актуальных пар в ₽ с наибольшей разницей · {{ price_labels[focus_price] }}.</p><div class="chart-legend"><span class="legend-key"><i class="legend-swatch legend-swatch-revenue"></i>Wildberries</span><span class="legend-key"><i class="legend-swatch legend-swatch-orders"></i>Ozon</span></div>
+{% if summary.top %}<div class="table-scroll"><svg class="comparison-chart" viewBox="0 0 520 {{ 54*summary.top|length+45 }}" role="group" aria-labelledby="paired-title"><title id="paired-title">Сравнение цен Wildberries и Ozon. Шкала начинается с нуля. Ссылки открывают историю товара.</title>
+{% for point in summary.top %}{% set y=16+loop.index0*54 %}
+<a href="{{ module_prefix }}/products/{{ point.id }}" class="comparison-chart-link"><title>{{ point.article }} · WB {{ point.wb|money }} · Ozon {{ point.ozon|money }} · разница {{ point.signed|money }}</title><text x="0" y="{{ y+18 }}" class="chart-axis-label">{{ point.article|truncate(18,true,'…') }}</text></a>
+<rect x="150" y="{{ y }}" width="{{ 265*point.wb/summary.maximum }}" height="10" class="comparison-bar comparison-wb"/><rect x="150" y="{{ y+16 }}" width="{{ 265*point.ozon/summary.maximum }}" height="10" class="comparison-bar comparison-ozon"/>
+<text x="515" y="{{ y+9 }}" text-anchor="end" class="chart-axis-label">{{ point.wb|money }}</text><text x="515" y="{{ y+26 }}" text-anchor="end" class="chart-axis-label">{{ point.ozon|money }}</text>
+{% endfor %}<text x="150" y="{{ 54*summary.top|length+25 }}" class="chart-axis-label">0 ₽</text><text x="415" y="{{ 54*summary.top|length+25 }}" text-anchor="end" class="chart-axis-label">{{ summary.maximum|money }}</text></svg></div>
+{% else %}<p class="empty-state">Для графика нужны актуальные цены обеих площадок в рублях. Запустите сбор цен или измените фильтры.</p>{% endif %}
+{% if summary.other_currency %}<p class="muted">Пар в другой валюте: {{ summary.other_currency }}. Они учтены в сводке и доступны в таблице и Excel.</p>{% endif %}</section>
+</div>

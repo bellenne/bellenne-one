@@ -33,8 +33,24 @@ body::before { animation: none; }
 .history-dot:focus { outline: none; fill: var(--bp-text); }
 .legend-wb { color: var(--bp-violet-secondary); }
 .legend-ozon { color: var(--bp-blue); }
+.comparison-chart { display: block; width: 100%; height: auto; margin-top: var(--bp-space-4); }
+.comparison-charts { align-items: start; }
+.comparison-bar.comparison-wb { fill: var(--bp-violet); }
+.comparison-bar.comparison-ozon { fill: var(--bp-blue); }
+.comparison-bar.comparison-equal { fill: var(--bp-positive); }
+.comparison-bar.comparison-missing { fill: var(--bp-text-muted); }
+.comparison-track { fill: var(--bp-border); }
+.comparison-chart-link:hover text, .comparison-chart-link:focus text { fill: var(--bp-text); text-decoration: underline; }
+.comparison-product { max-width: var(--bp-sidebar-width); }
+.comparison-name { margin-top: var(--bp-space-1); overflow-wrap: anywhere; }
+.comparison-price { font: var(--bp-font-section-title); }
+.comparison-delta { white-space: nowrap; margin: var(--bp-space-2) 0; font-variant-numeric: tabular-nums; }
+.comparison-more { margin-top: var(--bp-space-2); font: var(--bp-font-body-secondary); }
+.comparison-more summary { color: var(--bp-text-secondary); cursor: pointer; }
+.comparison-more > div, .comparison-more > span { display: block; margin-top: var(--bp-space-2); }
 .input, .select { background: var(--bp-surface); }
 pre { white-space: pre-wrap; overflow-wrap: anywhere; font: var(--bp-font-body-secondary); }
 button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 2px solid var(--product-accent); outline-offset: 2px; }
 @media (max-width: 64rem) { .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 48rem) { .comparison-chart { min-width: calc(var(--bp-sidebar-width) * 2); } }
 @media (max-width: 48rem) { .facts, .kpi-grid { grid-template-columns: 1fr; } .pagination { justify-content: flex-start; } }
