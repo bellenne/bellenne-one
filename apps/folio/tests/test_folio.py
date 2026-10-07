@@ -1657,6 +1657,91 @@ class FolioTest(unittest.TestCase):
             worker._undo_false_takeover(con, chat, {"ozon-mockup"})
             self.assertEqual(con.execute("SELECT mode FROM chats WHERE id=?", (chat_id,)).fetchone()[0], "manual")
 
+    def test_reconciled_bot_mockup_recovers_bot_and_enters_approval(self):
+        instance_id, item_id, chat_id, _ = self.setup_instance()
+        graph_value = {"nodes": [
+            {"id": "start", "kind": "start", "next": "mockup"},
+            {"id": "mockup", "kind": "send_mockup", "next": "approval"},
+            {"id": "approval", "kind": "approval", "text": "Подтвердите макет",
+             "accept": "ДА", "reject": "НЕТ", "hours": 6,
+             "next": "end", "error": "end"},
+            {"id": "end", "kind": "end"},
+        ]}
+        with db.transaction() as con:
+            version_id = con.execute("SELECT version_id FROM instances WHERE id=?", (instance_id,)).fetchone()[0]
+            con.execute("UPDATE versions SET graph=? WHERE id=?", (db.dump(graph_value), version_id))
+            con.execute("UPDATE instances SET node='mockup',status='waiting_integration',prompted=0 WHERE id=?",
+                        (instance_id,))
+            con.execute("DELETE FROM outbox WHERE chat_id=?", (chat_id,))
+            mid = self.image(con, chat_id, item_id)
+            digest = hashlib.sha256((db.DATA / "media" / mid).read_bytes()).hexdigest()
+            outbox_id = con.execute(
+                "INSERT INTO outbox(chat_id,instance_id,actor,body,dedup,epoch,state,created_at,kind,media_id) "
+                "VALUES(?,?,'bot','Макет для согласования',?,0,'unknown',?,'file',?)",
+                (chat_id, instance_id, f"mockup:{instance_id}:mockup", db.now(), mid),
+            ).lastrowid
+            seller_message = {
+                "message_id": "ozon-bot-mockup", "created_at": db.now(),
+                "user": {"type": "seller"},
+                "data": ["![](https://api-seller.ozon.ru/v2/chat/file/mockup)"],
+            }
+            chat = con.execute("SELECT * FROM chats WHERE id=?", (chat_id,)).fetchone()
+            worker.import_message(con, chat, seller_message)
+            self.assertEqual(con.execute("SELECT mode FROM chats WHERE id=?", (chat_id,)).fetchone()[0], "manual")
+            worker.reconcile_outbox(con, chat, [seller_message], {"ozon-bot-mockup": digest})
+            self.assertEqual(con.execute("SELECT state FROM outbox WHERE id=?", (outbox_id,)).fetchone()[0], "sent")
+            self.assertEqual(con.execute("SELECT mode FROM chats WHERE id=?", (chat_id,)).fetchone()[0], "bot")
+            self.assertEqual(
+                tuple(con.execute("SELECT node,status FROM instances WHERE id=?", (instance_id,)).fetchone()),
+                ("approval", "waiting_approval"),
+            )
+            prompt = con.execute(
+                "SELECT body,state FROM outbox WHERE instance_id=? AND kind='text'", (instance_id,),
+            ).fetchone()
+            self.assertEqual(tuple(prompt), ("Подтвердите макет", "pending"))
+
+    def test_previously_reconciled_bot_mockup_resumes_on_sync(self):
+        instance_id, item_id, chat_id, _ = self.setup_instance()
+        graph_value = {"nodes": [
+            {"id": "start", "kind": "start", "next": "mockup"},
+            {"id": "mockup", "kind": "send_mockup", "next": "approval"},
+            {"id": "approval", "kind": "approval", "text": "Подтвердите макет",
+             "accept": "ДА", "reject": "НЕТ", "hours": 6,
+             "next": "end", "error": "end"},
+            {"id": "end", "kind": "end"},
+        ]}
+        with db.transaction() as con:
+            version_id = con.execute("SELECT version_id FROM instances WHERE id=?", (instance_id,)).fetchone()[0]
+            con.execute("UPDATE versions SET graph=? WHERE id=?", (db.dump(graph_value), version_id))
+            con.execute("UPDATE instances SET node='mockup',status='waiting_integration' WHERE id=?", (instance_id,))
+            con.execute("DELETE FROM outbox WHERE chat_id=?", (chat_id,))
+            mid = self.image(con, chat_id, item_id)
+            con.execute(
+                "INSERT INTO outbox(chat_id,instance_id,actor,body,dedup,epoch,state,created_at,kind,media_id) "
+                "VALUES(?,?,'bot','Макет для согласования',?,0,'unknown',?,'file',?)",
+                (chat_id, instance_id, f"mockup:{instance_id}:mockup", db.now(), mid),
+            )
+            chat = con.execute("SELECT * FROM chats WHERE id=?", (chat_id,)).fetchone()
+            worker.import_message(con, chat, {
+                "message_id": "ozon-old-mockup", "created_at": db.now(),
+                "user": {"type": "seller"},
+                "data": ["![](https://api-seller.ozon.ru/v2/chat/file/old)"],
+            })
+            con.execute(
+                "UPDATE outbox SET state='sent',external_id='ozon-old-mockup' "
+                "WHERE dedup=?", (f"mockup:{instance_id}:mockup",),
+            )
+            worker.recover_sent_mockup(con, chat)
+            self.assertEqual(con.execute("SELECT mode FROM chats WHERE id=?", (chat_id,)).fetchone()[0], "bot")
+            self.assertEqual(
+                tuple(con.execute("SELECT node,status FROM instances WHERE id=?", (instance_id,)).fetchone()),
+                ("approval", "waiting_approval"),
+            )
+            self.assertEqual(con.execute(
+                "SELECT COUNT(*) FROM outbox WHERE instance_id=? AND kind='text' AND state='pending'",
+                (instance_id,),
+            ).fetchone()[0], 1)
+
     def test_send_acknowledgement_is_not_a_message_id(self):
         self.setup_instance()
 

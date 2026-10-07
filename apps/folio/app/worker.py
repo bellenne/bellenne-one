@@ -538,10 +538,10 @@ def _undo_false_takeover(con, chat, recovered_message_ids):
     }:
         return
     instance = con.execute(
-        "SELECT id,status FROM instances WHERE chat_id=? AND item_id=?",
+        "SELECT id,status,node,version_id FROM instances WHERE chat_id=? AND item_id=?",
         (chat["id"], current["active_item"]),
     ).fetchone()
-    if not instance or instance["status"] not in {"collecting", "waiting_mockup"}:
+    if not instance or instance["status"] not in {"collecting", "waiting_mockup", "waiting_integration"}:
         return
     if instance["status"] == "waiting_mockup" and not any(
         con.execute(
@@ -552,6 +552,20 @@ def _undo_false_takeover(con, chat, recovered_message_ids):
         for message_id in recovered_message_ids
     ):
         return
+    if instance["status"] == "waiting_integration":
+        graph = json.loads(con.execute(
+            "SELECT graph FROM versions WHERE id=?", (instance["version_id"],)
+        ).fetchone()[0])
+        node = next((node for node in graph["nodes"] if node["id"] == instance["node"]), None)
+        if not node or node["kind"] != "send_mockup" or not any(
+            con.execute(
+                "SELECT 1 FROM outbox WHERE chat_id=? AND instance_id=? AND actor='bot' "
+                "AND kind='file' AND dedup=? AND state='sent' AND external_id=?",
+                (chat["id"], instance["id"], f"mockup:{instance['id']}:{node['id']}", message_id),
+            ).fetchone()
+            for message_id in recovered_message_ids
+        ):
+            return
     if con.execute(
         "SELECT 1 FROM audit WHERE chat_id=? AND id>? "
         "AND actor NOT IN ('system') LIMIT 1",
@@ -573,6 +587,37 @@ def _undo_false_takeover(con, chat, recovered_message_ids):
         if json.loads(event["body"]).get("epoch") == current["epoch"]:
             con.execute("UPDATE events SET state='pending' WHERE id=?", (event["id"],))
     db.audit(con, "system", "chat.autorecovered", "chat", chat["id"], chat["id"])
+
+
+def recover_sent_mockup(con, chat):
+    """Resume a previously reconciled bot mockup after a false seller takeover."""
+
+    current = con.execute("SELECT * FROM chats WHERE id=?", (chat["id"],)).fetchone()
+    if not current or current["mode"] != "manual" or not current["active_item"]:
+        return
+    instance = con.execute(
+        "SELECT * FROM instances WHERE chat_id=? AND item_id=? AND status='waiting_integration'",
+        (chat["id"], current["active_item"]),
+    ).fetchone()
+    if not instance:
+        return
+    graph = json.loads(con.execute(
+        "SELECT graph FROM versions WHERE id=?", (instance["version_id"],)
+    ).fetchone()[0])
+    node = next((node for node in graph["nodes"] if node["id"] == instance["node"]), None)
+    if not node or node["kind"] != "send_mockup":
+        return
+    outgoing = con.execute(
+        "SELECT id,external_id FROM outbox WHERE chat_id=? AND instance_id=? "
+        "AND actor='bot' AND kind='file' AND dedup=? AND state='sent' "
+        "AND external_id IS NOT NULL",
+        (chat["id"], instance["id"], f"mockup:{instance['id']}:{node['id']}"),
+    ).fetchone()
+    if not outgoing:
+        return
+    _undo_false_takeover(con, chat, {outgoing["external_id"]})
+    if con.execute("SELECT mode FROM chats WHERE id=?", (chat["id"],)).fetchone()[0] == "bot":
+        scenarios.outgoing_confirmed(con, outgoing["id"])
 
 
 def backfill_chat_orders(account_id, adapter):
@@ -1409,10 +1454,11 @@ def sync_job(job, adapter, settings):
                                  _text(raw.get("message_id")), chat["id"])
         for chat in known:
             scoped_messages = routed.get(chat["id"], [])
-            if not scoped_messages:
-                continue
             with db.transaction() as con:
                 reconcile_outbox(con, chat, scoped_messages, file_digests_all)
+                recover_sent_mockup(con, chat)
+            if not scoped_messages:
+                continue
             # The endpoint returns newest first; apply chronologically.
             for raw in reversed(scoped_messages):
                 with db.transaction() as con:

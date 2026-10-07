@@ -943,6 +943,14 @@ def advance(con, instance_id, reply=None, *, simulate_external=False):
             if simulate_external:
                 node_id, prompted = node["next"], 0
                 continue
+            key = f"mockup:{instance_id}:{node_id}"
+            outgoing = con.execute("SELECT state FROM outbox WHERE dedup=?", (key,)).fetchone()
+            if outgoing is not None:
+                if outgoing["state"] == "sent":
+                    node_id, prompted = node["next"], 0
+                    continue
+                status = "needs_manager" if outgoing["state"] in {"failed", "unknown", "cancelled"} else "waiting_integration"
+                break
             job = con.execute(
                 "SELECT preview_media_id FROM image_jobs WHERE instance_id=? "
                 "AND state='completed' AND preview_media_id IS NOT NULL ORDER BY id DESC LIMIT 1",
@@ -952,21 +960,13 @@ def advance(con, instance_id, reply=None, *, simulate_external=False):
                 fields["integration_error"] = "Готовое превью макета не найдено"
                 status = "needs_manager"
                 break
-            key = f"mockup:{instance_id}:{node_id}"
-            outgoing = con.execute("SELECT state FROM outbox WHERE dedup=?", (key,)).fetchone()
-            if outgoing is None:
-                con.execute(
-                    "INSERT INTO outbox(chat_id,instance_id,actor,body,dedup,epoch,created_at,kind,media_id) "
-                    "VALUES(?,?,?,?,?,?,?,'file',?)",
-                    (chat["id"], instance_id, "bot", "Макет для согласования", key,
-                     chat["epoch"], db.now(), job["preview_media_id"]),
-                )
-                status = "waiting_integration"
-                break
-            if outgoing["state"] == "sent":
-                node_id, prompted = node["next"], 0
-                continue
-            status = "needs_manager" if outgoing["state"] in {"failed", "unknown", "cancelled"} else "waiting_integration"
+            con.execute(
+                "INSERT INTO outbox(chat_id,instance_id,actor,body,dedup,epoch,created_at,kind,media_id) "
+                "VALUES(?,?,?,?,?,?,?,'file',?)",
+                (chat["id"], instance_id, "bot", "Макет для согласования", key,
+                 chat["epoch"], db.now(), job["preview_media_id"]),
+            )
+            status = "waiting_integration"
             break
         if kind in {"retailcrm", "retailcrm_note"}:
             if simulate_external:
