@@ -120,6 +120,15 @@
   {% if image_worker_config %}<form method="post" action="{{ prefix }}/settings/image-worker/probe">{{ token() }}<button class="button button-secondary">Проверить последний запрос воркера</button></form>{% endif %}
   <p class="field-help">Секретный ключ должен совпадать с <code>WORKER_API_KEY</code> на ПК. Folio не подключается к ПК; изменение IP при VPN не влияет на очередь.</p>
 </section>
+<section class="card card-body folio-stack folio-section">
+  <h2>Промпты для доработки макета</h2>
+  <p class="field-help">Менеджер выбирает тип заказа в чате после отказа покупателя. Folio подставит этот промпт и добавит указанные менеджером пожелания клиента. Исходником будет последнее готовое превью того же заказа. Если промпт для исходного типа здесь пуст, используется единственный шаг «Создать макет через воркер» из опубликованной версии сценария заказа.</p>
+  <form method="post" action="{{ prefix }}/settings/image-worker/rework-prompts" class="folio-stack">{{ token() }}
+    {% for product_type, label in types.items() %}<label class="field">{{ label }}<textarea class="input" name="{{ product_type }}" rows="5" maxlength="4000">{{ settings.rework_prompts.get(product_type, '') if settings.rework_prompts is defined else '' }}</textarea></label>{% endfor %}
+    <p class="field-help">Доступные переменные: {background}, {caption}, {wishes}, {template_id}, {summary}, {posting}, {offer_id}, {product_name}, {quantity}. Для другого типа без сохранённого промпта доработка недоступна.</p>
+    <button class="button button-primary">Сохранить промпты</button>
+  </form>
+</section>
 {% endif %}
 
 {% if section == 'automation' %}

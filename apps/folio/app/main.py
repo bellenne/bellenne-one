@@ -4,6 +4,7 @@ import math
 import os
 import re
 import sqlite3
+import string
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -330,6 +331,9 @@ def inbox(
             [],
             [],
         )
+        rework_jobs = []
+        current_product_type = ""
+        available_rework_prompts = {}
         if chat_id:
             chat = security.chat_access(con, actor, chat_id)
             chat = con.execute(
@@ -387,6 +391,21 @@ def inbox(
                     "UNION ALL SELECT error FROM mattermost_actions WHERE instance_id=? AND state='failed' AND error IS NOT NULL",
                     (instance["id"], instance["id"]),
                 ).fetchall()
+                active_item = con.execute(
+                    "SELECT m.product_type FROM items i LEFT JOIN mappings m ON m.id=i.mapping_id "
+                    "WHERE i.id=?", (chat["active_item"],),
+                ).fetchone()
+                current_product_type = active_item["product_type"] if active_item else ""
+                available_rework_prompts = scenarios.rework_prompts(
+                    con, instance, current_product_type
+                )
+                rework_jobs = con.execute(
+                    "SELECT j.id,j.state,j.error,j.preview_media_id,j.delivery_error,j.created_at,"
+                    "o.state AS delivery_state,o.error AS delivery_send_error "
+                    "FROM image_jobs j LEFT JOIN outbox o ON o.dedup=('rework-result:' || j.id) "
+                    "WHERE j.item_id=? AND j.node_id LIKE 'rework:%' ORDER BY j.id DESC LIMIT 5",
+                    (chat["active_item"],),
+                ).fetchall()
             history = con.execute(
                 "SELECT action,created_at FROM audit WHERE chat_id=? AND action NOT LIKE 'integration.%' ORDER BY id DESC LIMIT 50",
                 (chat_id,),
@@ -406,6 +425,11 @@ def inbox(
             nodes=nodes,
             history=history,
             integration_failures=integration_failures,
+            rework_jobs=rework_jobs,
+            current_product_type=current_product_type,
+            available_rework_prompts=available_rework_prompts,
+            image_job_labels=image_tasks.STATE_LABELS,
+            image_job_errors=image_tasks.ERROR_LABELS,
             q=q,
             mode=mode,
             unread=unread,
@@ -498,6 +522,64 @@ async def chat_action(request: Request, chat_id: int, action: str):
                      chat["epoch"], db.now(), mid),
                 )
                 db.audit(con, actor["id"], "media.queued_to_buyer", "media", mid, chat_id)
+        elif action == "rework":
+            if not chat["active_item"]:
+                raise scenarios.Invalid("Товарная позиция чата не определена")
+            item = get_record(con, "items", chat["active_item"])
+            if item["external_status"] == "cancelled":
+                raise scenarios.Invalid("Заказ отменён в Ozon. Доработку запускать нельзя")
+            instance = con.execute(
+                "SELECT * FROM instances WHERE chat_id=? AND item_id=?",
+                (chat_id, item["id"]),
+            ).fetchone()
+            if not instance or json.loads(instance["fields"]).get("approval_outcome") != "Покупатель отказался от макета":
+                raise scenarios.Invalid("Доработка доступна после отказа покупателя от макета")
+            product_type = required(form, "product_type")
+            if product_type not in scenarios.TYPES:
+                raise scenarios.Invalid("Выберите тип заказа из списка")
+            mapped = con.execute(
+                "SELECT product_type FROM mappings WHERE id=?", (item["mapping_id"],)
+            ).fetchone()
+            mapped_type = mapped["product_type"] if mapped else ""
+            template = scenarios.rework_prompts(con, instance, mapped_type).get(product_type, "")
+            if not template:
+                raise scenarios.Invalid("Для выбранного типа заказа не сохранён промпт доработки")
+            correction = required(form, "correction").strip()
+            if not correction:
+                raise scenarios.Invalid("Укажите пожелания клиента к доработке")
+            key = required(form, "dedup")
+            if not re.fullmatch(r"[a-f0-9]{32}", key):
+                raise scenarios.Invalid("Обновите чат и повторите отправку доработки")
+            node_id = f"rework:{key}"
+            if con.execute("SELECT 1 FROM image_jobs WHERE item_id=? AND node_id=?", (item["id"], node_id)).fetchone():
+                return redirect(f"/chats/{chat_id}")
+            if con.execute(
+                "SELECT 1 FROM image_jobs WHERE item_id=? AND node_id LIKE 'rework:%' "
+                "AND state NOT IN ('completed','failed')", (item["id"],),
+            ).fetchone():
+                raise scenarios.Invalid("Предыдущая доработка ещё выполняется")
+            preview = con.execute(
+                "SELECT preview_media_id FROM image_jobs WHERE item_id=? AND state='completed' "
+                "AND preview_media_id IS NOT NULL ORDER BY id DESC LIMIT 1", (item["id"],),
+            ).fetchone()
+            if not preview:
+                raise scenarios.Invalid("Для доработки нужен готовый макет этого заказа")
+            fields = json.loads(instance["fields"])
+            try:
+                prompt = scenarios.image_prompt({"prompt": template}, item, fields)
+                prompt = f"{prompt.rstrip()}\n\nПожелания клиента к доработке: {correction}"
+                width, height = image_tasks.dimensions_from_article(item["offer_id"])
+                image_tasks.enqueue(
+                    con, item["id"], preview["preview_media_id"], prompt,
+                    width, height, actor["id"], node_id=node_id,
+                    source_preview=True, chat_id=chat_id,
+                )
+            except image_tasks.ImageTaskError as exc:
+                raise scenarios.Invalid(image_tasks.ERROR_LABELS.get(
+                    exc.code, "Не удалось поставить доработку в очередь. Проверьте промпт и подключение воркера."
+                )) from exc
+            scenarios.takeover(con, chat_id, actor["id"])
+            db.audit(con, actor["id"], "image_job.rework_requested", "item", item["id"], chat_id)
         elif action == "resume":
             if actor["role"] != "admin" and not db.config(con).get("manager_resume"):
                 raise HTTPException(403, "Возврат боту не разрешён политикой")
@@ -867,6 +949,35 @@ async def save_image_worker(request: Request):
                 (base, key_encrypted, webhook_encrypted, callback, input_base, 0, vendor_encrypted),
             )
         db.audit(con, actor["id"], "settings.image_worker_updated", "settings", 1)
+    return redirect("/settings/image-worker")
+
+
+@app.post("/settings/image-worker/rework-prompts")
+async def save_rework_prompts(request: Request):
+    form = await request.form()
+    security.csrf(request, form.get("csrf"))
+    with db.transaction() as con:
+        actor = security.user(request, con, admin=True)
+        prompts = {}
+        for product_type in scenarios.TYPES:
+            prompt = str(form.get(product_type) or "").strip()
+            if not prompt:
+                continue
+            if len(prompt) > 4000:
+                raise scenarios.Invalid("Промпт должен содержать не более 4000 символов")
+            try:
+                for _, variable, spec, conversion in string.Formatter().parse(prompt):
+                    if variable is not None and (
+                        variable not in scenarios.IMAGE_PROMPT_VARIABLES or spec or conversion
+                    ):
+                        raise scenarios.Invalid("В промпте используется неизвестная переменная")
+            except ValueError as exc:
+                raise scenarios.Invalid("Проверьте фигурные скобки в промпте") from exc
+            prompts[product_type] = prompt
+        settings = db.config(con)
+        settings["rework_prompts"] = prompts
+        con.execute("UPDATE settings SET value=? WHERE id=1", (db.dump(settings),))
+        db.audit(con, actor["id"], "settings.rework_prompts_updated", "settings", 1)
     return redirect("/settings/image-worker")
 
 
@@ -1653,7 +1764,8 @@ def image_jobs_page(request: Request):
             image_job_labels=image_tasks.STATE_LABELS,
             image_job_errors=image_tasks.ERROR_LABELS,
             image_jobs=con.execute(
-                "SELECT j.*,i.posting,i.name AS product_name,inst.chat_id "
+                "SELECT j.*,i.posting,i.name AS product_name,"
+                "COALESCE(j.chat_id,inst.chat_id) AS result_chat_id "
                 "FROM image_jobs j JOIN items i ON i.id=j.item_id "
                 "LEFT JOIN instances inst ON inst.item_id=j.item_id "
                 "ORDER BY j.id DESC LIMIT 200"

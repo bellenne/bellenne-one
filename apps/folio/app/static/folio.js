@@ -110,7 +110,7 @@ function initializeBuilder(root) {
   function renderEdges() {
     edgeLayer.replaceChildren();
     graph.nodes.forEach((source) => {
-      [["next", source.kind === "ask_input" ? "Текст" : "Далее"], ["otherwise", source.kind === "ask_input" ? "Фото" : "Иначе"], ["error", "Ошибка"]].forEach(([field, label]) => {
+      [["next", source.kind === "approval" ? "Согласовано" : source.kind === "ask_input" ? "Текст" : "Далее"], ["otherwise", source.kind === "approval" ? "Не согласовано" : source.kind === "ask_input" ? "Фото" : "Иначе"], ["timeout", "Нет ответа"], ["error", "Ошибка"]].forEach(([field, label]) => {
         const target = nodeById(source[field]);
         if (!target) return;
         const group = svgElement("g", { class: `folio-edge folio-edge-${field}` });
@@ -136,7 +136,7 @@ function initializeBuilder(root) {
         connecting = false;
         connectionSource = null;
         root.querySelector("[data-connect]").classList.remove("button-primary");
-        root.querySelector("[data-connect-help]").textContent = "Связь создана. Ветви «Иначе» и «Ошибка» задаются в инспекторе.";
+        root.querySelector("[data-connect-help]").textContent = "Связь создана. Остальные выходы шага задаются в инспекторе.";
         markDirty();
       }
     }
@@ -206,7 +206,7 @@ function initializeBuilder(root) {
     }
     inspector.querySelectorAll("[data-field]").forEach((control) => {
       const key = control.dataset.field;
-      if (["next", "otherwise", "error"].includes(key)) targetOptions(control, node[key]);
+      if (["next", "otherwise", "timeout", "error"].includes(key)) targetOptions(control, node[key]);
       else if (key === "required") control.checked = Boolean(node[key]);
       else if (key === "choices") control.value = (node[key] || []).join("\n");
       else if (key === "status") {
@@ -232,7 +232,8 @@ function initializeBuilder(root) {
         (rule === "accept" && ["ask_photo", "confirm"].includes(kind)) ||
         (rule === "max_length" && ["ask_text", "ask_input"].includes(kind)) ||
         (rule === "condition" && kind === "condition") ||
-        (rule === "otherwise" && ["condition", "ask_input"].includes(kind)) ||
+        (rule === "otherwise" && ["condition", "ask_input", "approval"].includes(kind)) ||
+        (rule === "timeout" && kind === "approval") ||
         (rule === "retailcrm" && ["retailcrm", "retailcrm_note"].includes(kind)) ||
         (rule === "retailcrm-create" && kind === "retailcrm") ||
         (rule === "mattermost" && kind === "mattermost") ||
@@ -247,7 +248,9 @@ function initializeBuilder(root) {
     const fieldLabel = inspector.querySelector("[data-field-label]");
     if (fieldLabel) fieldLabel.textContent = node.kind === "condition" ? "Какие собранные данные проверить" : node.kind === "ask_input" ? "Куда сохранить текстовый ответ" : "Что сохранить в бриф";
     const otherwiseLabel = inspector.querySelector("[data-otherwise-label]");
-    if (otherwiseLabel) otherwiseLabel.textContent = node.kind === "ask_input" ? "Если покупатель отправил фото" : "Если условие не выполнено";
+    if (otherwiseLabel) otherwiseLabel.textContent = node.kind === "approval" ? "Не согласовано" : node.kind === "ask_input" ? "Если покупатель отправил фото" : "Если условие не выполнено";
+    const nextLabel = inspector.querySelector("[data-next-label]");
+    if (nextLabel) nextLabel.textContent = node.kind === "approval" ? "Согласовано" : "Следующий шаг";
     const requiredLabel = inspector.querySelector("[data-required-label]");
     if (requiredLabel) requiredLabel.textContent = node.kind === "ask_input" ? "Полученное фото обязательно для готового брифа" : "Ответ обязателен для готового брифа";
     const conditionHelp = inspector.querySelector("[data-condition-field-help]");
@@ -297,7 +300,7 @@ function initializeBuilder(root) {
     if (kind === "ask_text") node.max_length = null;
     if (kind === "condition") Object.assign(node, { field: "", equals: "", otherwise: "" });
     if (kind === "confirm") node.accept = "";
-    if (kind === "approval") Object.assign(node, { dictionary_version: 1, hours: 6, error: "" });
+    if (kind === "approval") Object.assign(node, { dictionary_version: 1, hours: 6, otherwise: "", timeout: "", error: "" });
     if (kind === "retailcrm") Object.assign(node, {
       comment: "Заказ Ozon: {posting}\nТовар: {product_name}\nSKU: {sku}\nКоличество: {quantity}\n\n{summary}",
       status: "", order_type: "", order_method: "", error: ""
@@ -318,7 +321,7 @@ function initializeBuilder(root) {
       if (seen.has(fromId)) return false;
       seen.add(fromId);
       const source = nodeById(fromId);
-      return source ? [source.next, source.otherwise, source.error].filter(Boolean)
+      return source ? [source.next, source.otherwise, source.timeout, source.error].filter(Boolean)
         .some((nextId) => reaches(nextId, targetId, new Set(seen))) : false;
     };
     const add = (node, message) => problems.push({ node, message });
@@ -328,7 +331,7 @@ function initializeBuilder(root) {
     graph.nodes.forEach((node) => {
       if (TEXT_KINDS.has(node.kind) && !(node.text || "").trim()) add(node, "Заполните текст шага.");
       if (!TERMINAL_KINDS.has(node.kind) && !node.next) add(node, "Укажите следующий шаг.");
-      ["next", "otherwise", "error"].forEach((key) => {
+      ["next", "otherwise", "timeout", "error"].forEach((key) => {
         if (node[key] && !ids.has(node[key])) add(node, `Переход «${key}» ведёт на отсутствующий шаг.`);
       });
       if (["ask_photo", "ask_input"].includes(node.kind) && (!node.min || !node.max || node.min > node.max)) add(node, "Проверьте минимум и максимум фотографий.");
@@ -336,6 +339,8 @@ function initializeBuilder(root) {
       if (node.kind === "ask_input" && !node.otherwise) add(node, "Укажите переход для фотографии.");
       if (node.kind === "confirm" && !(node.accept || "").trim()) add(node, "Укажите ответ, подтверждающий бриф.");
       if (node.kind === "approval" && (!(node.hours > 0) || node.hours > 72)) add(node, "Укажите срок ожидания до 72 часов.");
+      if (node.kind === "approval" && !node.otherwise) add(node, "Выберите переход «Не согласовано».");
+      if (node.kind === "approval" && !node.timeout) add(node, "Выберите переход «Нет ответа».");
       if (node.kind === "condition" && !node.field) add(node, "Выберите собранные данные для проверки.");
       if (node.kind === "condition" && node.field && !graph.nodes.some((candidate) => FIELD_KINDS.has(candidate.kind) && candidate.field === node.field && reaches(candidate.id, node.id))) add(node, `До этого условия ни один шаг «Задать вопрос» не сохраняет «${FIELD_LABELS[node.field] || node.field}».`);
       if (node.kind === "condition" && !node.otherwise) add(node, "Выберите переход «Если условие не выполнено».");
@@ -408,7 +413,7 @@ function initializeBuilder(root) {
   root.querySelector("[data-delete-node]").addEventListener("click", () => {
     if (!selected) return;
     graph.nodes = graph.nodes.filter((node) => node.id !== selected);
-    graph.nodes.forEach((node) => ["next", "otherwise", "error"].forEach((key) => {
+    graph.nodes.forEach((node) => ["next", "otherwise", "timeout", "error"].forEach((key) => {
       if (node[key] === selected) node[key] = "";
     }));
     selected = null;

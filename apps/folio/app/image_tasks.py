@@ -150,7 +150,8 @@ def dimensions_from_article(article: str) -> tuple[int, int]:
 
 def enqueue(con, item_id: int, media_id: str | list[str], prompt: str,
             width_cm: float, height_cm: float, actor: str,
-            *, instance_id: int | None = None, node_id: str | None = None) -> int:
+            *, instance_id: int | None = None, node_id: str | None = None,
+            source_preview: bool = False, chat_id: int | None = None) -> int:
     if not configured(con):
         raise ImageTaskError("image_worker_not_configured")
     if not 1 <= len(prompt.strip()) <= 4000:
@@ -166,16 +167,22 @@ def enqueue(con, item_id: int, media_id: str | list[str], prompt: str,
     instance = con.execute("SELECT fields FROM instances WHERE item_id=?", (item_id,)).fetchone()
     collected = json.loads(instance["fields"]).get("photos", []) if instance else []
     for selected_id in media_ids:
-        media = con.execute("SELECT id,mime FROM media WHERE id=? AND item_id=?", (selected_id, item_id)).fetchone()
+        media = con.execute("SELECT id,mime,chat_id FROM media WHERE id=? AND item_id=?", (selected_id, item_id)).fetchone()
+        approved_preview = source_preview and con.execute(
+            "SELECT 1 FROM image_jobs WHERE item_id=? AND preview_media_id=? "
+            "AND state='completed'", (item_id, selected_id),
+        ).fetchone()
         if (not media or media["mime"] not in {"image/png", "image/jpeg", "image/webp"}
-                or not (db.DATA / "media" / selected_id).is_file() or selected_id not in collected):
+                or (source_preview and (chat_id is None or media["chat_id"] != chat_id))
+                or not (db.DATA / "media" / selected_id).is_file()
+                or (selected_id not in collected and not approved_preview)):
             raise ImageTaskError("image_worker_media_missing")
     stamp = db.now()
     task_id = con.execute(
-        "INSERT INTO image_jobs(item_id,media_id,media_ids,input_token,prompt,width_cm,height_cm,created_at,updated_at,instance_id,node_id) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO image_jobs(item_id,media_id,media_ids,input_token,prompt,width_cm,height_cm,created_at,updated_at,instance_id,node_id,chat_id) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
         (item_id, media_ids[0], json.dumps(media_ids), secrets.token_urlsafe(32), prompt.strip(), width_cm, height_cm,
-         stamp, stamp, instance_id, node_id),
+         stamp, stamp, instance_id, node_id, chat_id),
     ).lastrowid
     db.audit(con, actor, "image_job.queued", "image_job", task_id)
     return task_id
@@ -439,7 +446,8 @@ def claim_next(con) -> dict | None:
 
 def receive_update(con, job_id: int, worker_id: str, state: str,
                    print_file: str = "", error: str = "", preview_bytes: bytes | None = None) -> None:
-    row = con.execute("SELECT j.*,inst.chat_id FROM image_jobs j "
+    row = con.execute("SELECT j.*,COALESCE(j.chat_id,inst.chat_id) AS result_chat_id "
+                      "FROM image_jobs j "
                       "LEFT JOIN instances inst ON inst.id=j.instance_id WHERE j.id=?", (job_id,)).fetchone()
     if not row or not row["pull_claimed"] or row["worker_id"] != worker_id:
         raise ImageTaskError("image_worker_job_unknown")
@@ -467,12 +475,44 @@ def receive_update(con, job_id: int, worker_id: str, state: str,
             raise ImageTaskError("image_worker_preview_invalid") from exc
         from . import media, scenarios
         try:
-            preview_media_id = media.store(con, preview_bytes, db.config(con), row["chat_id"], row["item_id"])
+            preview_media_id = media.store(con, preview_bytes, db.config(con), row["result_chat_id"], row["item_id"])
         except scenarios.Invalid as exc:
             raise ImageTaskError("image_worker_preview_invalid") from exc
     con.execute("UPDATE image_jobs SET state=?,error=?,print_file=?,preview_media_id=COALESCE(?,preview_media_id),updated_at=? WHERE id=?",
                 (state, error[:500] if state == "failed" else None,
                  print_file if state == "completed" else None, preview_media_id, db.now(), job_id))
+    if (state == "completed" and row["instance_id"] is None
+            and str(row["node_id"] or "").startswith("rework:")):
+        _queue_rework_result(con, row, preview_media_id)
     if state in TERMINAL:
-        db.audit(con, "system", f"image_job.{state}", "image_job", job_id, row["chat_id"])
+        db.audit(con, "system", f"image_job.{state}", "image_job", job_id, row["result_chat_id"])
         _resume_scenario(con, row)
+
+
+def _queue_rework_result(con, job, preview_media_id):
+    """Queue one Ozon file send only for the original active manual chat."""
+    chat = con.execute(
+        "SELECT c.*,i.external_status FROM chats c JOIN items i ON i.id=? "
+        "WHERE c.id=? AND c.account_id=i.account_id",
+        (job["item_id"], job["chat_id"]),
+    ).fetchone()
+    reason = None
+    if not chat or chat["active_item"] != job["item_id"]:
+        reason = "rework_chat_changed"
+    elif chat["external_status"] == "cancelled":
+        reason = "rework_order_cancelled"
+    elif chat["mode"] != "manual":
+        reason = "rework_bot_resumed"
+    if reason:
+        con.execute("UPDATE image_jobs SET delivery_error=? WHERE id=?", (reason, job["id"]))
+        db.audit(con, "system", "image_job.delivery_skipped", "image_job", job["id"], job["chat_id"])
+        return
+    dedup = f"rework-result:{job['id']}"
+    if con.execute("SELECT 1 FROM outbox WHERE dedup=?", (dedup,)).fetchone():
+        return
+    outbox_id = con.execute(
+        "INSERT INTO outbox(chat_id,instance_id,actor,body,dedup,epoch,created_at,kind,media_id) "
+        "VALUES(?,NULL,'system','Доработанный макет',?,?,?,'file',?)",
+        (chat["id"], dedup, chat["epoch"], db.now(), preview_media_id),
+    ).lastrowid
+    db.audit(con, "system", "image_job.delivery_queued", "outbox", outbox_id, chat["id"])

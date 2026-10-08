@@ -200,7 +200,7 @@ def import_package(raw: bytes):
                    or abs(position[axis]) > 1_000_000 for axis in ("x", "y"))
         ):
             raise Invalid("Координаты шага в файле повреждены")
-        if any(not isinstance(node.get(key), str) for key in ("next", "otherwise", "error") if key in node):
+        if any(not isinstance(node.get(key), str) for key in ("next", "otherwise", "timeout", "error") if key in node):
             raise Invalid("Переход шага в файле повреждён")
     normalize(graph, product_type)
     return name.strip(), product_type, graph
@@ -396,6 +396,10 @@ def validate(graph, product_type):
                 raise Invalid("Укажите разные ответы для подтверждения и отказа")
             if not isinstance(node.get("hours"), (int, float)) or not 0 < node["hours"] <= 72:
                 raise Invalid("Укажите срок ожидания ответа от 1 до 72 часов")
+            if not node.get("otherwise"):
+                raise Invalid(f"В шаге «{node.get('title') or node['id']}» выберите переход «Не согласовано»")
+            if not node.get("timeout"):
+                raise Invalid(f"В шаге «{node.get('title') or node['id']}» выберите переход «Нет ответа»")
         if kind in {"ask_text", "ask_photo", "ask_input", "choice"}:
             if node.get("field") not in FIELDS[product_type]:
                 raise Invalid("Поле не принадлежит выбранному типу товара")
@@ -443,7 +447,7 @@ def validate(graph, product_type):
                 raise Invalid(
                     f"В шаге «{node.get('title') or node['id']}» выберите переход «Если условие не выполнено»"
                 )
-        targets = [node.get("next"), node.get("otherwise"), node.get("error")]
+        targets = [node.get("next"), node.get("otherwise"), node.get("timeout"), node.get("error")]
         if kind not in {"end", "ready"} and not node.get("next"):
             raise Invalid(f"Укажите следующий шаг для {node['id']}")
         if any(t and t not in index for t in targets):
@@ -464,7 +468,7 @@ def validate(graph, product_type):
             return
         stack.add(key)
         node = index[key]
-        for target in (node.get("next"), node.get("otherwise"), node.get("error")):
+        for target in (node.get("next"), node.get("otherwise"), node.get("timeout"), node.get("error")):
             if target:
                 visit(target)
         stack.remove(key)
@@ -514,7 +518,7 @@ def validate(graph, product_type):
                 "Каждый путь к готовности должен собрать обязательные поля"
                 + (" и затем запросить подтверждение" if requires_confirmation else "")
             )
-        for target in (node.get("next"), node.get("otherwise")):
+        for target in (node.get("next"), node.get("otherwise"), node.get("timeout")):
             if target:
                 check_ready_path(target, collected, confirmed)
         if node.get("error"):
@@ -654,6 +658,23 @@ def image_prompt(node, item, fields):
         raise image_tasks.ImageTaskError("image_worker_prompt_invalid") from exc
 
 
+def rework_prompts(con, instance, product_type):
+    """Use saved type prompts, falling back to the current published scenario."""
+    prompts = dict(db.config(con).get("rework_prompts") or {})
+    if product_type and not prompts.get(product_type):
+        version = con.execute(
+            "SELECT graph FROM versions WHERE id=?", (instance["version_id"],)
+        ).fetchone()
+        if version:
+            image_nodes = [
+                node for node in json.loads(version["graph"])["nodes"]
+                if node["kind"] == "image_worker" and str(node.get("prompt") or "").strip()
+            ]
+            if len(image_nodes) == 1:
+                prompts[product_type] = image_nodes[0]["prompt"]
+    return prompts
+
+
 def advance(con, instance_id, reply=None, *, simulate_external=False):
     instance = con.execute(
         "SELECT * FROM instances WHERE id=?", (instance_id,)
@@ -691,6 +712,7 @@ def advance(con, instance_id, reply=None, *, simulate_external=False):
                 "caption": "Надпись",
                 "wishes": "Пожелания",
                 "template_id": "Шаблон",
+                "approval_outcome": "Согласование макета",
             }
             allowed_templates = []
             for tid in json.loads(instance["template_ids"]):
@@ -702,7 +724,7 @@ def advance(con, instance_id, reply=None, *, simulate_external=False):
             visible_fields = {
                 k: (str(len(v)) if k == "photos" else str(v)) for k, v in fields.items()
             }
-            summary = "\n".join(f"{labels[k]}: {v}" for k, v in visible_fields.items())
+            summary = "\n".join(f"{labels[k]}: {v}" for k, v in visible_fields.items() if k in labels)
             values = {
                 **visible_fields,
                 "posting": item["posting"],
@@ -815,12 +837,14 @@ def advance(con, instance_id, reply=None, *, simulate_external=False):
             elif kind == "approval":
                 if reply.get("approval_timeout") is True:
                     fields["approval_outcome"] = f"Нет ответа за {node['hours']:g} ч."
+                    answer_target = node.get("timeout") or node["next"]
                     valid = True
                 elif approval_phrase(text) in approval_variants(node, "accept"):
                     fields["approval_outcome"] = "Макет подтверждён покупателем"
                     valid = True
                 elif approval_phrase(text) in approval_variants(node, "reject"):
                     fields["approval_outcome"] = "Покупатель отказался от макета"
+                    answer_target = node.get("otherwise") or node["next"]
                     valid = True
                 else:
                     valid = False

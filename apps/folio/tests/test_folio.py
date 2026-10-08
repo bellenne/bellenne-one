@@ -340,13 +340,14 @@ class FolioTest(unittest.TestCase):
             {"id": "mockup", "kind": "await_mockup", "next": "approval"},
             {"id": "approval", "kind": "approval", "text": "Подтвердите за 6 часов",
              "accept": "ДА", "reject": "НЕТ", "hours": 6,
-             "next": "note", "error": "handoff"},
+             "next": "note", "otherwise": "note", "timeout": "note", "error": "handoff"},
             {"id": "note", "kind": "retailcrm_note",
              "comment": "Итог: {approval_outcome}. Отправление {posting}.",
              "next": "handoff", "error": "handoff"},
             {"id": "handoff", "kind": "handoff", "next": "end"},
             {"id": "end", "kind": "end"},
         ]}
+        scenarios.normalize(value, "portrait_background")
         scenarios.validate(value, "portrait_background")
         for answer, expected in [
             ({"kind": "text", "value": "ДА"}, "Макет подтверждён покупателем"),
@@ -367,6 +368,51 @@ class FolioTest(unittest.TestCase):
         ])
         self.assertEqual(ambiguous["instance"]["status"], "needs_manager")
         self.assertNotIn("approval_outcome", json.loads(ambiguous["instance"]["fields"]))
+
+    def test_approval_uses_distinct_accept_reject_and_timeout_targets(self):
+        value = {"nodes": [
+            {"id": "start", "kind": "start", "next": "photo"},
+            {"id": "photo", "kind": "ask_photo", "field": "photos", "required": True,
+             "text": "Пришлите фото", "min": 1, "max": 1, "next": "approval"},
+            {"id": "approval", "kind": "approval", "text": "Согласны с макетом?",
+             "hours": 6, "next": "accepted", "otherwise": "clarify",
+             "timeout": "handoff", "error": "handoff"},
+            {"id": "accepted", "kind": "send", "text": "Спасибо за подтверждение",
+             "next": "end"},
+            {"id": "clarify", "kind": "ask_text", "field": "background",
+             "text": "Что нужно изменить?", "next": "end"},
+            {"id": "handoff", "kind": "handoff", "next": "end"},
+            {"id": "end", "kind": "end"},
+        ]}
+        scenarios.normalize(value, "portrait_background")
+        scenarios.validate(value, "portrait_background")
+        accepted = simulate(value, "portrait_background", ["photo:1", "Да"])
+        self.assertEqual(accepted["instance"]["status"], "closed")
+        self.assertIn("Спасибо за подтверждение", [m["body"] for m in accepted["timeline"]])
+        rejected = simulate(value, "portrait_background", ["photo:1", "Нет"])
+        self.assertEqual(rejected["instance"]["node"], "clarify")
+        self.assertIn("Что нужно изменить?", [m["body"] for m in rejected["timeline"]])
+        clarified = simulate(value, "portrait_background", ["photo:1", "Нет", "Фон светлее"])
+        self.assertEqual(json.loads(clarified["instance"]["fields"])["background"], "Фон светлее")
+        expired = simulate(value, "portrait_background", ["photo:1", {"kind": "approval_timeout"}])
+        self.assertEqual(expired["instance"]["status"], "needs_manager")
+        self.assertEqual(json.loads(expired["instance"]["fields"])["approval_outcome"], "Нет ответа за 6 ч.")
+
+    def test_approval_requires_rejection_and_timeout_branches_before_publish(self):
+        value = {"nodes": [
+            {"id": "start", "kind": "start", "next": "photo"},
+            {"id": "photo", "kind": "ask_photo", "field": "photos", "required": True,
+             "text": "Пришлите фото", "min": 1, "max": 1, "next": "approval"},
+            {"id": "approval", "kind": "approval", "text": "Согласны?", "hours": 6,
+             "next": "end"},
+            {"id": "end", "kind": "end"},
+        ]}
+        scenarios.normalize(value, "portrait_background")
+        with self.assertRaisesRegex(scenarios.Invalid, "Не согласовано"):
+            scenarios.validate(value, "portrait_background")
+        value["nodes"][2]["otherwise"] = "end"
+        with self.assertRaisesRegex(scenarios.Invalid, "Нет ответа"):
+            scenarios.validate(value, "portrait_background")
 
     def test_manager_image_is_sent_as_file_then_approval_timer_starts(self):
         instance_id, item_id, chat_id, _ = self.setup_instance()
@@ -3679,6 +3725,175 @@ class FolioIntegrationsTest(unittest.TestCase):
     setup_instance = FolioTest.setup_instance
     image = FolioTest.image
     image_worker_settings = FolioTest.image_worker_settings
+
+    def test_rework_prompt_defaults_to_published_scenario_for_item_type(self):
+        instance_id, _, _, _ = self.setup_instance()
+        with db.transaction() as con:
+            instance = con.execute("SELECT * FROM instances WHERE id=?", (instance_id,)).fetchone()
+            graph_value = json.loads(con.execute(
+                "SELECT graph FROM versions WHERE id=?", (instance["version_id"],)
+            ).fetchone()[0])
+            graph_value["nodes"].insert(-1, {
+                "id": "worker", "kind": "image_worker", "prompt": "Сохранённый промпт {background}"
+            })
+            con.execute("UPDATE versions SET graph=? WHERE id=?", (db.dump(graph_value), instance["version_id"]))
+            prompts = scenarios.rework_prompts(con, instance, "portrait_background")
+            self.assertEqual(prompts["portrait_background"], "Сохранённый промпт {background}")
+
+    def test_manager_reworks_rejected_mockup_from_latest_preview(self):
+        config = {
+            "FOLIO_IMAGE_WORKER_URL": "https://worker.example.com",
+            "FOLIO_IMAGE_WORKER_API_KEY": "KEY",
+        }
+        with self.image_worker_settings(config):
+            denied = self.client.post(
+                "/settings/image-worker/rework-prompts", headers=self.manager,
+                data={"csrf": "csrf", "portrait_background": "Сделать фон: {background}"},
+                follow_redirects=False,
+            )
+            self.assertEqual(denied.status_code, 403)
+            saved = self.client.post(
+                "/settings/image-worker/rework-prompts", headers=self.admin,
+                data={"csrf": "csrf", "portrait_background": "Сделать фон: {background}"},
+                follow_redirects=False,
+            )
+            self.assertEqual(saved.status_code, 303)
+            instance_id, item_id, chat_id, _ = self.setup_instance()
+            with db.transaction() as con:
+                con.execute("INSERT INTO assignments(chat_id,user_id) VALUES(?, '2')", (chat_id,))
+                con.execute("DELETE FROM outbox WHERE chat_id=?", (chat_id,))
+                source = self.image(con, chat_id, item_id)
+                preview = self.image(con, chat_id, item_id)
+                con.execute(
+                    "UPDATE instances SET fields=?,status='closed' WHERE id=?",
+                    (db.dump({"photos": [source], "background": "светлый",
+                              "approval_outcome": "Покупатель отказался от макета"}), instance_id),
+                )
+                original_job = image_tasks.enqueue(
+                    con, item_id, source, "Исходный макет", 40, 60, "system"
+                )
+                con.execute(
+                    "UPDATE image_jobs SET state='completed',preview_media_id=? WHERE id=?",
+                    (preview, original_job),
+                )
+            page = self.client.get(f"/chats/{chat_id}", headers=self.manager)
+            self.assertEqual(page.status_code, 200)
+            self.assertIn("Доработать макет", page.text)
+            self.assertIn('value="portrait_background" selected', page.text)
+            request = {"csrf": "csrf", "dedup": "a" * 32,
+                       "product_type": "portrait_background", "correction": "Сделать фон теплее"}
+            response = self.client.post(
+                f"/chats/{chat_id}/rework", headers=self.manager,
+                data=request, follow_redirects=False,
+            )
+            self.assertEqual(response.status_code, 303, response.text)
+            with db.transaction() as con:
+                job = con.execute(
+                    "SELECT * FROM image_jobs WHERE node_id=?", ("rework:" + "a" * 32,)
+                ).fetchone()
+                self.assertIsNotNone(job)
+                self.assertEqual(job["media_id"], preview)
+                self.assertIn("Сделать фон: светлый", job["prompt"])
+                self.assertIn("Сделать фон теплее", job["prompt"])
+                self.assertEqual(job["state"], "pending")
+                self.assertEqual(con.execute("SELECT mode FROM chats WHERE id=?", (chat_id,)).fetchone()[0], "manual")
+            repeated = self.client.post(
+                f"/chats/{chat_id}/rework", headers=self.manager,
+                data=request, follow_redirects=False,
+            )
+            self.assertEqual(repeated.status_code, 303)
+            with db.transaction() as con:
+                self.assertEqual(con.execute(
+                    "SELECT COUNT(*) FROM image_jobs WHERE node_id LIKE 'rework:%'"
+                ).fetchone()[0], 1)
+                con.execute(
+                    "UPDATE image_jobs SET state='queued',pull_claimed=1,worker_id='rework-worker' WHERE id=?",
+                    (job["id"],),
+                )
+                result = io.BytesIO()
+                Image.new("RGB", (1000, 1000)).save(result, format="JPEG")
+                image_tasks.receive_update(
+                    con, job["id"], "rework-worker", "completed",
+                    print_file="print-result", preview_bytes=result.getvalue(),
+                )
+                preview_result = con.execute(
+                    "SELECT preview_media_id FROM image_jobs WHERE id=?", (job["id"],)
+                ).fetchone()[0]
+                self.assertEqual(con.execute(
+                    "SELECT chat_id FROM media WHERE id=?", (preview_result,)
+                ).fetchone()[0], chat_id)
+                self.assertEqual(con.execute(
+                    "SELECT status FROM instances WHERE id=?", (instance_id,)
+                ).fetchone()[0], "closed")
+                delivery = con.execute(
+                    "SELECT * FROM outbox WHERE dedup=?", (f"rework-result:{job['id']}",)
+                ).fetchone()
+                self.assertEqual(delivery["state"], "pending")
+                self.assertEqual(delivery["kind"], "file")
+                self.assertEqual(delivery["media_id"], preview_result)
+                self.assertEqual(delivery["chat_id"], chat_id)
+                image_tasks.receive_update(
+                    con, job["id"], "rework-worker", "completed",
+                    print_file="print-result", preview_bytes=result.getvalue(),
+                )
+                self.assertEqual(con.execute(
+                    "SELECT COUNT(*) FROM outbox WHERE dedup=?", (f"rework-result:{job['id']}",)
+                ).fetchone()[0], 1)
+            self.assertEqual(self.client.get(
+                f"/media/{preview_result}", headers=self.manager
+            ).status_code, 200)
+            sent = []
+
+            class Adapter:
+                def __init__(self, _account, _settings):
+                    pass
+
+                def send_file(self, external_chat, filename, content):
+                    sent.append((external_chat, filename, content))
+                    return "ozon-reworked-mockup"
+
+                def close(self):
+                    pass
+
+            self.assertTrue(worker.send_one(Adapter))
+            self.assertEqual(len(sent), 1)
+            self.assertEqual(sent[0][0], "CHAT")
+            with db.transaction() as con:
+                self.assertEqual(con.execute(
+                    "SELECT state FROM outbox WHERE dedup=?", (f"rework-result:{job['id']}",)
+                ).fetchone()[0], "sent")
+                message = con.execute(
+                    "SELECT actor,media_ids FROM messages WHERE external_id='ozon-reworked-mockup'"
+                ).fetchone()
+                self.assertEqual(message["actor"], "system")
+                self.assertEqual(json.loads(message["media_ids"]), [preview_result])
+            self.assertIn("Отправка покупателю: Отправлено", self.client.get(
+                f"/chats/{chat_id}", headers=self.manager
+            ).text)
+            with db.transaction() as con:
+                second_job = image_tasks.enqueue(
+                    con, item_id, preview_result, "Повторная доработка", 40, 60,
+                    "system", node_id="rework:" + "b" * 32,
+                    source_preview=True, chat_id=chat_id,
+                )
+                con.execute(
+                    "UPDATE image_jobs SET state='queued',pull_claimed=1,worker_id='second-worker' WHERE id=?",
+                    (second_job,),
+                )
+                image_tasks.receive_update(
+                    con, second_job, "second-worker", "completed",
+                    print_file="second-print", preview_bytes=result.getvalue(),
+                )
+                con.execute("UPDATE items SET external_status='cancelled' WHERE id=?", (item_id,))
+            self.assertTrue(worker.send_one(Adapter))
+            self.assertEqual(len(sent), 1)
+            with db.transaction() as con:
+                cancelled = con.execute(
+                    "SELECT state,error FROM outbox WHERE dedup=?",
+                    (f"rework-result:{second_job}",),
+                ).fetchone()
+                self.assertEqual((cancelled["state"], cancelled["error"]),
+                                 ("cancelled", "outbound_order_unavailable"))
 
     def test_image_worker_size_from_seller_article(self):
         self.assertEqual(image_tasks.dimensions_from_article("КАРТЕСТ-01_40х60"), (40, 60))

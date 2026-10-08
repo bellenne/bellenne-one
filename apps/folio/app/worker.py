@@ -1092,6 +1092,22 @@ def send_one(adapter_factory=OzonAdapter):
                 chat["id"],
             )
             return True
+        if row["kind"] == "file":
+            file_owner = con.execute(
+                "SELECT m.item_id,i.external_status FROM media m "
+                "LEFT JOIN items i ON i.id=m.item_id WHERE m.id=? AND m.chat_id=?",
+                (row["media_id"], chat["id"]),
+            ).fetchone()
+            if file_owner and file_owner["item_id"] and (
+                file_owner["item_id"] != chat["active_item"]
+                or file_owner["external_status"] == "cancelled"
+            ):
+                con.execute(
+                    "UPDATE outbox SET state='cancelled',error='outbound_order_unavailable' WHERE id=?",
+                    (row["id"],),
+                )
+                db.audit(con, "system", "outbound.cancelled", "outbox", row["id"], chat["id"])
+                return True
         caps = json.loads(account["capabilities"])
         if not settings.get("send_enabled") or caps.get("send") is False:
             con.execute(

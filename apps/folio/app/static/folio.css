@@ -26,6 +26,7 @@
 .folio-message { align-self: flex-start; max-width: calc(100% - var(--bp-space-12)); padding: var(--bp-space-3); border: 1px solid var(--bp-border); border-radius: var(--bp-radius-lg); background: var(--bp-surface-elevated); overflow-wrap: anywhere; }
 .folio-message.is-outgoing { align-self: flex-end; background: var(--bp-brand-subtle); border-color: var(--bp-brand-border); }
 .folio-composer { padding: var(--bp-space-4); border-top: 1px solid var(--bp-border); }
+.folio-rework { flex: 0 1 auto; max-height: 40vh; overflow-y: auto; }
 .folio-file-composer { display: flex; align-items: flex-end; gap: var(--bp-space-3); margin-top: var(--bp-space-3); }
 .folio-file-composer .field { flex: 1; min-width: 0; }
 .folio-order-drawer { width: min(calc(var(--bp-space-12) * 9), calc(100% - var(--bp-space-8))); max-width: none; height: 100%; max-height: none; margin: 0 0 0 auto; padding: var(--bp-space-5); border: 1px solid var(--bp-border-strong); border-radius: var(--bp-radius-xl) 0 0 var(--bp-radius-xl); background: var(--bp-surface); color: var(--bp-text); box-shadow: var(--bp-shadow-elevated); }
