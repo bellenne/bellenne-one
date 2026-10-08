@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import unquote
 
-from fastapi import BackgroundTasks, Depends, FastAPI, Form, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -238,14 +238,38 @@ def delete_cabinet(cabinet_id: int, request: Request, db: Session = Depends(get_
 
 
 @app.get("/templates", response_class=HTMLResponse)
-def templates_page(request: Request, db: Session = Depends(get_db)):
+def templates_page(request: Request, edit: int | None = None, db: Session = Depends(get_db)):
     user = require_user(request, db)
     if not user:
         return redirect("/login")
     items = db.scalars(
         select(ReplyTemplate).where(ReplyTemplate.user_id == user.id).order_by(ReplyTemplate.created_at.desc())
     ).all()
-    return render(request, "templates.html", {"user": user, "items": items})
+    edit_item = next((item for item in items if item.id == edit), None) if edit is not None else None
+    if edit is not None and edit_item is None:
+        raise HTTPException(status_code=404, detail="Шаблон не найден")
+    return render(request, "templates.html", {"user": user, "items": items, "edit_item": edit_item})
+
+
+def set_template_fields(
+    item: ReplyTemplate, name: str, match_mode: str, match_value: str,
+    review_kind: str, rating_from: int, rating_to: int, body: str,
+) -> None:
+    if not name.strip() or not body.strip():
+        raise HTTPException(status_code=422, detail="Укажите название и текст шаблона")
+    item.name = name.strip()
+    item.match_mode = match_mode if match_mode in {"all", "category", "article"} else "all"
+    item.match_value = match_value.strip()
+    item.review_kind = review_kind if review_kind in {"any", "text", "photo", "video"} else "any"
+    item.rating_from = max(1, min(5, rating_from))
+    item.rating_to = max(1, min(5, rating_to))
+    item.body = body.strip()
+    if item.match_mode == "all":
+        item.match_value = ""
+    elif item.match_mode == "category" and item.match_value not in PRODUCT_CATEGORIES:
+        item.match_value = PRODUCT_CATEGORIES[0]
+    if item.rating_from > item.rating_to:
+        item.rating_from, item.rating_to = item.rating_to, item.rating_from
 
 
 @app.post("/templates")
@@ -263,23 +287,34 @@ def create_template(
     user = require_user(request, db)
     if not user:
         return redirect("/login")
-    item = ReplyTemplate(
-        user_id=user.id,
-        name=name.strip(),
-        match_mode=match_mode if match_mode in {"all", "category", "article"} else "all",
-        match_value=match_value.strip(),
-        review_kind=review_kind if review_kind in {"any", "text", "photo", "video"} else "any",
-        rating_from=max(1, min(5, rating_from)),
-        rating_to=max(1, min(5, rating_to)),
-        body=body.strip(),
-    )
-    if item.match_mode == "all":
-        item.match_value = ""
-    elif item.match_mode == "category" and item.match_value not in PRODUCT_CATEGORIES:
-        item.match_value = PRODUCT_CATEGORIES[0]
-    if item.rating_from > item.rating_to:
-        item.rating_from, item.rating_to = item.rating_to, item.rating_from
+    item = ReplyTemplate(user_id=user.id)
+    set_template_fields(item, name, match_mode, match_value, review_kind, rating_from, rating_to, body)
     db.add(item)
+    db.commit()
+    log_unsafe_template_range(db, user.id, item)
+    return redirect("/templates")
+
+
+@app.post("/templates/{template_id}/edit")
+def edit_template(
+    template_id: int,
+    request: Request,
+    name: str = Form(...),
+    match_mode: str = Form("all"),
+    match_value: str = Form(""),
+    review_kind: str = Form("any"),
+    rating_from: int = Form(1),
+    rating_to: int = Form(5),
+    body: str = Form(...),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    user = require_user(request, db)
+    if not user:
+        return redirect("/login")
+    item = db.scalar(select(ReplyTemplate).where(ReplyTemplate.id == template_id, ReplyTemplate.user_id == user.id))
+    if item is None:
+        raise HTTPException(status_code=404, detail="Шаблон не найден")
+    set_template_fields(item, name, match_mode, match_value, review_kind, rating_from, rating_to, body)
     db.commit()
     log_unsafe_template_range(db, user.id, item)
     return redirect("/templates")
