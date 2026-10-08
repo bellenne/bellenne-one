@@ -62,6 +62,7 @@ IMAGE_PROMPT_VARIABLES = {
     "posting", "offer_id", "product_name", "quantity", "summary",
     "background", "caption", "wishes", "template_id",
 }
+REWORK_PROMPT_VARIABLES = IMAGE_PROMPT_VARIABLES | {"correction"}
 # Keep dictionary versions immutable: a published scenario retains its answer
 # semantics even if later deployments add a new dictionary version.
 APPROVAL_DICTIONARIES = {
@@ -638,7 +639,7 @@ def settled(con, instance):
     )
 
 
-def image_prompt(node, item, fields):
+def image_prompt(node, item, fields, *, correction=None):
     labels = {
         "background": "Фон", "caption": "Надпись", "wishes": "Пожелания",
         "template_id": "Шаблон",
@@ -652,10 +653,22 @@ def image_prompt(node, item, fields):
         "product_name": item["name"], "quantity": item["quantity"],
         "summary": summary,
     })
+    if correction is not None:
+        values["correction"] = correction
     try:
         return node["prompt"].format_map(values)
     except (KeyError, ValueError) as exc:
         raise image_tasks.ImageTaskError("image_worker_prompt_invalid") from exc
+
+
+def rework_prompt_template(prompt):
+    """Keep legacy prompts usable while exposing the correction's placement."""
+    if not prompt.strip():
+        return ""
+    variables = {name for _, name, _, _ in string.Formatter().parse(prompt)}
+    if "correction" not in variables:
+        return prompt.rstrip() + "\n\nПожелания клиента к доработке: {correction}"
+    return prompt
 
 
 def rework_prompts(con, instance, product_type):
@@ -672,7 +685,7 @@ def rework_prompts(con, instance, product_type):
             ]
             if len(image_nodes) == 1:
                 prompts[product_type] = image_nodes[0]["prompt"]
-    return prompts
+    return {kind: rework_prompt_template(prompt) for kind, prompt in prompts.items() if prompt}
 
 
 def advance(con, instance_id, reply=None, *, simulate_external=False):

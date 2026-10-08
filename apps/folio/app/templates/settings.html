@@ -122,10 +122,10 @@
 </section>
 <section class="card card-body folio-stack folio-section">
   <h2>Промпты для доработки макета</h2>
-  <p class="field-help">Менеджер выбирает тип заказа в чате после отказа покупателя. Folio подставит этот промпт и добавит указанные менеджером пожелания клиента. Исходником будет последнее готовое превью того же заказа. Если промпт для исходного типа здесь пуст, используется единственный шаг «Создать макет через воркер» из опубликованной версии сценария заказа.</p>
+  <p class="field-help">Поставьте <code>{correction}</code> именно там, где должны быть пожелания менеджера к доработке. Например: «Измени последнее превью по инструкции: {correction}. Исходный фон: {background}». Исходником будет последнее готовое превью этого заказа. Если промпт для исходного типа пуст, используется единственный шаг создания макета из опубликованной версии сценария с пожеланиями в конце.</p>
   <form method="post" action="{{ prefix }}/settings/image-worker/rework-prompts" class="folio-stack">{{ token() }}
-    {% for product_type, label in types.items() %}<label class="field">{{ label }}<textarea class="input" name="{{ product_type }}" rows="5" maxlength="4000">{{ settings.rework_prompts.get(product_type, '') if settings.rework_prompts is defined else '' }}</textarea></label>{% endfor %}
-    <p class="field-help">Доступные переменные: {background}, {caption}, {wishes}, {template_id}, {summary}, {posting}, {offer_id}, {product_name}, {quantity}. Для другого типа без сохранённого промпта доработка недоступна.</p>
+    {% for product_type, label in types.items() %}<div class="folio-stack" data-rework-prompt><label class="field">{{ label }}<textarea class="input" name="{{ product_type }}" rows="5" maxlength="4000">{{ saved_rework_prompts.get(product_type, '') }}</textarea></label><div><button type="button" class="button button-small button-secondary" data-insert-correction>Вставить {correction}</button></div></div>{% endfor %}
+    <p class="field-help">{correction} — пожелания клиента из формы доработки в чате, обязательная переменная для непустого промпта. Остальные: {background}, {caption}, {wishes}, {template_id}, {summary}, {posting}, {offer_id}, {product_name}, {quantity}. В старые промпты {correction} добавлена в конец; её можно перенести в нужное место. Для другого типа без сохранённого промпта доработка недоступна.</p>
     <button class="button button-primary">Сохранить промпты</button>
   </form>
 </section>

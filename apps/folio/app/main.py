@@ -443,6 +443,7 @@ def inbox(
             history=history,
             integration_failures=integration_failures,
             rework_jobs=rework_jobs,
+            rework_busy=any(job["state"] not in {"completed", "failed"} for job in rework_jobs),
             current_product_type=current_product_type,
             available_rework_prompts=available_rework_prompts,
             image_job_labels=image_tasks.STATE_LABELS,
@@ -569,7 +570,7 @@ async def chat_action(request: Request, chat_id: int, action: str):
                 raise scenarios.Invalid("Обновите чат и повторите отправку доработки")
             node_id = f"rework:{key}"
             if con.execute("SELECT 1 FROM image_jobs WHERE item_id=? AND node_id=?", (item["id"], node_id)).fetchone():
-                return redirect(f"/chats/{chat_id}")
+                return redirect(f"/chats/{chat_id}#rework")
             if con.execute(
                 "SELECT 1 FROM image_jobs WHERE item_id=? AND node_id LIKE 'rework:%' "
                 "AND state NOT IN ('completed','failed')", (item["id"],),
@@ -583,8 +584,9 @@ async def chat_action(request: Request, chat_id: int, action: str):
                 raise scenarios.Invalid("Для доработки нужен готовый макет этого заказа")
             fields = json.loads(instance["fields"])
             try:
-                prompt = scenarios.image_prompt({"prompt": template}, item, fields)
-                prompt = f"{prompt.rstrip()}\n\nПожелания клиента к доработке: {correction}"
+                prompt = scenarios.image_prompt(
+                    {"prompt": template}, item, fields, correction=correction
+                )
                 width, height = image_tasks.dimensions_from_article(item["offer_id"])
                 image_tasks.enqueue(
                     con, item["id"], preview["preview_media_id"], prompt,
@@ -658,7 +660,7 @@ async def chat_action(request: Request, chat_id: int, action: str):
             db.audit(con, actor["id"], "media.accepted", "media", mid, chat_id)
         else:
             raise HTTPException(404)
-    return redirect(f"/chats/{chat_id}")
+    return redirect(f"/chats/{chat_id}" + ("#rework" if action == "rework" else ""))
 
 
 @app.get("/media/{media_id}")
@@ -790,6 +792,8 @@ def settings_page(request: Request, section: str = "overview"):
             retailcrm_config=retailcrm_config,
             mattermost_config=mattermost_config,
             image_worker_config=image_worker_config,
+            saved_rework_prompts={kind: scenarios.rework_prompt_template(prompt)
+                                  for kind, prompt in (current_settings.get("rework_prompts") or {}).items()},
             folio_public_base=os.environ.get("FOLIO_PUBLIC_BASE_URL", "").strip().rstrip("/"),
             retailcrm_capabilities=retailcrm_capabilities,
             retailcrm_job=retailcrm_job,
@@ -983,13 +987,20 @@ async def save_rework_prompts(request: Request):
             if len(prompt) > 4000:
                 raise scenarios.Invalid("Промпт должен содержать не более 4000 символов")
             try:
+                variables = set()
                 for _, variable, spec, conversion in string.Formatter().parse(prompt):
                     if variable is not None and (
-                        variable not in scenarios.IMAGE_PROMPT_VARIABLES or spec or conversion
+                        variable not in scenarios.REWORK_PROMPT_VARIABLES or spec or conversion
                     ):
                         raise scenarios.Invalid("В промпте используется неизвестная переменная")
+                    if variable is not None:
+                        variables.add(variable)
             except ValueError as exc:
                 raise scenarios.Invalid("Проверьте фигурные скобки в промпте") from exc
+            if "correction" not in variables:
+                raise scenarios.Invalid(
+                    f"{scenarios.TYPES[product_type]}: добавьте {{correction}} в место для пожеланий клиента"
+                )
             prompts[product_type] = prompt
         settings = db.config(con)
         settings["rework_prompts"] = prompts

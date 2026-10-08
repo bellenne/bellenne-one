@@ -3758,7 +3758,27 @@ class FolioIntegrationsTest(unittest.TestCase):
             })
             con.execute("UPDATE versions SET graph=? WHERE id=?", (db.dump(graph_value), instance["version_id"]))
             prompts = scenarios.rework_prompts(con, instance, "portrait_background")
-            self.assertEqual(prompts["portrait_background"], "Сохранённый промпт {background}")
+            self.assertEqual(prompts["portrait_background"],
+                             "Сохранённый промпт {background}\n\nПожелания клиента к доработке: {correction}")
+
+    def test_rework_prompts_require_correction_placeholder_and_preserve_legacy_settings(self):
+        for prompt in ["Только {background}", "Измени: {{correction}}", "Измени: {unknown}"]:
+            response = self.client.post(
+                "/settings/image-worker/rework-prompts", headers=self.admin,
+                data={"csrf": "csrf", "portrait_background": prompt},
+                follow_redirects=False,
+            )
+            self.assertEqual(response.status_code, 422)
+        with db.transaction() as con:
+            settings = db.config(con)
+            settings["rework_prompts"] = {"portrait_background": "Старый промпт {background}"}
+            con.execute("UPDATE settings SET value=? WHERE id=1", (db.dump(settings),))
+        page = self.client.get("/settings/image-worker", headers=self.admin)
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("Старый промпт {background}\n\nПожелания клиента к доработке: {correction}", page.text)
+        with db.transaction() as con:
+            self.assertEqual(db.config(con)["rework_prompts"]["portrait_background"],
+                             "Старый промпт {background}")
 
     def test_manager_reworks_rejected_mockup_from_latest_preview(self):
         config = {
@@ -3774,7 +3794,8 @@ class FolioIntegrationsTest(unittest.TestCase):
             self.assertEqual(denied.status_code, 403)
             saved = self.client.post(
                 "/settings/image-worker/rework-prompts", headers=self.admin,
-                data={"csrf": "csrf", "portrait_background": "Сделать фон: {background}"},
+                data={"csrf": "csrf", "portrait_background":
+                      "Сделать фон: {background}\nИзменения: {correction}\nСохрани остальные детали."},
                 follow_redirects=False,
             )
             self.assertEqual(saved.status_code, 303)
@@ -3801,20 +3822,21 @@ class FolioIntegrationsTest(unittest.TestCase):
             self.assertIn("Доработать макет", page.text)
             self.assertIn('value="portrait_background" selected', page.text)
             request = {"csrf": "csrf", "dedup": "a" * 32,
-                       "product_type": "portrait_background", "correction": "Сделать фон теплее"}
+                       "product_type": "portrait_background", "correction": "Сделать фон теплее {пожелание}"}
             response = self.client.post(
                 f"/chats/{chat_id}/rework", headers=self.manager,
                 data=request, follow_redirects=False,
             )
             self.assertEqual(response.status_code, 303, response.text)
+            self.assertTrue(response.headers["location"].endswith(f"/chats/{chat_id}#rework"))
             with db.transaction() as con:
                 job = con.execute(
                     "SELECT * FROM image_jobs WHERE node_id=?", ("rework:" + "a" * 32,)
                 ).fetchone()
                 self.assertIsNotNone(job)
                 self.assertEqual(job["media_id"], preview)
-                self.assertIn("Сделать фон: светлый", job["prompt"])
-                self.assertIn("Сделать фон теплее", job["prompt"])
+                self.assertEqual(job["prompt"], "Сделать фон: светлый\n"
+                                 "Изменения: Сделать фон теплее {пожелание}\nСохрани остальные детали.")
                 self.assertEqual(job["state"], "pending")
                 self.assertEqual(con.execute("SELECT mode FROM chats WHERE id=?", (chat_id,)).fetchone()[0], "manual")
             repeated = self.client.post(

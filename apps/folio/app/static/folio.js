@@ -633,6 +633,76 @@ document.querySelectorAll("[data-mapping-form]").forEach((form) => {
   loadArticles();
 });
 
+document.querySelectorAll("[data-rework-panel]").forEach((panel) => {
+  if (location.hash === "#rework") panel.open = true;
+});
+
+document.querySelectorAll("[data-chat-composer]").forEach((composer) => {
+  const text = composer.querySelector("[data-chat-text]");
+  const file = composer.querySelector("[data-chat-file]");
+  const send = composer.querySelector("[data-chat-send]");
+  const preview = composer.querySelector("[data-file-preview]");
+  const filename = composer.querySelector("[data-file-name]");
+  const hint = composer.querySelector(".folio-compose-hint");
+  const originalHint = hint.textContent;
+  const originalHintHidden = hint.hidden;
+  const enabled = composer.dataset.sendEnabled === "true";
+  let submitting = false;
+  function update() {
+    const attached = file.files.length > 0;
+    text.hidden = attached;
+    preview.hidden = !attached;
+    hint.textContent = attached ? composer.dataset.fileHelp : originalHint;
+    hint.hidden = attached ? false : originalHintHidden;
+    send.setAttribute("form", attached ? "folio-file-form" : "folio-message-form");
+    const label = attached ? "Отправить фото" : "Отправить сообщение";
+    send.setAttribute("aria-label", label);
+    send.title = label;
+    send.disabled = !enabled || submitting || (!attached && !text.value.trim());
+    if (!attached) {
+      text.style.height = "auto";
+      text.style.height = text.scrollHeight + "px";
+    }
+  }
+  composer.querySelector("[data-attach-photo]").addEventListener("click", () => file.click());
+  file.addEventListener("change", () => {
+    filename.textContent = file.files.length ? file.files[0].name : "";
+    update();
+  });
+  composer.querySelector("[data-remove-photo]").addEventListener("click", () => {
+    file.value = "";
+    file.dispatchEvent(new Event("change"));
+    text.focus();
+  });
+  text.addEventListener("input", update);
+  text.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      if (!send.disabled) document.getElementById(send.getAttribute("form")).requestSubmit(send);
+    }
+  });
+  composer.querySelectorAll("form").forEach((form) => {
+    form.addEventListener("submit", (event) => {
+      if (submitting || !enabled) { event.preventDefault(); return; }
+      submitting = true;
+      update();
+    });
+  });
+  window.addEventListener("pageshow", () => { submitting = false; update(); });
+  update();
+});
+
+document.querySelectorAll("[data-insert-correction]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const prompt = button.closest("[data-rework-prompt]").querySelector("textarea");
+    const variable = "{correction}";
+    if (prompt.value.length - (prompt.selectionEnd - prompt.selectionStart) + variable.length > prompt.maxLength) return;
+    prompt.setRangeText(variable, prompt.selectionStart, prompt.selectionEnd, "end");
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+    prompt.focus();
+  });
+});
+
 document.querySelectorAll("[data-open-drawer]").forEach((button) => {
   button.addEventListener("click", () => document.querySelector("[data-order-drawer]")?.showModal());
 });
@@ -645,6 +715,13 @@ document.querySelectorAll("[data-order-drawer]").forEach((drawer) => {
   });
 });
 
-document.querySelectorAll("[data-test-messages]").forEach((messages) => {
+document.querySelectorAll("[data-test-messages], [data-chat-messages]").forEach((messages) => {
   messages.scrollTop = messages.scrollHeight;
+  messages.querySelectorAll("img").forEach((img) => {
+    img.addEventListener("load", () => {
+      if (messages.scrollHeight - messages.scrollTop - messages.clientHeight < img.clientHeight + 48) {
+        messages.scrollTop = messages.scrollHeight;
+      }
+    }, { once: true });
+  });
 });
