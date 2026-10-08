@@ -266,7 +266,9 @@ def inbox(
 ):
     with db.transaction() as con:
         actor = security.user(request, con)
-        pattern = f"%{q}%"
+        q = q.strip()
+        search_text = q.translate(str.maketrans("‐‑‒–—−", "------"))
+        pattern = f"%{search_text}%"
         clauses, params = (
             [
                 "c.start_job_id IS NOT NULL",
@@ -275,16 +277,31 @@ def inbox(
                 "JOIN mappings m ON m.id=i.mapping_id WHERE ci.chat_id=c.id "
                 "AND m.account_id=i.account_id AND m.key_kind='seller_article' "
                 "AND m.sku=i.offer_id)",
-                "(c.title LIKE ? OR c.external_id LIKE ? OR c.buyer_name LIKE ? "
+            ],
+            [],
+        )
+        if q:
+            search_clause = (
+                "c.title LIKE ? OR c.external_id LIKE ? OR c.buyer_name LIKE ? "
                 "OR c.buyer_name_manual LIKE ? OR c.buyer_id LIKE ? "
+                "OR c.posting LIKE ? OR active.posting LIKE ? OR active.order_number LIKE ? "
                 "OR EXISTS(SELECT 1 FROM chat_items ci "
                 "JOIN items i ON i.id=ci.item_id WHERE ci.chat_id=c.id AND "
                 "(i.posting LIKE ? OR i.order_number LIKE ? OR i.customer_name LIKE ?)) "
                 "OR EXISTS(SELECT 1 FROM messages sm WHERE sm.chat_id=c.id "
-                "AND sm.order_number LIKE ?))"
-            ],
-            [pattern] * 9,
-        )
+                "AND sm.order_number LIKE ?)"
+            )
+            params.extend([pattern] * 12)
+            posting_digits = re.sub(r"[\s-]", "", search_text)
+            if posting_digits.isascii() and posting_digits.isdigit():
+                search_clause += (
+                    " OR REPLACE(c.posting,'-','') LIKE ?"
+                    " OR REPLACE(active.posting,'-','') LIKE ?"
+                    " OR EXISTS(SELECT 1 FROM chat_items ci JOIN items i ON i.id=ci.item_id "
+                    "WHERE ci.chat_id=c.id AND REPLACE(i.posting,'-','') LIKE ?)"
+                )
+                params.extend([f"%{posting_digits}%"] * 3)
+            clauses.append(f"({search_clause})")
         if actor["role"] != "admin" and db.config(con).get("manager_scope") != "all":
             clauses.append(
                 "EXISTS(SELECT 1 FROM assignments a WHERE a.chat_id=c.id AND a.user_id=?)"

@@ -607,6 +607,26 @@ class FolioTest(unittest.TestCase):
             with self.assertRaises(OzonError):
                 worker.import_order(con, 1, {"posting_number": "C"})
 
+    def test_inbox_search_finds_posting_and_respects_manager_assignments(self):
+        _, _, chat_id, _ = self.setup_instance(posting="85433468-0024-1")
+        _, _, other_chat, _ = self.setup_instance(posting="85433468-0025-1")
+        with db.transaction() as con:
+            con.execute("UPDATE chats SET chat_type='BUYER_SELLER'")
+        for query in ["85433468-0024-1", " 85433468-0024-1 \n",
+                      "85433468‑0024‑1", "8543346800241", "0024"]:
+            with self.subTest(query=query):
+                page = self.client.get("/", params={"q": query}, headers=self.admin)
+                self.assertEqual(page.status_code, 200)
+                self.assertTrue(f'href="/folio/chats/{chat_id}"' in page.text)
+                self.assertFalse(f'href="/folio/chats/{other_chat}"' in page.text)
+        with db.transaction() as con:
+            con.execute("INSERT INTO assignments(chat_id,user_id) VALUES(?, '2')", (chat_id,))
+        assigned = self.client.get("/", params={"q": "85433468"}, headers=self.manager)
+        self.assertTrue(f'href="/folio/chats/{chat_id}"' in assigned.text)
+        self.assertFalse(f'href="/folio/chats/{other_chat}"' in assigned.text)
+        missing = self.client.get("/", params={"q": "99999999"}, headers=self.admin)
+        self.assertTrue("чаты не найдены" in missing.text)
+
     def test_chat_uses_buyer_and_separates_order_from_posting_number(self):
         with db.transaction() as con:
             worker.import_order(
