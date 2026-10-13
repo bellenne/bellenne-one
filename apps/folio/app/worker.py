@@ -690,6 +690,15 @@ def backfill_chat_orders(account_id, adapter):
             )
 
 
+def _open_order_chats_at(order_chats, created):
+    """Inbox lifetime follows the order, not the bot's node/status or mode."""
+    if not created:
+        return []
+    return [chat for chat in order_chats if chat["start_at"]
+            and (started := _utc_timestamp(chat["start_at"])) and created >= started
+            and chat["external_status"] not in {"cancelled", "delivered"}]
+
+
 def _order_chat_for_message(con, order_chats, raw, file_digests=None):
     """Route one Ozon message to one order, never by buyer identity alone."""
 
@@ -758,15 +767,7 @@ def _order_chat_for_message(con, order_chats, raw, file_digests=None):
     created = _utc_timestamp(raw.get("created_at"))
     if not created:
         return None
-    eligible = [chat for chat in order_chats if chat["start_at"]
-                and (started := _utc_timestamp(chat["start_at"])) and created >= started]
-    if len(eligible) == 1:
-        return eligible[0]
-    active = [
-        chat for chat in eligible
-        if chat["external_status"] != "cancelled"
-        and chat["instance_status"] in {"collecting", "waiting_integration", "waiting_mockup", "waiting_approval", "needs_review", "waiting_release"}
-    ]
+    active = _open_order_chats_at(order_chats, created)
     return active[0] if len(active) == 1 else None
 
 
@@ -1463,10 +1464,7 @@ def sync_job(job, adapter, settings):
                 if _message_context(raw)[0]:
                     continue
                 created = _utc_timestamp(raw.get("created_at"))
-                active = [chat for chat in known if created and chat["start_at"]
-                          and (started := _utc_timestamp(chat["start_at"])) and created >= started
-                          and chat["external_status"] != "cancelled"
-                          and chat["instance_status"] in {"collecting", "waiting_integration", "waiting_mockup", "waiting_approval", "needs_review", "waiting_release"}]
+                active = _open_order_chats_at(known, created)
                 if len(active) > 1:
                     ambiguous.append((raw, active))
             for raw, active in ambiguous:

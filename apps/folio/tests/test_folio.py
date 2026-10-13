@@ -3646,6 +3646,65 @@ class FolioTest(unittest.TestCase):
             self.assertEqual(con.execute(
                 "SELECT COUNT(*) FROM audit WHERE action='chat.ambiguous_order_reply'"
             ).fetchone()[0], 2)
+        # Handoff must not make the next ambiguous correction disappear.
+        message["message_id"] = "second-reply-after-handoff"
+        for _ in range(2):
+            worker.sync_job({"kind": "sync", "account_id": 1, "payload": "{}"}, Adapter(), settings)
+        with db.transaction() as con:
+            self.assertEqual(con.execute("SELECT COUNT(*) FROM events").fetchone()[0], 0)
+            self.assertEqual(con.execute(
+                "SELECT COUNT(*) FROM messages WHERE external_id='second-reply-after-handoff'"
+            ).fetchone()[0], 2)
+            self.assertEqual(con.execute(
+                "SELECT COUNT(*) FROM audit WHERE action='chat.ambiguous_order_reply'"
+            ).fetchone()[0], 4)
+
+    def test_manual_order_keeps_receiving_shared_chat_history_until_terminal(self):
+        _, old_item, old_chat, _ = self.setup_instance(posting="OLD", external_chat="SHARED")
+        iid, item, chat, _ = self.setup_instance(posting="CURRENT", external_chat="SHARED")
+        with db.transaction() as con:
+            con.execute("UPDATE items SET external_status='cancelled' WHERE id=?", (old_item,))
+            scenarios.takeover(con, chat, "2")
+            con.execute("UPDATE instances SET status='needs_manager' WHERE id=?", (iid,))
+            con.execute("UPDATE outbox SET state='sent'")
+        messages = []
+
+        class Adapter:
+            def seller_info(self):
+                return {}
+            def order_pages(self, *_args):
+                return iter([])
+            def chats(self):
+                return iter([{"chat": {"chat_id": "SHARED", "chat_type": "BUYER_SELLER"}}])
+            def history(self, _chat_id):
+                return iter(reversed(messages))
+
+        settings = {**self.settings, "sync_since": "2026-09-23T00:00:00+00:00"}
+        for status in ("needs_manager", "ready", "closed"):
+            with db.transaction() as con:
+                con.execute("UPDATE instances SET status=? WHERE id=?", (status, iid))
+            messages.append({"message_id": status, "created_at": db.now(),
+                             "user": {"type": "Customer"}, "data": ["Исправьте фон " + status]})
+            for _ in range(2):
+                worker.sync_job({"kind": "sync", "account_id": 1, "payload": "{}"}, Adapter(), settings)
+            with db.transaction() as con:
+                self.assertEqual(con.execute("SELECT chat_id FROM messages WHERE external_id=?", (status,)).fetchone()[0], chat)
+                event = con.execute("SELECT * FROM events WHERE state='pending' ORDER BY id DESC LIMIT 1").fetchone()
+                worker.process_event(con, event)
+                self.assertEqual(con.execute("SELECT mode FROM chats WHERE id=?", (chat,)).fetchone()[0], "manual")
+                self.assertEqual(con.execute("SELECT COUNT(*) FROM outbox WHERE state='pending'").fetchone()[0], 0)
+        with db.transaction() as con:
+            self.assertEqual(con.execute("SELECT COUNT(*) FROM messages WHERE chat_id=?", (chat,)).fetchone()[0], 3)
+            self.assertEqual(con.execute("SELECT unread FROM chats WHERE id=?", (chat,)).fetchone()[0], 3)
+            self.assertEqual(con.execute("SELECT COUNT(*) FROM messages WHERE chat_id=?", (old_chat,)).fetchone()[0], 0)
+        for terminal in ("delivered", "cancelled"):
+            with db.transaction() as con:
+                con.execute("UPDATE items SET external_status=? WHERE id=?", (terminal, item))
+            messages.append({"message_id": terminal, "created_at": db.now(),
+                             "user": {"type": "Customer"}, "data": ["После завершения"]})
+            worker.sync_job({"kind": "sync", "account_id": 1, "payload": "{}"}, Adapter(), settings)
+            with db.transaction() as con:
+                self.assertEqual(con.execute("SELECT COUNT(*) FROM messages WHERE external_id=?", (terminal,)).fetchone()[0], 0)
 
     def test_shared_chat_explicit_order_reply_routes_only_that_order(self):
         _, _, first_chat, _ = self.setup_instance(posting="POSTING-A", external_chat="SHARED")
