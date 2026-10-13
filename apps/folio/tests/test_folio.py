@@ -4477,8 +4477,10 @@ class FolioIntegrationsTest(unittest.TestCase):
 
     def test_image_model_settings_are_admin_only_and_snapshot_per_job(self):
         path = "/settings/image-worker/models"
-        chosen = {"csrf": "csrf", "portrait_background": "flux-3-image",
-                  "collage": "gemini-nano-banana-2.1", "template_art": "seedream-5-0-pro"}
+        chosen = {"csrf": "csrf", "portrait_background": "seedream-5-0-lite",
+                  "collage": "seedream-5-0-flash", "template_art": "seedream-4.5"}
+        self.assertEqual(self.client.post(path, headers=self.admin,
+            data={**chosen, "portrait_background": "flux-3-image"}).status_code, 422)
         self.assertEqual(self.client.post(path, headers=self.manager, data=chosen).status_code, 403)
         self.assertEqual(self.client.post(path, headers=self.admin,
             data={**chosen, "collage": "not-a-model"}).status_code, 422)
@@ -4499,13 +4501,13 @@ class FolioIntegrationsTest(unittest.TestCase):
                             (db.dump({"photos": [mid]}), instance_id))
                 job_id = image_tasks.enqueue(con, item_id, mid, "Сохранить человека", 40, 60, "1")
                 self.assertEqual(con.execute("SELECT model FROM image_jobs WHERE id=?",
-                    (job_id,)).fetchone()[0], "flux-3-image")
+                    (job_id,)).fetchone()[0], "seedream-5-0-lite")
             self.assertEqual(self.client.post(path, headers=self.admin,
                 data={**chosen, "portrait_background": "hy-image-v3.5-preview"},
                 follow_redirects=False).status_code, 303)
             with db.transaction() as con:
                 self.assertEqual(con.execute("SELECT model FROM image_jobs WHERE id=?",
-                    (job_id,)).fetchone()[0], "flux-3-image")
+                    (job_id,)).fetchone()[0], "seedream-5-0-lite")
             auth = {"Authorization": "Bearer MODEL_KEY"}
             self.assertEqual(self.client.get("/image-worker/next", headers=auth).status_code, 409)
             self.assertEqual(self.client.get("/image-worker/next", headers={**auth,
@@ -4513,7 +4515,7 @@ class FolioIntegrationsTest(unittest.TestCase):
             pulled = self.client.get("/image-worker/next", headers={**auth,
                 "X-Folio-Image-Models": "1", "X-Folio-Image-Provider": "aitunnel"})
             self.assertEqual(pulled.status_code, 200, pulled.text)
-            self.assertEqual(pulled.json()["model"], "flux-3-image")
+            self.assertEqual(pulled.json()["model"], "seedream-5-0-lite")
 
     def test_uncertain_image_generation_stays_paused_and_is_not_reissued(self):
         instance_id, item_id, chat_id, _ = self.setup_instance()

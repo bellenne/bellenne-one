@@ -26,15 +26,15 @@ TERMINAL = {"completed", "failed"}
 POLL_SECONDS = 30
 LEGACY_IMAGE_MODEL = "hy-image-v3.5-preview"
 IMAGE_MODELS = {
-    "flux-3-image": "Flux 3 Image · фотореалистичные портреты и фон",
-    "gemini-nano-banana-2.1": "Nano Banana 2.1 · несколько фото и композиция",
-    "seedream-5-0-pro": "Seedream 5.0 Pro · художественная обработка по шаблону",
-    LEGACY_IMAGE_MODEL: "HY Image 3.5 · прежняя модель",
+    "seedream-5-0-lite": "Seedream 5.0 Lite · 4K · фото, фон и коллаж · ≈6,30 ₽",
+    "seedream-4.5": "Seedream 4.5 · 4K · фото и обработка по шаблону · ≈7,20 ₽",
+    "seedream-5-0-flash": "Seedream 5.0 Flash · 2K · быстрые правки · ≈3,24 ₽",
+    LEGACY_IMAGE_MODEL: "HY Image 3.5 · 4K · портреты и доработка · ≈4,32–5,76 ₽",
 }
 DEFAULT_IMAGE_MODELS = {
-    "portrait_background": "flux-3-image",
-    "collage": "gemini-nano-banana-2.1",
-    "template_art": "seedream-5-0-pro",
+    "portrait_background": "seedream-5-0-lite",
+    "collage": "seedream-5-0-lite",
+    "template_art": "seedream-4.5",
 }
 STATE_LABELS = {
     "pending": "В очереди", "submitting": "Передаётся воркеру",

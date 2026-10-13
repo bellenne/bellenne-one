@@ -127,7 +127,7 @@
     <div class="form-grid form-grid-2">{% for product_type, label in types.items() %}<label class="field">{{ label }}<select class="select" name="{{ product_type }}" required>{% for model, description in image_models.items() %}<option value="{{ model }}" {{ 'selected' if selected_image_models.get(product_type) == model }}>{{ description }}</option>{% endfor %}</select></label>{% endfor %}</div>
     <button class="button button-primary">Сохранить модели</button>
   </form>
-  <p class="field-help">Русский промпт поддерживается. Для изменения фона укажите желаемое окружение, свет и цвет; одно слово «приятнее» оставляет модели слишком много свободы. Стоимость генерации зависит от модели и разрешения — проверьте тариф AI Tunnel перед запуском.</p>
+  <p class="field-help">Доступны бюджетные модели с редактированием по фото и несколькими исходниками. Цены — ориентиры публичного каталога AI Tunnel на 13.10.2026, не гарантия списания; фактическая стоимость записывается воркером. Дорогие Flux 3, Nano Banana 2.1 и Seedream Pro исключены из нового выбора. После обновления выберите и сохраните модели заново, если ранее использовалась дорогая модель. Уже созданные задания не меняются. Русский промпт поддерживается; правило для общих пожеланий к фону задаётся в самом промпте.</p>
 </section>
 <section class="card card-body folio-stack folio-section">
   <h2>Промпты для доработки макета</h2>
