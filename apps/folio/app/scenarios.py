@@ -130,6 +130,26 @@ def approval_variants(node, key):
     return {phrase for value in values if (phrase := approval_phrase(value))}
 
 
+def approval_decision(node, text):
+    """Recognize a clear refusal followed by an explanation, never a qualified approval."""
+    phrase = approval_phrase(text)
+    if phrase in approval_variants(node, "accept"):
+        return "accept"
+    reject = approval_variants(node, "reject")
+    if phrase in reject:
+        return "reject"
+    # Buyers usually explain a refusal in the same message. The first words
+    # still answer the question; an affirmative sentence after them is
+    # contradictory and must go to a manager instead of changing the order.
+    if any(phrase.startswith(value + " ") for value in reject):
+        if any(value in phrase for value in (
+            "все устраивает", "макет подходит", "можно печатать", "да согласен",
+        )):
+            return None
+        return "reject"
+    return None
+
+
 class Invalid(ValueError):
     pass
 
@@ -852,10 +872,10 @@ def advance(con, instance_id, reply=None, *, simulate_external=False):
                     fields["approval_outcome"] = f"Нет ответа за {node['hours']:g} ч."
                     answer_target = node.get("timeout") or node["next"]
                     valid = True
-                elif approval_phrase(text) in approval_variants(node, "accept"):
+                elif (decision := approval_decision(node, text)) == "accept":
                     fields["approval_outcome"] = "Макет подтверждён покупателем"
                     valid = True
-                elif approval_phrase(text) in approval_variants(node, "reject"):
+                elif decision == "reject":
                     fields["approval_outcome"] = "Покупатель отказался от макета"
                     answer_target = node.get("otherwise") or node["next"]
                     valid = True

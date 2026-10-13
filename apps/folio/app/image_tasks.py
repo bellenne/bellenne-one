@@ -24,6 +24,18 @@ from . import db, security
 PROGRESS = {"queued", "generating", "waiting_topaz", "composing", "webhook_pending"}
 TERMINAL = {"completed", "failed"}
 POLL_SECONDS = 30
+LEGACY_IMAGE_MODEL = "hy-image-v3.5-preview"
+IMAGE_MODELS = {
+    "flux-3-image": "Flux 3 Image · фотореалистичные портреты и фон",
+    "gemini-nano-banana-2.1": "Nano Banana 2.1 · несколько фото и композиция",
+    "seedream-5-0-pro": "Seedream 5.0 Pro · художественная обработка по шаблону",
+    LEGACY_IMAGE_MODEL: "HY Image 3.5 · прежняя модель",
+}
+DEFAULT_IMAGE_MODELS = {
+    "portrait_background": "flux-3-image",
+    "collage": "gemini-nano-banana-2.1",
+    "template_art": "seedream-5-0-pro",
+}
 STATE_LABELS = {
     "pending": "В очереди", "submitting": "Передаётся воркеру",
     "unknown": "Результат передачи не подтверждён", "queued": "Принято воркером",
@@ -40,6 +52,8 @@ ERROR_LABELS = {
     "image_worker_dimensions_invalid": "Размер в артикуле некорректен. Исправьте артикул или передайте заказ менеджеру.",
     "image_worker_photo_ambiguous": "В брифе несколько фотографий. Выбор исходника требует ручной проверки.",
     "image_worker_order_cancelled": "Заказ отменён до передачи задания воркеру.",
+    "image_worker_model_invalid": "Модель изображений не поддерживается. Выберите другую модель в настройках Folio.",
+    "image_worker_model_unsupported": "Обновите FolioImageWorker: текущая версия не принимает выбранную модель.",
 }
 
 
@@ -148,10 +162,25 @@ def dimensions_from_article(article: str) -> tuple[int, int]:
     return 40, 60
 
 
+def model_for_item(con, item_id: int, product_type: str | None = None) -> str:
+    if product_type is None:
+        mapped = con.execute(
+            "SELECT m.product_type FROM items i LEFT JOIN mappings m ON m.id=i.mapping_id "
+            "WHERE i.id=?", (item_id,)
+        ).fetchone()
+        product_type = mapped["product_type"] if mapped else None
+    selected = (db.config(con).get("image_models") or {}).get(product_type)
+    model = selected or DEFAULT_IMAGE_MODELS.get(product_type, LEGACY_IMAGE_MODEL)
+    if model not in IMAGE_MODELS:
+        raise ImageTaskError("image_worker_model_invalid")
+    return model
+
+
 def enqueue(con, item_id: int, media_id: str | list[str], prompt: str,
             width_cm: float, height_cm: float, actor: str,
             *, instance_id: int | None = None, node_id: str | None = None,
-            source_preview: bool = False, chat_id: int | None = None) -> int:
+            source_preview: bool = False, chat_id: int | None = None,
+            product_type: str | None = None) -> int:
     if not configured(con):
         raise ImageTaskError("image_worker_not_configured")
     if not 1 <= len(prompt.strip()) <= 4000:
@@ -178,10 +207,11 @@ def enqueue(con, item_id: int, media_id: str | list[str], prompt: str,
                 or (selected_id not in collected and not approved_preview)):
             raise ImageTaskError("image_worker_media_missing")
     stamp = db.now()
+    model = model_for_item(con, item_id, product_type)
     task_id = con.execute(
-        "INSERT INTO image_jobs(item_id,media_id,media_ids,input_token,prompt,width_cm,height_cm,created_at,updated_at,instance_id,node_id,chat_id) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-        (item_id, media_ids[0], json.dumps(media_ids), secrets.token_urlsafe(32), prompt.strip(), width_cm, height_cm,
+        "INSERT INTO image_jobs(item_id,media_id,media_ids,input_token,prompt,model,width_cm,height_cm,created_at,updated_at,instance_id,node_id,chat_id) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (item_id, media_ids[0], json.dumps(media_ids), secrets.token_urlsafe(32), prompt.strip(), model, width_cm, height_cm,
          stamp, stamp, instance_id, node_id, chat_id),
     ).lastrowid
     db.audit(con, actor, "image_job.queued", "image_job", task_id)
@@ -262,7 +292,7 @@ def submit_one(*, client=None) -> bool:
         if any(not media or not (db.DATA / "media" / media_id).is_file()
                for media, media_id in zip(media_rows, media_ids)):
             raise ImageTaskError("image_worker_media_missing")
-        data = {"prompt": row["prompt"], "width_cm": str(row["width_cm"]),
+        data = {"prompt": row["prompt"], "model": row["model"], "width_cm": str(row["width_cm"]),
                 "height_cm": str(row["height_cm"]), "webhook_url": callback}
         public_base = input_base_url()
         if public_base:
@@ -406,7 +436,7 @@ def authenticate_pull(con, authorization: str) -> None:
         raise ImageTaskError("image_worker_auth_failed")
 
 
-def claim_next(con) -> dict | None:
+def claim_next(con, *, supports_models: bool = False, provider: str = "") -> dict | None:
     """Return the same claimed job until its terminal result is acknowledged."""
     row = con.execute(
         "SELECT j.*,i.external_status FROM image_jobs j JOIN items i ON i.id=j.item_id "
@@ -429,6 +459,8 @@ def claim_next(con) -> dict | None:
         con.execute("UPDATE image_jobs SET state='failed',error=?,updated_at=? WHERE id=?",
                     ("image_worker_order_cancelled", db.now(), row["id"]))
         return None
+    if row["model"] != LEGACY_IMAGE_MODEL and (not supports_models or provider not in {"aitunnel", "mock"}):
+        raise ImageTaskError("image_worker_model_unsupported")
     public_base = os.environ.get("FOLIO_PUBLIC_BASE_URL", "").rstrip("/")
     if urlsplit(public_base).scheme != "https":
         raise ImageTaskError("image_worker_url_invalid")
@@ -438,7 +470,7 @@ def claim_next(con) -> dict | None:
                     ("queued" if row["state"] == "pending" else row["state"], worker_id, db.now(), row["id"]))
     media_ids = json.loads(row["media_ids"]) or [row["media_id"]]
     prefix = os.environ.get("MODULE_PREFIX", "/folio").rstrip("/")
-    return {"id": row["id"], "worker_id": worker_id, "prompt": row["prompt"],
+    return {"id": row["id"], "worker_id": worker_id, "prompt": row["prompt"], "model": row["model"],
             "width_cm": row["width_cm"], "height_cm": row["height_cm"],
             "image_urls": [f"{public_base}{prefix}/image-worker/input/{quote(row['input_token'], safe='')}/{index}"
                            for index in range(len(media_ids))]}

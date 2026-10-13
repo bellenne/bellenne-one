@@ -3780,6 +3780,40 @@ class FolioIntegrationsTest(unittest.TestCase):
             self.assertEqual(db.config(con)["rework_prompts"]["portrait_background"],
                              "Старый промпт {background}")
 
+    def test_manager_can_rework_before_buyer_rejects_when_preview_exists(self):
+        with self.image_worker_settings({
+            "FOLIO_IMAGE_WORKER_URL": "https://worker.example.com",
+            "FOLIO_IMAGE_WORKER_API_KEY": "KEY",
+        }):
+            saved = self.client.post("/settings/image-worker/rework-prompts", headers=self.admin,
+                data={"csrf": "csrf", "portrait_background":
+                      "Сделать фон: {background}. Изменения: {correction}"},
+                follow_redirects=False)
+            self.assertEqual(saved.status_code, 303)
+            instance_id, item_id, chat_id, _ = self.setup_instance()
+            with db.transaction() as con:
+                con.execute("INSERT INTO assignments(chat_id,user_id) VALUES(?, '2')", (chat_id,))
+                source = self.image(con, chat_id, item_id)
+                preview = self.image(con, chat_id, item_id)
+                con.execute("UPDATE instances SET fields=? WHERE id=?",
+                            (db.dump({"photos": [source], "background": "светлый"}), instance_id))
+                job_id = image_tasks.enqueue(con, item_id, source, "Первый макет", 40, 60, "system")
+                con.execute("UPDATE image_jobs SET state='completed',preview_media_id=? WHERE id=?",
+                            (preview, job_id))
+            page = self.client.get(f"/chats/{chat_id}", headers=self.manager)
+            self.assertEqual(page.status_code, 200)
+            self.assertIn("Доработать макет", page.text)
+            response = self.client.post(f"/chats/{chat_id}/rework", headers=self.manager,
+                data={"csrf": "csrf", "dedup": "c" * 32,
+                      "product_type": "portrait_background", "correction": "Фон теплее"},
+                follow_redirects=False)
+            self.assertEqual(response.status_code, 303, response.text)
+            with db.transaction() as con:
+                job = con.execute("SELECT media_id,state FROM image_jobs WHERE node_id=?",
+                                  ("rework:" + "c" * 32,)).fetchone()
+                self.assertEqual((job["media_id"], job["state"]), (preview, "pending"))
+                self.assertEqual(con.execute("SELECT mode FROM chats WHERE id=?", (chat_id,)).fetchone()[0], "manual")
+
     def test_manager_reworks_rejected_mockup_from_latest_preview(self):
         config = {
             "FOLIO_IMAGE_WORKER_URL": "https://worker.example.com",
@@ -4156,7 +4190,7 @@ class FolioIntegrationsTest(unittest.TestCase):
         }
         with self.image_worker_settings(values):
             self.assertEqual(image_tasks.probe(), (False, "image_worker_no_recent_poll"))
-            response = self.client.get("/image-worker/next", headers={"Authorization": "Bearer PROBE_KEY"})
+            response = self.client.get("/image-worker/next", headers={"Authorization": "Bearer PROBE_KEY", "X-Folio-Image-Models": "1", "X-Folio-Image-Provider": "aitunnel"})
             self.assertEqual(response.status_code, 204)
             self.assertEqual(image_tasks.probe(), (True, None))
     def test_approval_dictionary_uses_exact_safe_phrases(self):
@@ -4168,6 +4202,40 @@ class FolioIntegrationsTest(unittest.TestCase):
         self.assertNotIn(scenarios.approval_phrase("СЛУЧАЙНЫЙ ОТКАЗ"), scenarios.approval_variants(node, "reject"))
         self.assertEqual(scenarios.approval_variants({"accept": "ДА"}, "accept"), {"да"})
         self.assertIn("принято", scenarios.approval_variants({"use_dictionary": True, "accept": "Принято"}, "accept"))
+        self.assertEqual(scenarios.approval_decision(
+            node, "нет, зачем убрали фон, я хочу чтобы фон был но сделать его более приятным."
+        ), "reject")
+        self.assertIsNone(scenarios.approval_decision(node, "Да, но переделайте фон"))
+        self.assertIsNone(scenarios.approval_decision(node, "Нет, всё устраивает"))
+
+    def test_compound_approval_rejection_reaches_mattermost_branch(self):
+        instance_id, _item_id, _chat_id, _ = self.setup_instance()
+        graph_value = {"nodes": [
+            {"id": "approval", "kind": "approval", "dictionary_version": 1,
+             "text": "Согласны?", "hours": 6, "next": "end", "otherwise": "notify",
+             "timeout": "end", "error": "handoff"},
+            {"id": "notify", "kind": "mattermost", "message": "Нужны правки в заказе {posting}",
+             "next": "end", "error": "handoff"},
+            {"id": "handoff", "kind": "handoff", "next": "end"},
+            {"id": "end", "kind": "end"},
+        ]}
+        with db.transaction() as con:
+            version = con.execute("SELECT version_id FROM instances WHERE id=?", (instance_id,)).fetchone()[0]
+            con.execute("UPDATE versions SET graph=? WHERE id=?", (db.dump(graph_value), version))
+            con.execute("UPDATE instances SET node='approval',status='waiting_approval',prompted=1 WHERE id=?",
+                        (instance_id,))
+            con.execute("INSERT INTO mattermost_integrations(id,secret) VALUES(1,?)",
+                        (security.cipher().encrypt(b"https://chat.example.com/hooks/private").decode(),))
+            scenarios.advance(con, instance_id, {"text":
+                "нет, зачем убрали фон, я хочу чтобы фон был но сделать его более приятным."})
+            state = con.execute("SELECT status,fields FROM instances WHERE id=?", (instance_id,)).fetchone()
+            self.assertEqual(state["status"], "waiting_integration")
+            self.assertEqual(json.loads(state["fields"])["approval_outcome"], "Покупатель отказался от макета")
+            self.assertEqual(con.execute("SELECT COUNT(*) FROM jobs WHERE kind='mattermost_send'").fetchone()[0], 1)
+        delivered = []
+        with patch("app.worker.mattermost.send", side_effect=lambda _record, message: delivered.append(message)):
+            self.assertTrue(worker.tick())
+        self.assertEqual(delivered, ["Нужны правки в заказе ORDER"])
 
     def test_approval_draft_needs_no_manual_phrases(self):
         value = {"nodes": [{"id": "approval", "kind": "approval", "accept": "ДА", "reject": "НЕТ", "hours": 6}]}
@@ -4345,6 +4413,46 @@ class FolioIntegrationsTest(unittest.TestCase):
         self.assertEqual(edited[0][2], [{"id": 11}])
         self.assertEqual(edited[0][3:], ("approved",))
 
+    def test_image_model_settings_are_admin_only_and_snapshot_per_job(self):
+        path = "/settings/image-worker/models"
+        chosen = {"csrf": "csrf", "portrait_background": "flux-3-image",
+                  "collage": "gemini-nano-banana-2.1", "template_art": "seedream-5-0-pro"}
+        self.assertEqual(self.client.post(path, headers=self.manager, data=chosen).status_code, 403)
+        self.assertEqual(self.client.post(path, headers=self.admin,
+            data={**chosen, "collage": "not-a-model"}).status_code, 422)
+        self.assertEqual(self.client.post(path, headers=self.admin, data=chosen,
+            follow_redirects=False).status_code, 303)
+        page = self.client.get("/settings/image-worker", headers=self.admin)
+        self.assertEqual(page.status_code, 200)
+        for model in chosen.values():
+            self.assertIn(model, page.text)
+        with self.image_worker_settings({
+            "FOLIO_IMAGE_WORKER_URL": "https://worker.example.com",
+            "FOLIO_IMAGE_WORKER_API_KEY": "MODEL_KEY",
+        }):
+            instance_id, item_id, chat_id, _ = self.setup_instance()
+            with db.transaction() as con:
+                mid = self.image(con, chat_id, item_id)
+                con.execute("UPDATE instances SET fields=? WHERE id=?",
+                            (db.dump({"photos": [mid]}), instance_id))
+                job_id = image_tasks.enqueue(con, item_id, mid, "Сохранить человека", 40, 60, "1")
+                self.assertEqual(con.execute("SELECT model FROM image_jobs WHERE id=?",
+                    (job_id,)).fetchone()[0], "flux-3-image")
+            self.assertEqual(self.client.post(path, headers=self.admin,
+                data={**chosen, "portrait_background": "hy-image-v3.5-preview"},
+                follow_redirects=False).status_code, 303)
+            with db.transaction() as con:
+                self.assertEqual(con.execute("SELECT model FROM image_jobs WHERE id=?",
+                    (job_id,)).fetchone()[0], "flux-3-image")
+            auth = {"Authorization": "Bearer MODEL_KEY"}
+            self.assertEqual(self.client.get("/image-worker/next", headers=auth).status_code, 409)
+            self.assertEqual(self.client.get("/image-worker/next", headers={**auth,
+                "X-Folio-Image-Models": "1", "X-Folio-Image-Provider": "nanobanana"}).status_code, 409)
+            pulled = self.client.get("/image-worker/next", headers={**auth,
+                "X-Folio-Image-Models": "1", "X-Folio-Image-Provider": "aitunnel"})
+            self.assertEqual(pulled.status_code, 200, pulled.text)
+            self.assertEqual(pulled.json()["model"], "flux-3-image")
+
     def test_image_job_worker_pulls_and_uploads_preview(self):
         instance_id, item_id, chat_id, _ = self.setup_instance()
         config = {
@@ -4368,7 +4476,7 @@ class FolioIntegrationsTest(unittest.TestCase):
                 self.assertEqual(job["item_id"], item_id)
             self.assertIn("ORDER", self.client.get("/image-jobs", headers=self.admin).text)
             self.assertEqual(self.client.get("/image-worker/next").status_code, 401)
-            auth = {"Authorization": "Bearer TEST_WORKER_KEY"}
+            auth = {"Authorization": "Bearer TEST_WORKER_KEY", "X-Folio-Image-Models": "1", "X-Folio-Image-Provider": "aitunnel"}
             response = self.client.get("/image-worker/next", headers=auth)
             self.assertEqual(response.status_code, 200, response.text)
             pulled = response.json()
@@ -4420,7 +4528,7 @@ class FolioIntegrationsTest(unittest.TestCase):
                             (db.dump({"photos": [mid], "background": "Синий"}), instance_id))
                 image_tasks.enqueue(con, item_id, mid, "Новый фон", 40, 60, "1",
                                     instance_id=instance_id, node_id="make")
-            auth = {"Authorization": "Bearer MOCKUP_KEY"}
+            auth = {"Authorization": "Bearer MOCKUP_KEY", "X-Folio-Image-Models": "1", "X-Folio-Image-Provider": "aitunnel"}
             pulled = self.client.get("/image-worker/next", headers=auth).json()
             preview = io.BytesIO()
             Image.new("RGB", (667, 1000), "blue").save(preview, format="JPEG")

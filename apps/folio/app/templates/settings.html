@@ -121,6 +121,15 @@
   <p class="field-help">Секретный ключ должен совпадать с <code>WORKER_API_KEY</code> на ПК. Folio не подключается к ПК; изменение IP при VPN не влияет на очередь.</p>
 </section>
 <section class="card card-body folio-stack folio-section">
+  <h2>Модель обработки изображений</h2>
+  <p class="field-help">Выберите модель для каждого типа заказа. Выбор сохраняется в новом задании и не меняет уже созданную очередь. Для работы требуется обновлённый FolioImageWorker с AI Tunnel.</p>
+  <form method="post" action="{{ prefix }}/settings/image-worker/models" class="folio-stack">{{ token() }}
+    <div class="form-grid form-grid-2">{% for product_type, label in types.items() %}<label class="field">{{ label }}<select class="select" name="{{ product_type }}" required>{% for model, description in image_models.items() %}<option value="{{ model }}" {{ 'selected' if selected_image_models.get(product_type) == model }}>{{ description }}</option>{% endfor %}</select></label>{% endfor %}</div>
+    <button class="button button-primary">Сохранить модели</button>
+  </form>
+  <p class="field-help">Русский промпт поддерживается. Для изменения фона укажите желаемое окружение, свет и цвет; одно слово «приятнее» оставляет модели слишком много свободы. Стоимость генерации зависит от модели и разрешения — проверьте тариф AI Tunnel перед запуском.</p>
+</section>
+<section class="card card-body folio-stack folio-section">
   <h2>Промпты для доработки макета</h2>
   <p class="field-help">Поставьте <code>{correction}</code> именно там, где должны быть пожелания менеджера к доработке. Например: «Измени последнее превью по инструкции: {correction}. Исходный фон: {background}». Исходником будет последнее готовое превью этого заказа. Если промпт для исходного типа пуст, используется единственный шаг создания макета из опубликованной версии сценария с пожеланиями в конце.</p>
   <form method="post" action="{{ prefix }}/settings/image-worker/rework-prompts" class="folio-stack">{{ token() }}

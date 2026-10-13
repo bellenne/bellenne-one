@@ -349,6 +349,7 @@ def inbox(
             [],
         )
         rework_jobs = []
+        rework_has_preview = False
         current_product_type = ""
         available_rework_prompts = {}
         if chat_id:
@@ -416,6 +417,10 @@ def inbox(
                 available_rework_prompts = scenarios.rework_prompts(
                     con, instance, current_product_type
                 )
+                rework_has_preview = bool(con.execute(
+                    "SELECT 1 FROM image_jobs WHERE item_id=? AND state='completed' "
+                    "AND preview_media_id IS NOT NULL LIMIT 1", (chat["active_item"],)
+                ).fetchone())
                 rework_jobs = con.execute(
                     "SELECT j.id,j.state,j.error,j.preview_media_id,j.delivery_error,j.created_at,"
                     "o.state AS delivery_state,o.error AS delivery_send_error "
@@ -443,6 +448,7 @@ def inbox(
             history=history,
             integration_failures=integration_failures,
             rework_jobs=rework_jobs,
+            rework_has_preview=rework_has_preview,
             rework_busy=any(job["state"] not in {"completed", "failed"} for job in rework_jobs),
             current_product_type=current_product_type,
             available_rework_prompts=available_rework_prompts,
@@ -550,8 +556,8 @@ async def chat_action(request: Request, chat_id: int, action: str):
                 "SELECT * FROM instances WHERE chat_id=? AND item_id=?",
                 (chat_id, item["id"]),
             ).fetchone()
-            if not instance or json.loads(instance["fields"]).get("approval_outcome") != "Покупатель отказался от макета":
-                raise scenarios.Invalid("Доработка доступна после отказа покупателя от макета")
+            if not instance:
+                raise scenarios.Invalid("Для доработки нужен сценарий этого заказа")
             product_type = required(form, "product_type")
             if product_type not in scenarios.TYPES:
                 raise scenarios.Invalid("Выберите тип заказа из списка")
@@ -591,7 +597,7 @@ async def chat_action(request: Request, chat_id: int, action: str):
                 image_tasks.enqueue(
                     con, item["id"], preview["preview_media_id"], prompt,
                     width, height, actor["id"], node_id=node_id,
-                    source_preview=True, chat_id=chat_id,
+                    source_preview=True, chat_id=chat_id, product_type=product_type,
                 )
             except image_tasks.ImageTaskError as exc:
                 raise scenarios.Invalid(image_tasks.ERROR_LABELS.get(
@@ -792,6 +798,9 @@ def settings_page(request: Request, section: str = "overview"):
             retailcrm_config=retailcrm_config,
             mattermost_config=mattermost_config,
             image_worker_config=image_worker_config,
+            image_models=image_tasks.IMAGE_MODELS,
+            selected_image_models={kind: (current_settings.get("image_models") or {}).get(kind)
+                                   or image_tasks.DEFAULT_IMAGE_MODELS[kind] for kind in scenarios.TYPES},
             saved_rework_prompts={kind: scenarios.rework_prompt_template(prompt)
                                   for kind, prompt in (current_settings.get("rework_prompts") or {}).items()},
             folio_public_base=os.environ.get("FOLIO_PUBLIC_BASE_URL", "").strip().rstrip("/"),
@@ -1006,6 +1015,22 @@ async def save_rework_prompts(request: Request):
         settings["rework_prompts"] = prompts
         con.execute("UPDATE settings SET value=? WHERE id=1", (db.dump(settings),))
         db.audit(con, actor["id"], "settings.rework_prompts_updated", "settings", 1)
+    return redirect("/settings/image-worker")
+
+
+@app.post("/settings/image-worker/models")
+async def save_image_models(request: Request):
+    form = await request.form()
+    security.csrf(request, form.get("csrf"))
+    with db.transaction() as con:
+        actor = security.user(request, con, admin=True)
+        selected = {kind: str(form.get(kind) or "") for kind in scenarios.TYPES}
+        if any(model not in image_tasks.IMAGE_MODELS for model in selected.values()):
+            raise scenarios.Invalid("Выберите поддерживаемую модель для каждого типа заказа")
+        settings = db.config(con)
+        settings["image_models"] = selected
+        con.execute("UPDATE settings SET value=? WHERE id=1", (db.dump(settings),))
+        db.audit(con, actor["id"], "settings.image_models_updated", "settings", 1)
     return redirect("/settings/image-worker")
 
 
@@ -1791,6 +1816,7 @@ def image_jobs_page(request: Request):
             worker_configured=image_tasks.configured(con),
             image_job_labels=image_tasks.STATE_LABELS,
             image_job_errors=image_tasks.ERROR_LABELS,
+            image_models=image_tasks.IMAGE_MODELS,
             image_jobs=con.execute(
                 "SELECT j.*,i.posting,i.name AS product_name,"
                 "COALESCE(j.chat_id,inst.chat_id) AS result_chat_id "
@@ -1856,9 +1882,13 @@ def image_worker_next(request: Request):
         try:
             image_tasks.authenticate_pull(con, request.headers.get("Authorization", ""))
             con.execute("UPDATE image_worker_integrations SET checked_at=?,error=NULL WHERE id=1", (db.now(),))
-            job = image_tasks.claim_next(con)
+            job = image_tasks.claim_next(
+                con, supports_models=request.headers.get("X-Folio-Image-Models") == "1",
+                provider=request.headers.get("X-Folio-Image-Provider", ""),
+            )
         except image_tasks.ImageTaskError as exc:
-            raise HTTPException(401 if exc.code == "image_worker_auth_failed" else 503, exc.code) from exc
+            status = 401 if exc.code == "image_worker_auth_failed" else 409 if exc.code == "image_worker_model_unsupported" else 503
+            raise HTTPException(status, exc.code) from exc
     return job if job else Response(status_code=204)
 
 
