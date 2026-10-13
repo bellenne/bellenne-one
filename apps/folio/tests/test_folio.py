@@ -1678,6 +1678,32 @@ class FolioTest(unittest.TestCase):
             worker.reconcile_outbox(con, chat, [raw], {"ozon-file-1": hashlib.sha256(original).hexdigest()})
             self.assertEqual(con.execute("SELECT state FROM outbox WHERE id=?", (outbox_id,)).fetchone()[0], "sent")
 
+    def test_confirmed_file_replaces_cached_ozon_moderation_placeholder(self):
+        _instance, item_id, chat_id, _ = self.setup_instance()
+        with db.transaction() as con:
+            mid = self.image(con, chat_id, item_id)
+            original = (db.DATA / "media" / mid).read_bytes()
+            placeholder = io.BytesIO()
+            Image.new("RGB", (640, 320), "gray").save(placeholder, "JPEG")
+            con.execute("DELETE FROM outbox WHERE chat_id=?", (chat_id,))
+            con.execute(
+                "INSERT INTO outbox(chat_id,actor,body,dedup,epoch,state,created_at,kind,media_id) "
+                "VALUES(?,'manager:1','Макет','placeholder-test',0,'unknown',?,'file',?)",
+                (chat_id, db.now(), mid))
+            chat = con.execute("SELECT * FROM chats WHERE id=?", (chat_id,)).fetchone()
+            raw = {"message_id": "moderated-file", "created_at": db.now(),
+                   "user": {"type": "seller"}, "data": ["![](https://api-seller.ozon.ru/v2/chat/file/1)"]}
+            worker.import_message(con, chat, raw, [placeholder.getvalue()])
+            stored = con.execute("SELECT id,media_ids FROM messages WHERE chat_id=? AND external_id=?",
+                                 (chat_id, "moderated-file")).fetchone()
+            self.assertNotEqual(json.loads(stored["media_ids"]), [mid])
+            worker.reconcile_outbox(con, chat, [raw], {"moderated-file": hashlib.sha256(original).hexdigest()})
+            worker.import_message(con, chat, raw)
+            self.assertEqual(json.loads(con.execute("SELECT media_ids FROM messages WHERE id=?",
+                             (stored["id"],)).fetchone()[0]), [mid])
+            self.assertEqual(con.execute("SELECT COUNT(*) FROM messages WHERE chat_id=? AND external_id=?",
+                             (chat_id, "moderated-file")).fetchone()[0], 1)
+
     def test_reconciled_manager_mockup_recovers_bot_before_approval_prompt(self):
         instance_id, item_id, chat_id, _ = self.setup_instance()
         graph_value = {"nodes": [
@@ -4237,11 +4263,47 @@ class FolioIntegrationsTest(unittest.TestCase):
             self.assertTrue(worker.tick())
         self.assertEqual(delivered, ["Нужны правки в заказе ORDER"])
 
+    def test_compound_approval_v2_requires_entire_reply_to_be_affirmative(self):
+        node = {"dictionary_version": 2}
+        for text in ("да согласовано", "Да, согласовано!", "Согласовано",
+                     "Да! Всё устраивает, можно печатать. Спасибо!",
+                     "Подтверждаю макет, спасибо"):
+            with self.subTest(text=text):
+                self.assertEqual(scenarios.approval_decision(node, text), "accept")
+        for text in ("Да, но переделайте фон", "Да, не согласовано", "да нет",
+                     "согласовано если исправите фон", "спасибо", "", "???",
+                     "Наверное да", "Нет, всё устраивает"):
+            with self.subTest(text=text):
+                self.assertIsNone(scenarios.approval_decision(node, text))
+        self.assertIsNone(scenarios.approval_decision({"dictionary_version": 1}, "да согласовано"))
+        self.assertIsNone(scenarios.approval_decision({"accept": "да"}, "да согласовано"))
+
+    def test_compound_approval_v2_advances_to_configured_branch(self):
+        instance_id, _item_id, _chat_id, _ = self.setup_instance()
+        graph_value = {"nodes": [
+            {"id": "approval", "kind": "approval", "dictionary_version": 2,
+             "text": "Согласны?", "hours": 6, "next": "accepted",
+             "otherwise": "rejected", "timeout": "rejected", "error": "rejected"},
+            {"id": "accepted", "kind": "send", "text": "Принято", "next": "end"},
+            {"id": "rejected", "kind": "handoff", "next": "end"},
+            {"id": "end", "kind": "end"},
+        ]}
+        with db.transaction() as con:
+            version = con.execute("SELECT version_id FROM instances WHERE id=?", (instance_id,)).fetchone()[0]
+            con.execute("UPDATE versions SET graph=? WHERE id=?", (db.dump(graph_value), version))
+            con.execute("UPDATE instances SET node='approval',status='waiting_approval',prompted=1 WHERE id=?",
+                        (instance_id,))
+            scenarios.advance(con, instance_id, {"text": "да согласовано"})
+            state = con.execute("SELECT node,fields FROM instances WHERE id=?", (instance_id,)).fetchone()
+            self.assertEqual(json.loads(state["fields"])["approval_outcome"], "Макет подтверждён покупателем")
+            self.assertNotEqual(state["node"], "rejected")
+            self.assertEqual(con.execute("SELECT COUNT(*) FROM outbox WHERE body='Принято'").fetchone()[0], 1)
+
     def test_approval_draft_needs_no_manual_phrases(self):
         value = {"nodes": [{"id": "approval", "kind": "approval", "accept": "ДА", "reject": "НЕТ", "hours": 6}]}
         self.assertTrue(scenarios.normalize(value, "portrait_background"))
         node = value["nodes"][0]
-        self.assertEqual(node["dictionary_version"], 1)
+        self.assertEqual(node["dictionary_version"], 2)
         self.assertNotIn("accept", node)
         self.assertNotIn("reject", node)
         self.assertNotIn("use_dictionary", node)
@@ -4452,6 +4514,35 @@ class FolioIntegrationsTest(unittest.TestCase):
                 "X-Folio-Image-Models": "1", "X-Folio-Image-Provider": "aitunnel"})
             self.assertEqual(pulled.status_code, 200, pulled.text)
             self.assertEqual(pulled.json()["model"], "flux-3-image")
+
+    def test_uncertain_image_generation_stays_paused_and_is_not_reissued(self):
+        instance_id, item_id, chat_id, _ = self.setup_instance()
+        with self.image_worker_settings({
+            "FOLIO_IMAGE_WORKER_URL": "https://worker.example.com",
+            "FOLIO_IMAGE_WORKER_API_KEY": "UNKNOWN_KEY",
+        }):
+            with db.transaction() as con:
+                mid = self.image(con, chat_id, item_id)
+                con.execute("UPDATE instances SET status='waiting_integration',fields=? WHERE id=?",
+                            (db.dump({"photos": [mid]}), instance_id))
+                image_tasks.enqueue(con, item_id, mid, "Новый фон", 40, 60, "1",
+                                    instance_id=instance_id, node_id="make")
+            auth = {"Authorization": "Bearer UNKNOWN_KEY", "X-Folio-Image-Models": "1",
+                    "X-Folio-Image-Provider": "aitunnel"}
+            pulled = self.client.get("/image-worker/next", headers=auth)
+            self.assertEqual(pulled.status_code, 200, pulled.text)
+            job = pulled.json()
+            reported = self.client.post(f"/image-worker/jobs/{job['id']}", headers=auth,
+                data={"worker_id": job["worker_id"], "status": "unknown",
+                      "error": "AI Tunnel вернул HTTP 502; результат генерации неизвестен"})
+            self.assertEqual(reported.status_code, 200, reported.text)
+            with db.transaction() as con:
+                state = con.execute("SELECT state,error FROM image_jobs WHERE id=?", (job["id"],)).fetchone()
+                self.assertEqual(state["state"], "unknown")
+                self.assertIn("HTTP 502", state["error"])
+                self.assertEqual(con.execute("SELECT status FROM instances WHERE id=?",
+                    (instance_id,)).fetchone()[0], "waiting_integration")
+            self.assertEqual(self.client.get("/image-worker/next", headers=auth).status_code, 204)
 
     def test_image_job_worker_pulls_and_uploads_preview(self):
         instance_id, item_id, chat_id, _ = self.setup_instance()

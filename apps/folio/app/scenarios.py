@@ -109,6 +109,15 @@ APPROVAL_LEGACY = {
     },
 }
 
+# New drafts opt into the extended dictionary; published v1 graphs stay stable.
+APPROVAL_DICTIONARIES[2] = {
+    "accept": APPROVAL_DICTIONARIES[1]["accept"] | {
+        "согласовано", "согласован", "все согласовано", "макет согласовываю",
+    },
+    "reject": set(APPROVAL_DICTIONARIES[1]["reject"]),
+}
+APPROVAL_DICTIONARY_VERSION = 2
+
 
 def approval_phrase(value):
     """Only exact normalized phrases; mixed/qualified replies need a manager."""
@@ -147,6 +156,22 @@ def approval_decision(node, text):
         )):
             return None
         return "reject"
+    if node.get("dictionary_version") == 2:
+        # Consume the WHOLE reply as affirmative phrases, not just a leading
+        # "yes". Unknown words, qualifications and mixed yes/no stay ambiguous.
+        words = phrase.split()
+        accepted = approval_variants(node, "accept")
+        max_phrase_words = max(len(value.split()) for value in accepted)
+        reachable = {0}
+        for start in range(len(words)):
+            if start not in reachable:
+                continue
+            for end in range(start + 1, min(len(words), start + max_phrase_words) + 1):
+                fragment = " ".join(words[start:end])
+                if fragment in accepted or (start > 0 and fragment == "спасибо"):
+                    reachable.add(end)
+        if words and len(words) in reachable:
+            return "accept"
     return None
 
 
@@ -233,8 +258,8 @@ def normalize(graph, product_type):
     nodes = graph.get("nodes", []) if isinstance(graph, dict) else []
     for node in nodes:
         if node.get("kind") == "approval":
-            if node.get("dictionary_version") != 1:
-                node["dictionary_version"] = 1
+            if node.get("dictionary_version") != APPROVAL_DICTIONARY_VERSION:
+                node["dictionary_version"] = APPROVAL_DICTIONARY_VERSION
                 changed = True
             for old_setting in ("use_dictionary", "accept", "reject"):
                 if old_setting in node:

@@ -357,6 +357,11 @@ def import_message(con, chat, raw, assets=None, attachment_error=False, *, route
         )
     _link_chat_context(con, chat, order_number, context_sku)
     chat = con.execute("SELECT * FROM chats WHERE id=?", (chat["id"],)).fetchone()
+    sent_file = con.execute(
+        "SELECT o.media_id FROM outbox o JOIN media m ON m.id=o.media_id AND m.chat_id=o.chat_id "
+        "WHERE o.chat_id=? AND o.external_id=? AND o.kind='file' AND o.state='sent'",
+        (chat["id"], external_id),
+    ).fetchone() if actor == "seller" else None
     existing = con.execute(
         "SELECT id FROM messages WHERE chat_id=? AND external_id=?",
         (chat["id"], external_id),
@@ -374,6 +379,11 @@ def import_message(con, chat, raw, assets=None, attachment_error=False, *, route
                 existing["id"],
             ),
         )
+        if sent_file:
+            # Ozon can initially return a moderation placeholder at the same
+            # message ID. Once delivery is confirmed, display our sent original.
+            con.execute("UPDATE messages SET media_ids=? WHERE id=?",
+                        (db.dump([sent_file["media_id"]]), existing["id"]))
         db.audit(
             con,
             "system",
@@ -385,8 +395,8 @@ def import_message(con, chat, raw, assets=None, attachment_error=False, *, route
         return
     # Do not store external media URLs in text history or event bodies.
     body, _ = _message_contents(raw)
-    mids = []
-    for content in assets or []:
+    mids = [sent_file["media_id"]] if sent_file else []
+    for content in ([] if sent_file else assets or []):
         mids.append(
             media.store(con, content, db.config(con), chat["id"], chat["active_item"])
         )

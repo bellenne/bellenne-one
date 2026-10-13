@@ -38,7 +38,7 @@ DEFAULT_IMAGE_MODELS = {
 }
 STATE_LABELS = {
     "pending": "В очереди", "submitting": "Передаётся воркеру",
-    "unknown": "Результат передачи не подтверждён", "queued": "Принято воркером",
+    "unknown": "Результат задания не подтверждён", "queued": "Принято воркером",
     "generating": "Генерация", "waiting_topaz": "Ожидание Topaz",
     "composing": "Подготовка печатного файла", "webhook_pending": "Ожидание уведомления",
     "completed": "Готово", "failed": "Ошибка",
@@ -234,7 +234,7 @@ def _validate_job(payload, worker_id: str):
     if not isinstance(payload, dict) or payload.get("id") != worker_id:
         raise ImageTaskError("image_worker_response_invalid", unknown=True)
     state = payload.get("status")
-    if state not in PROGRESS | TERMINAL:
+    if state not in PROGRESS | TERMINAL | {"unknown"}:
         raise ImageTaskError("image_worker_response_invalid", unknown=True)
     if state == "completed" and not (isinstance(payload.get("print_file"), str) and payload["print_file"].strip()):
         raise ImageTaskError("image_worker_response_invalid", unknown=True)
@@ -375,7 +375,7 @@ def poll_one(*, client=None) -> bool:
 
 
 def apply_result(worker_id: str, payload: dict, state: str) -> bool:
-    if state not in PROGRESS | TERMINAL:
+    if state not in PROGRESS | TERMINAL | {"unknown"}:
         raise ImageTaskError("image_worker_response_invalid")
     if state == "completed" and not (isinstance(payload.get("print_file"), str) and payload["print_file"].strip()):
         raise ImageTaskError("image_worker_response_invalid")
@@ -385,7 +385,7 @@ def apply_result(worker_id: str, payload: dict, state: str) -> bool:
             return False
         if row["state"] in TERMINAL:
             return True
-        error = str(payload.get("error") or "")[:500] if state == "failed" else None
+        error = str(payload.get("error") or "")[:500] if state in {"failed", "unknown"} else None
         print_file = str(payload.get("print_file") or "")[:1000] if state == "completed" else None
         con.execute(
             "UPDATE image_jobs SET state=?,error=?,print_file=?,updated_at=?,next_poll_at=? WHERE id=?",
@@ -394,6 +394,8 @@ def apply_result(worker_id: str, payload: dict, state: str) -> bool:
         if state in TERMINAL:
             db.audit(con, "system", f"image_job.{state}", "image_job", row["id"])
             _resume_scenario(con, row)
+        elif state == "unknown":
+            db.audit(con, "system", "image_job.outcome_unknown", "image_job", row["id"])
     return True
 
 
@@ -440,13 +442,13 @@ def claim_next(con, *, supports_models: bool = False, provider: str = "") -> dic
     """Return the same claimed job until its terminal result is acknowledged."""
     row = con.execute(
         "SELECT j.*,i.external_status FROM image_jobs j JOIN items i ON i.id=j.item_id "
-        "WHERE j.pull_claimed=1 AND j.state NOT IN ('completed','failed') ORDER BY j.id LIMIT 1"
+        "WHERE j.pull_claimed=1 AND j.state NOT IN ('completed','failed','unknown') ORDER BY j.id LIMIT 1"
     ).fetchone()
     if not row:
         row = con.execute(
             "SELECT j.*,i.external_status FROM image_jobs j JOIN items i ON i.id=j.item_id "
             "WHERE j.pull_claimed=0 AND j.worker_id IS NOT NULL "
-            "AND j.state NOT IN ('completed','failed') ORDER BY j.id LIMIT 1"
+            "AND j.state NOT IN ('completed','failed','unknown') ORDER BY j.id LIMIT 1"
         ).fetchone()
     if not row:
         row = con.execute(
@@ -488,7 +490,7 @@ def receive_update(con, job_id: int, worker_id: str, state: str,
             raise ImageTaskError("image_worker_result_conflict")
         return
     ranks = {"queued": 0, "generating": 1, "waiting_topaz": 2, "composing": 3,
-             "completed": 4, "failed": 4}
+             "completed": 4, "failed": 4, "unknown": 4}
     if state not in ranks:
         raise ImageTaskError("image_worker_response_invalid")
     if ranks[state] < ranks.get(row["state"], 0):
@@ -511,7 +513,7 @@ def receive_update(con, job_id: int, worker_id: str, state: str,
         except scenarios.Invalid as exc:
             raise ImageTaskError("image_worker_preview_invalid") from exc
     con.execute("UPDATE image_jobs SET state=?,error=?,print_file=?,preview_media_id=COALESCE(?,preview_media_id),updated_at=? WHERE id=?",
-                (state, error[:500] if state == "failed" else None,
+                (state, error[:500] if state in {"failed", "unknown"} else None,
                  print_file if state == "completed" else None, preview_media_id, db.now(), job_id))
     if (state == "completed" and row["instance_id"] is None
             and str(row["node_id"] or "").startswith("rework:")):
@@ -519,6 +521,8 @@ def receive_update(con, job_id: int, worker_id: str, state: str,
     if state in TERMINAL:
         db.audit(con, "system", f"image_job.{state}", "image_job", job_id, row["result_chat_id"])
         _resume_scenario(con, row)
+    elif state == "unknown":
+        db.audit(con, "system", "image_job.outcome_unknown", "image_job", job_id, row["result_chat_id"])
 
 
 def _queue_rework_result(con, job, preview_media_id):
