@@ -182,6 +182,7 @@ def initialize():
                            "chat_id": "INTEGER REFERENCES chats(id)",
                            "delivery_error": "TEXT",
                            "model": "TEXT NOT NULL DEFAULT 'hy-image-v3.5-preview'",
+                           "prompt_mode": "TEXT NOT NULL DEFAULT 'direct'",
                            "media_ids": "TEXT NOT NULL DEFAULT '[]'",
                            "preview_media_id": "TEXT REFERENCES media(id)",
                            "pull_claimed": "INTEGER NOT NULL DEFAULT 0"},

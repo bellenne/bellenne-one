@@ -799,6 +799,7 @@ def settings_page(request: Request, section: str = "overview"):
             mattermost_config=mattermost_config,
             image_worker_config=image_worker_config,
             image_models=image_tasks.IMAGE_MODELS,
+            image_prompt_mode=current_settings.get("image_prompt_mode", "direct"),
             selected_image_models={kind: (current_settings.get("image_models") or {}).get(kind)
                                    or image_tasks.DEFAULT_IMAGE_MODELS[kind] for kind in scenarios.TYPES},
             saved_rework_prompts={kind: scenarios.rework_prompt_template(prompt)
@@ -1031,6 +1032,22 @@ async def save_image_models(request: Request):
         settings["image_models"] = selected
         con.execute("UPDATE settings SET value=? WHERE id=1", (db.dump(settings),))
         db.audit(con, actor["id"], "settings.image_models_updated", "settings", 1)
+    return redirect("/settings/image-worker")
+
+
+@app.post("/settings/image-worker/prompt-mode")
+async def save_image_prompt_mode(request: Request):
+    form = await request.form()
+    security.csrf(request, form.get("csrf"))
+    with db.transaction() as con:
+        actor = security.user(request, con, admin=True)
+        mode = str(form.get("prompt_mode") or "")
+        if mode not in {"direct", "vision"}:
+            raise scenarios.Invalid("Выберите способ подготовки промпта")
+        settings = db.config(con)
+        settings["image_prompt_mode"] = mode
+        con.execute("UPDATE settings SET value=? WHERE id=1", (db.dump(settings),))
+        db.audit(con, actor["id"], "settings.image_prompt_mode_updated", "settings", 1)
     return redirect("/settings/image-worker")
 
 
@@ -1885,6 +1902,7 @@ def image_worker_next(request: Request):
             job = image_tasks.claim_next(
                 con, supports_models=request.headers.get("X-Folio-Image-Models") == "1",
                 provider=request.headers.get("X-Folio-Image-Provider", ""),
+                supports_planner=request.headers.get("X-Folio-Prompt-Planner") == "1",
             )
         except image_tasks.ImageTaskError as exc:
             status = 401 if exc.code == "image_worker_auth_failed" else 409 if exc.code == "image_worker_model_unsupported" else 503

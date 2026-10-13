@@ -53,7 +53,7 @@ ERROR_LABELS = {
     "image_worker_photo_ambiguous": "В брифе несколько фотографий. Выбор исходника требует ручной проверки.",
     "image_worker_order_cancelled": "Заказ отменён до передачи задания воркеру.",
     "image_worker_model_invalid": "Модель изображений не поддерживается. Выберите другую модель в настройках Folio.",
-    "image_worker_model_unsupported": "Обновите FolioImageWorker: текущая версия не принимает выбранную модель.",
+    "image_worker_model_unsupported": "Обновите FolioImageWorker и используйте pull-подключение: текущий воркер не поддерживает выбранную модель или подготовку промпта через LLM.",
 }
 
 
@@ -208,12 +208,16 @@ def enqueue(con, item_id: int, media_id: str | list[str], prompt: str,
             raise ImageTaskError("image_worker_media_missing")
     stamp = db.now()
     model = model_for_item(con, item_id, product_type)
+    prompt_mode = db.config(con).get("image_prompt_mode", "direct")
+    if prompt_mode not in {"direct", "vision"}:
+        raise ImageTaskError("image_worker_prompt_invalid")
     task_id = con.execute(
         "INSERT INTO image_jobs(item_id,media_id,media_ids,input_token,prompt,model,width_cm,height_cm,created_at,updated_at,instance_id,node_id,chat_id) "
         "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (item_id, media_ids[0], json.dumps(media_ids), secrets.token_urlsafe(32), prompt.strip(), model, width_cm, height_cm,
          stamp, stamp, instance_id, node_id, chat_id),
     ).lastrowid
+    con.execute("UPDATE image_jobs SET prompt_mode=? WHERE id=?", (prompt_mode, task_id))
     db.audit(con, actor, "image_job.queued", "image_job", task_id)
     return task_id
 
@@ -284,6 +288,8 @@ def submit_one(*, client=None) -> bool:
     state, error, worker_id, payload = "unknown", "image_worker_submission_unknown", None, None
     try:
         _, _, _, callback = configuration()
+        if row["prompt_mode"] != "direct":
+            raise ImageTaskError("image_worker_model_unsupported")
         media_ids = json.loads(row["media_ids"]) or [row["media_id"]]
         # Media files have opaque IDs; take the verified MIME from the database.
         with db.transaction() as con:
@@ -438,7 +444,7 @@ def authenticate_pull(con, authorization: str) -> None:
         raise ImageTaskError("image_worker_auth_failed")
 
 
-def claim_next(con, *, supports_models: bool = False, provider: str = "") -> dict | None:
+def claim_next(con, *, supports_models: bool = False, provider: str = "", supports_planner: bool = False) -> dict | None:
     """Return the same claimed job until its terminal result is acknowledged."""
     row = con.execute(
         "SELECT j.*,i.external_status FROM image_jobs j JOIN items i ON i.id=j.item_id "
@@ -461,6 +467,8 @@ def claim_next(con, *, supports_models: bool = False, provider: str = "") -> dic
         con.execute("UPDATE image_jobs SET state='failed',error=?,updated_at=? WHERE id=?",
                     ("image_worker_order_cancelled", db.now(), row["id"]))
         return None
+    if row["prompt_mode"] == "vision" and (not supports_planner or provider not in {"aitunnel", "mock"}):
+        raise ImageTaskError("image_worker_model_unsupported")
     if row["model"] != LEGACY_IMAGE_MODEL and (not supports_models or provider not in {"aitunnel", "mock"}):
         raise ImageTaskError("image_worker_model_unsupported")
     public_base = os.environ.get("FOLIO_PUBLIC_BASE_URL", "").rstrip("/")
@@ -472,7 +480,7 @@ def claim_next(con, *, supports_models: bool = False, provider: str = "") -> dic
                     ("queued" if row["state"] == "pending" else row["state"], worker_id, db.now(), row["id"]))
     media_ids = json.loads(row["media_ids"]) or [row["media_id"]]
     prefix = os.environ.get("MODULE_PREFIX", "/folio").rstrip("/")
-    return {"id": row["id"], "worker_id": worker_id, "prompt": row["prompt"], "model": row["model"],
+    return {"id": row["id"], "worker_id": worker_id, "prompt": row["prompt"], "model": row["model"], "prompt_mode": row["prompt_mode"],
             "width_cm": row["width_cm"], "height_cm": row["height_cm"],
             "image_urls": [f"{public_base}{prefix}/image-worker/input/{quote(row['input_token'], safe='')}/{index}"
                            for index in range(len(media_ids))]}

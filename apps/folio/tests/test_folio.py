@@ -4476,6 +4476,13 @@ class FolioIntegrationsTest(unittest.TestCase):
         self.assertEqual(edited[0][3:], ("approved",))
 
     def test_image_model_settings_are_admin_only_and_snapshot_per_job(self):
+        mode_path = "/settings/image-worker/prompt-mode"
+        mode_data = {"csrf": "csrf", "prompt_mode": "vision"}
+        self.assertEqual(self.client.post(mode_path, headers=self.manager, data=mode_data).status_code, 403)
+        self.assertEqual(self.client.post(mode_path, headers=self.admin,
+            data={**mode_data, "prompt_mode": "invalid"}).status_code, 422)
+        self.assertEqual(self.client.post(mode_path, headers=self.admin, data=mode_data,
+            follow_redirects=False).status_code, 303)
         path = "/settings/image-worker/models"
         chosen = {"csrf": "csrf", "portrait_background": "seedream-5-0-lite",
                   "collage": "seedream-5-0-flash", "template_art": "seedream-4.5"}
@@ -4509,13 +4516,18 @@ class FolioIntegrationsTest(unittest.TestCase):
                 self.assertEqual(con.execute("SELECT model FROM image_jobs WHERE id=?",
                     (job_id,)).fetchone()[0], "seedream-5-0-lite")
             auth = {"Authorization": "Bearer MODEL_KEY"}
+            self.assertEqual(self.client.post(mode_path, headers=self.admin,
+                data={**mode_data, "prompt_mode": "direct"}, follow_redirects=False).status_code, 303)
             self.assertEqual(self.client.get("/image-worker/next", headers=auth).status_code, 409)
             self.assertEqual(self.client.get("/image-worker/next", headers={**auth,
                 "X-Folio-Image-Models": "1", "X-Folio-Image-Provider": "nanobanana"}).status_code, 409)
+            self.assertEqual(self.client.get("/image-worker/next", headers={**auth,
+                "X-Folio-Image-Models": "1", "X-Folio-Image-Provider": "aitunnel"}).status_code, 409)
             pulled = self.client.get("/image-worker/next", headers={**auth,
-                "X-Folio-Image-Models": "1", "X-Folio-Image-Provider": "aitunnel"})
+                "X-Folio-Image-Models": "1", "X-Folio-Image-Provider": "aitunnel", "X-Folio-Prompt-Planner": "1"})
             self.assertEqual(pulled.status_code, 200, pulled.text)
             self.assertEqual(pulled.json()["model"], "seedream-5-0-lite")
+            self.assertEqual(pulled.json()["prompt_mode"], "vision")
 
     def test_uncertain_image_generation_stays_paused_and_is_not_reissued(self):
         instance_id, item_id, chat_id, _ = self.setup_instance()

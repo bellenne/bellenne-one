@@ -130,6 +130,14 @@
   <p class="field-help">Доступны бюджетные модели с редактированием по фото и несколькими исходниками. Цены — ориентиры публичного каталога AI Tunnel на 13.10.2026, не гарантия списания; фактическая стоимость записывается воркером. Дорогие Flux 3, Nano Banana 2.1 и Seedream Pro исключены из нового выбора. После обновления выберите и сохраните модели заново, если ранее использовалась дорогая модель. Уже созданные задания не меняются. Русский промпт поддерживается; правило для общих пожеланий к фону задаётся в самом промпте.</p>
 </section>
 <section class="card card-body folio-stack folio-section">
+  <h2>Подготовка промпта</h2>
+  <form method="post" action="{{ prefix }}/settings/image-worker/prompt-mode" class="folio-stack">{{ token() }}
+    <label class="field">Способ подготовки<select class="select" name="prompt_mode"><option value="vision" {{ 'selected' if image_prompt_mode == 'vision' }}>Фото и пожелания → LLM → генератор</option><option value="direct" {{ 'selected' if image_prompt_mode == 'direct' }}>Напрямую в генератор</option></select></label>
+    <p class="field-help">Gemini 2.5 Flash Lite анализирует фото и инструкцию сценария. Сохранение позы, ракурса и согласование света закрепляются в итоговом промпте. Дополнительная стоимость зависит от объёма фото и текста; в тесте — 0,06 ₽. Нужен обновлённый воркер. Режим фиксируется в новом задании; существующие задания не меняются. При ошибке LLM генерация не запускается.</p>
+    <button class="button button-primary">Сохранить способ подготовки</button>
+  </form>
+</section>
+<section class="card card-body folio-stack folio-section">
   <h2>Промпты для доработки макета</h2>
   <p class="field-help">Поставьте <code>{correction}</code> именно там, где должны быть пожелания менеджера к доработке. Например: «Измени последнее превью по инструкции: {correction}. Исходный фон: {background}». Исходником будет последнее готовое превью этого заказа. Если промпт для исходного типа пуст, используется единственный шаг создания макета из опубликованной версии сценария с пожеланиями в конце.</p>
   <form method="post" action="{{ prefix }}/settings/image-worker/rework-prompts" class="folio-stack">{{ token() }}
