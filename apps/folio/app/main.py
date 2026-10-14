@@ -449,6 +449,7 @@ def inbox(
             integration_failures=integration_failures,
             rework_jobs=rework_jobs,
             rework_has_preview=rework_has_preview,
+            rework_sources=image_tasks.rework_sources(con, chat_id, chat["active_item"]) if chat else [],
             rework_busy=any(job["state"] not in {"completed", "failed"} for job in rework_jobs),
             current_product_type=current_product_type,
             available_rework_prompts=available_rework_prompts,
@@ -582,22 +583,30 @@ async def chat_action(request: Request, chat_id: int, action: str):
                 "AND state NOT IN ('completed','failed')", (item["id"],),
             ).fetchone():
                 raise scenarios.Invalid("Предыдущая доработка ещё выполняется")
-            preview = con.execute(
-                "SELECT preview_media_id FROM image_jobs WHERE item_id=? AND state='completed' "
-                "AND preview_media_id IS NOT NULL ORDER BY id DESC LIMIT 1", (item["id"],),
-            ).fetchone()
-            if not preview:
-                raise scenarios.Invalid("Для доработки нужен готовый макет этого заказа")
+            sources = image_tasks.rework_sources(con, chat_id, item["id"])
+            allowed = {source["id"] for source in sources}
+            selected = str(form.get("source_media_id") or "")
+            if not selected:
+                # Older open forms retain the historical latest-preview default.
+                selected = next((source["id"] for source in sources if source["is_preview"]), "")
+            reference = str(form.get("background_media_id") or "")
+            if selected not in allowed or (reference and (reference not in allowed or reference == selected)):
+                raise scenarios.Invalid("Выберите исходник и, при необходимости, другой образец фона из вложений этого заказа")
             fields = json.loads(instance["fields"])
             try:
                 prompt = scenarios.image_prompt(
                     {"prompt": template}, item, fields, correction=correction
                 )
+                if reference:
+                    prompt += ("\nПервое изображение — основной исходник с человеком. Второе — только образец "
+                               "выбранного клиентом фона/оформления. Используй его окружение и стиль, "
+                               "не переноси с него людей, лица, надписи и водяные знаки. "
+                               "Сохрани человека, позу и пропорции первого изображения.")
                 width, height = image_tasks.dimensions_from_article(item["offer_id"])
                 image_tasks.enqueue(
-                    con, item["id"], preview["preview_media_id"], prompt,
+                    con, item["id"], [selected, reference] if reference else selected, prompt,
                     width, height, actor["id"], node_id=node_id,
-                    source_preview=True, chat_id=chat_id, product_type=product_type,
+                    manager_selected=True, chat_id=chat_id, product_type=product_type,
                 )
             except image_tasks.ImageTaskError as exc:
                 raise scenarios.Invalid(image_tasks.ERROR_LABELS.get(

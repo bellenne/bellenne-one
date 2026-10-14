@@ -176,11 +176,35 @@ def model_for_item(con, item_id: int, product_type: str | None = None) -> str:
     return model
 
 
+def rework_sources(con, chat_id, item_id):
+    """Only private images owned by this order/chat; never global media IDs."""
+    rows = con.execute(
+        "SELECT m.id,m.created_at,MAX(j.id) AS job_id FROM media m "
+        "LEFT JOIN image_jobs j ON j.preview_media_id=m.id AND j.item_id=m.item_id AND j.state='completed' "
+        "WHERE m.chat_id=? AND m.item_id=? AND m.mime IN ('image/png','image/jpeg','image/webp') "
+        "GROUP BY m.id ORDER BY job_id DESC,m.created_at DESC,m.id", (chat_id, item_id)
+    ).fetchall()
+    result = []
+    for row in rows:
+        if not (db.DATA / "media" / row["id"]).is_file():
+            continue
+        buyer = con.execute(
+            "SELECT 1 FROM messages m,json_each(m.media_ids) a "
+            "WHERE m.chat_id=? AND m.actor='buyer' AND a.value=?", (chat_id, row["id"])
+        ).fetchone()
+        label = f"Макет №{row['job_id']}" if row["job_id"] else "Фото покупателя" if buyer else "Вложение менеджера / образец"
+        if not row["job_id"]:
+            label += f" №{len(result) + 1}"
+        result.append({"id": row["id"], "is_preview": bool(row["job_id"]),
+                       "label": label, "created_at": row["created_at"]})
+    return result
+
+
 def enqueue(con, item_id: int, media_id: str | list[str], prompt: str,
             width_cm: float, height_cm: float, actor: str,
             *, instance_id: int | None = None, node_id: str | None = None,
             source_preview: bool = False, chat_id: int | None = None,
-            product_type: str | None = None) -> int:
+            product_type: str | None = None, manager_selected: bool = False) -> int:
     if not configured(con):
         raise ImageTaskError("image_worker_not_configured")
     if not 1 <= len(prompt.strip()) <= 4000:
@@ -204,7 +228,8 @@ def enqueue(con, item_id: int, media_id: str | list[str], prompt: str,
         if (not media or media["mime"] not in {"image/png", "image/jpeg", "image/webp"}
                 or (source_preview and (chat_id is None or media["chat_id"] != chat_id))
                 or not (db.DATA / "media" / selected_id).is_file()
-                or (selected_id not in collected and not approved_preview)):
+                or (manager_selected and (chat_id is None or media["chat_id"] != chat_id))
+                or (selected_id not in collected and not approved_preview and not manager_selected)):
             raise ImageTaskError("image_worker_media_missing")
     stamp = db.now()
     model = model_for_item(con, item_id, product_type)

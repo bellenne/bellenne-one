@@ -110,7 +110,7 @@ function initializeBuilder(root) {
   function renderEdges() {
     edgeLayer.replaceChildren();
     graph.nodes.forEach((source) => {
-      [["next", source.kind === "approval" ? "Согласовано" : source.kind === "ask_input" ? "Текст" : "Далее"], ["otherwise", source.kind === "approval" ? "Не согласовано" : source.kind === "ask_input" ? "Фото" : "Иначе"], ["timeout", "Нет ответа"], ["error", "Ошибка"]].forEach(([field, label]) => {
+      [["options", "Запрос вариантов"], ["next", source.kind === "approval" ? "Согласовано" : source.kind === "ask_input" ? "Текст" : "Далее"], ["otherwise", source.kind === "approval" ? "Не согласовано" : source.kind === "ask_input" ? "Фото" : "Иначе"], ["timeout", "Нет ответа"], ["error", "Ошибка"]].forEach(([field, label]) => {
         const target = nodeById(source[field]);
         if (!target) return;
         const group = svgElement("g", { class: `folio-edge folio-edge-${field}` });
@@ -206,8 +206,8 @@ function initializeBuilder(root) {
     }
     inspector.querySelectorAll("[data-field]").forEach((control) => {
       const key = control.dataset.field;
-      if (["next", "otherwise", "timeout", "error"].includes(key)) targetOptions(control, node[key]);
-      else if (key === "required") control.checked = Boolean(node[key]);
+      if (["next", "otherwise", "timeout", "error", "options"].includes(key)) targetOptions(control, node[key]);
+      else if (["required", "wish_guard"].includes(key)) control.checked = Boolean(node[key]);
       else if (key === "choices") control.value = (node[key] || []).join("\n");
       else if (key === "status") {
         const value = node[key] || "";
@@ -230,6 +230,7 @@ function initializeBuilder(root) {
         (rule === "required" && ["ask_text", "ask_input"].includes(kind)) ||
         (rule === "photo" && ["ask_photo", "ask_input"].includes(kind)) ||
         (rule === "accept" && ["ask_photo", "confirm"].includes(kind)) ||
+        (rule === "wish_guard" && kind === "ask_input") ||
         (rule === "max_length" && ["ask_text", "ask_input"].includes(kind)) ||
         (rule === "condition" && kind === "condition") ||
         (rule === "otherwise" && ["condition", "ask_input", "approval"].includes(kind)) ||
@@ -321,7 +322,7 @@ function initializeBuilder(root) {
       if (seen.has(fromId)) return false;
       seen.add(fromId);
       const source = nodeById(fromId);
-      return source ? [source.next, source.otherwise, source.timeout, source.error].filter(Boolean)
+      return source ? [source.next, source.otherwise, source.timeout, source.error, source.options].filter(Boolean)
         .some((nextId) => reaches(nextId, targetId, new Set(seen))) : false;
     };
     const add = (node, message) => problems.push({ node, message });
@@ -331,12 +332,13 @@ function initializeBuilder(root) {
     graph.nodes.forEach((node) => {
       if (TEXT_KINDS.has(node.kind) && !(node.text || "").trim()) add(node, "Заполните текст шага.");
       if (!TERMINAL_KINDS.has(node.kind) && !node.next) add(node, "Укажите следующий шаг.");
-      ["next", "otherwise", "timeout", "error"].forEach((key) => {
+      ["next", "otherwise", "timeout", "error", "options"].forEach((key) => {
         if (node[key] && !ids.has(node[key])) add(node, `Переход «${key}» ведёт на отсутствующий шаг.`);
       });
       if (["ask_photo", "ask_input"].includes(node.kind) && (!node.min || !node.max || node.min > node.max)) add(node, "Проверьте минимум и максимум фотографий.");
       if (["ask_photo", "ask_input"].includes(node.kind) && productType === "collage" && node.max > 8) add(node, "Для коллажа разрешено не более 8 фотографий.");
       if (node.kind === "ask_input" && !node.otherwise) add(node, "Укажите переход для фотографии.");
+      if (node.wish_guard && (!node.options || !node.error)) add(node, "Укажите переходы для запроса вариантов и непонятного ответа.");
       if (node.kind === "confirm" && !(node.accept || "").trim()) add(node, "Укажите ответ, подтверждающий бриф.");
       if (node.kind === "approval" && (!(node.hours > 0) || node.hours > 72)) add(node, "Укажите срок ожидания до 72 часов.");
       if (node.kind === "approval" && !node.otherwise) add(node, "Выберите переход «Не согласовано».");
@@ -400,7 +402,7 @@ function initializeBuilder(root) {
     const control = event.target.closest("[data-field]");
     if (!node || !control) return;
     const key = control.dataset.field;
-    if (key === "required") node[key] = control.checked;
+    if (["required", "wish_guard"].includes(key)) node[key] = control.checked;
     else if (key === "choices") node[key] = control.value.split("\n").map((item) => item.trim()).filter(Boolean);
     else if (["min", "max", "max_length", "hours"].includes(key)) node[key] = control.value ? Number(control.value) : null;
     else node[key] = control.value;
@@ -413,7 +415,7 @@ function initializeBuilder(root) {
   root.querySelector("[data-delete-node]").addEventListener("click", () => {
     if (!selected) return;
     graph.nodes = graph.nodes.filter((node) => node.id !== selected);
-    graph.nodes.forEach((node) => ["next", "otherwise", "timeout", "error"].forEach((key) => {
+    graph.nodes.forEach((node) => ["next", "otherwise", "timeout", "error", "options"].forEach((key) => {
       if (node[key] === selected) node[key] = "";
     }));
     selected = null;
@@ -724,4 +726,15 @@ document.querySelectorAll("[data-test-messages], [data-chat-messages]").forEach(
       }
     }, { once: true });
   });
+});
+// Keep source/reference previews within the current order's server-rendered list.
+document.querySelectorAll('[data-media-choice]').forEach((select) => {
+  const link = select.closest('label').nextElementSibling;
+  const update = () => {
+    link.hidden = !select.value;
+    if (select.value) link.href = `${document.querySelector('.folio-rework-form').action.split('/chats/')[0]}/media/${encodeURIComponent(select.value)}`;
+    else link.removeAttribute('href');
+  };
+  select.addEventListener('change', update);
+  update();
 });

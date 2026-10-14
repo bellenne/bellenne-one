@@ -43,6 +43,7 @@
 .folio-attached-file span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: var(--bp-font-body-secondary); }
 .folio-rework-form { display: grid; grid-template-columns: minmax(0, calc(var(--bp-space-12) * 4)) minmax(0, 1fr); gap: var(--bp-space-3); align-items: start; }
 .folio-rework-form .folio-compose-actions, .folio-rework-form > p { grid-column: 1 / -1; }
+.folio-rework-source { grid-column: 1 / -1; min-width: 0; display: grid; gap: var(--bp-space-2); }
 .folio-chat-notice { flex: none; max-height: calc(var(--bp-space-12) * 3); overflow-y: auto; padding: var(--bp-space-2) var(--bp-space-4); background: var(--bp-negative-bg); border-bottom: 1px solid var(--bp-border); }
 .folio-chat-notice summary { cursor: pointer; color: var(--bp-negative); }
 .folio-order-drawer { width: min(calc(var(--bp-space-12) * 9), calc(100% - var(--bp-space-8))); max-width: none; height: 100%; max-height: none; margin: 0 0 0 auto; padding: var(--bp-space-5); border: 1px solid var(--bp-border-strong); border-radius: var(--bp-radius-xl) 0 0 var(--bp-radius-xl); background: var(--bp-surface); color: var(--bp-text); box-shadow: var(--bp-shadow-elevated); }

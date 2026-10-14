@@ -330,6 +330,73 @@ class FolioTest(unittest.TestCase):
         self.assertEqual(wishes["instance"]["status"], "needs_review")
         self.assertEqual(json.loads(wishes["instance"]["fields"])["background"], "Тёмный")
 
+    def test_first_reply_intent_routes_without_recording_questions_as_wishes(self):
+        value = {"nodes": [
+            {"id": "start", "kind": "start", "next": "input"},
+            {"id": "input", "kind": "ask_input", "field": "background", "required": True,
+             "text": "Пришлите фото или пожелание", "min": 1, "max": 1,
+             "wish_guard": True, "options": "variants", "error": "manager",
+             "next": "photo", "otherwise": "ready"},
+            {"id": "photo", "kind": "ask_photo", "field": "photos", "required": True,
+             "text": "Спасибо, пожелания учли", "min": 1, "max": 1, "next": "ready"},
+            {"id": "variants", "kind": "send", "text": "Менеджер покажет образцы", "next": "manager"},
+            {"id": "manager", "kind": "handoff", "next": "end"},
+            {"id": "end", "kind": "end"}, {"id": "ready", "kind": "ready"},
+        ]}
+        scenarios.validate(value, 'portrait_background')
+        for text in ('Какие есть варианты для оформления фото?', 'Какие варианты фона есть?'):
+            result = simulate(value, 'portrait_background', [text])
+            self.assertEqual(result['instance']['status'], 'needs_manager')
+            self.assertNotIn('background', json.loads(result['instance']['fields']))
+            self.assertIn('Менеджер покажет образцы', [m['body'] for m in result['timeline']])
+            self.assertNotIn('Спасибо, пожелания учли', [m['body'] for m in result['timeline']])
+        for text in ('Когда доставка?', 'Здравствуйте', 'Не понимаю как это работает', 'Хочу поменять адрес доставки'):
+            result = simulate(value, 'portrait_background', [text])
+            self.assertEqual(result['instance']['status'], 'needs_manager')
+            self.assertNotIn('background', json.loads(result['instance']['fields']))
+        for text in ('Замените фон', 'Хочу в стиле акварели dream art', 'Сделайте фон посветлее'):
+            result = simulate(value, 'portrait_background', [text, 'photo:1'])
+            self.assertEqual(json.loads(result['instance']['fields'])['background'], text)
+            self.assertEqual(result['instance']['status'], 'needs_review')
+        result = simulate(value, 'portrait_background', ['photo:1'])
+        self.assertEqual(result['instance']['status'], 'needs_review')
+        package = scenarios.export_package('Intent', 'portrait_background', value)
+        _, _, restored = scenarios.import_package(db.dump(package).encode())
+        self.assertTrue(restored['nodes'][1]['wish_guard'])
+        value['nodes'][1]['options'] = 'missing'
+        with self.assertRaises(scenarios.Invalid):
+            scenarios.validate(value, 'portrait_background')
+
+    def test_manager_can_choose_source_and_background_but_not_foreign_media(self):
+        config = {'FOLIO_IMAGE_WORKER_URL': 'https://worker.example.com', 'FOLIO_IMAGE_WORKER_API_KEY': 'KEY'}
+        with self.image_worker_settings(config):
+            self.client.post('/settings/image-worker/rework-prompts', headers=self.admin,
+                             data={'csrf': 'csrf', 'portrait_background': 'Правки: {correction}'})
+            _, item, chat, _ = self.setup_instance()
+            _, other_item, other_chat, _ = self.setup_instance(posting='OTHER', external_chat='OTHER')
+            with db.transaction() as con:
+                con.execute("INSERT INTO assignments(chat_id,user_id) VALUES(?, '2')", (chat,))
+                source, reference = self.image(con, chat, item), self.image(con, chat, item)
+                foreign = self.image(con, other_chat, other_item)
+            page = self.client.get(f'/chats/{chat}', headers=self.manager)
+            self.assertIn('Основа для доработки', page.text)
+            self.assertIn(source, page.text)
+            self.assertNotIn(foreign, page.text)
+            request = {'csrf': 'csrf', 'dedup': 'f'*32, 'product_type': 'portrait_background',
+                       'correction': 'Применить выбранный фон', 'source_media_id': source,
+                       'background_media_id': foreign}
+            rejected = self.client.post(f'/chats/{chat}/rework', headers=self.manager, data=request)
+            self.assertEqual(rejected.status_code, 422)
+            request['background_media_id'] = reference
+            response = self.client.post(f'/chats/{chat}/rework', headers=self.manager, data=request, follow_redirects=False)
+            self.assertEqual(response.status_code, 303, response.text)
+            with db.transaction() as con:
+                job = con.execute("SELECT * FROM image_jobs WHERE node_id=?", ('rework:'+'f'*32,)).fetchone()
+                self.assertEqual(json.loads(job['media_ids']), [source, reference])
+                self.assertIn('Второе — только образец', job['prompt'])
+            forbidden = self.client.post(f'/chats/{other_chat}/rework', headers=self.manager, data=request)
+            self.assertEqual(forbidden.status_code, 403)
+
     def test_mockup_approval_branches_and_retailcrm_note_in_dry_run(self):
         value = {"nodes": [
             {"id": "start", "kind": "start", "next": "photo"},

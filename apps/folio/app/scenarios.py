@@ -6,7 +6,7 @@ import re
 import string
 from datetime import datetime, timedelta
 
-from . import db, image_tasks, policy, retailcrm
+from . import db, image_tasks, policy, retailcrm, wish_intent
 
 TYPES = {
     "portrait_background": "Картина + фон",
@@ -246,7 +246,7 @@ def import_package(raw: bytes):
                    or abs(position[axis]) > 1_000_000 for axis in ("x", "y"))
         ):
             raise Invalid("Координаты шага в файле повреждены")
-        if any(not isinstance(node.get(key), str) for key in ("next", "otherwise", "timeout", "error") if key in node):
+        if any(not isinstance(node.get(key), str) for key in ("next", "otherwise", "timeout", "error", "options") if key in node):
             raise Invalid("Переход шага в файле повреждён")
     normalize(graph, product_type)
     return name.strip(), product_type, graph
@@ -455,7 +455,12 @@ def validate(graph, product_type):
                 raise Invalid("Для фотографий используйте шаг Запрос фото")
             if node["field"] == "template_id" and kind != "choice":
                 raise Invalid("Шаблон выбирается шагом Выбор")
+        if "wish_guard" in node and (kind != "ask_input" or not isinstance(node["wish_guard"], bool)):
+            raise Invalid("Проверка пожелания поддерживается только шагом «Текст или фото»")
         if kind in {"ask_photo", "ask_input"}:
+            if node.get("wish_guard"):
+                if kind != "ask_input" or node.get("wish_guard") is not True or not node.get("options") or not node.get("error"):
+                    raise Invalid("Для проверки пожелания укажите ветки «Запрос вариантов» и «Ошибка / менеджер»")
             low, high = node.get("min"), node.get("max")
             if (
                 not isinstance(low, int)
@@ -493,7 +498,7 @@ def validate(graph, product_type):
                 raise Invalid(
                     f"В шаге «{node.get('title') or node['id']}» выберите переход «Если условие не выполнено»"
                 )
-        targets = [node.get("next"), node.get("otherwise"), node.get("timeout"), node.get("error")]
+        targets = [node.get("next"), node.get("otherwise"), node.get("timeout"), node.get("error"), node.get("options")]
         if kind not in {"end", "ready"} and not node.get("next"):
             raise Invalid(f"Укажите следующий шаг для {node['id']}")
         if any(t and t not in index for t in targets):
@@ -514,7 +519,7 @@ def validate(graph, product_type):
             return
         stack.add(key)
         node = index[key]
-        for target in (node.get("next"), node.get("otherwise"), node.get("timeout"), node.get("error")):
+        for target in (node.get("next"), node.get("otherwise"), node.get("timeout"), node.get("error"), node.get("options")):
             if target:
                 visit(target)
         stack.remove(key)
@@ -537,6 +542,8 @@ def validate(graph, product_type):
         if node["kind"] == "ask_input":
             check_ready_path(node["next"], collected | {node["field"]}, False)
             check_ready_path(node["otherwise"], collected | {"photos"}, False)
+            if node.get("options"):
+                check_ready_path(node["options"], collected, confirmed)
             if node.get("error"):
                 check_ready_path(node["error"], collected, confirmed)
             return
@@ -813,6 +820,15 @@ def advance(con, instance_id, reply=None, *, simulate_external=False):
                     status = "waiting_approval"
                 break
             text = reply.get("text", "").strip()
+            if kind == "ask_input" and node.get("wish_guard") and text:
+                intent = wish_intent.classify(text)
+                if intent != "wish":
+                    db.audit(con, "system", "answer.intent." + intent, "instance", instance_id, chat["id"])
+                    fields["integration_error"] = ("Покупатель просит показать варианты оформления" if intent == "options"
+                                                   else "Сообщение не распознано как пожелание; требуется ответ менеджера")
+                    node_id = node["options"] if intent == "options" else node["error"]
+                    prompted, reply = 0, None
+                    continue
             valid = True
             if kind == "ask_text":
                 valid = bool(text) and (
