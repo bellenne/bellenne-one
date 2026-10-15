@@ -7,7 +7,7 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 
-from . import db, image_tasks, mattermost, media, presentation, retailcrm, scenarios
+from . import business_hours, db, image_tasks, mattermost, media, presentation, retailcrm, scenarios
 from .ozon import OzonAdapter, OzonError
 
 
@@ -1075,8 +1075,11 @@ def send_one(adapter_factory=OzonAdapter):
     # message back into pending. The subsequent write lock is also the takeover
     # serialization boundary (single-worker MVP; no in-request network calls).
     with db.transaction() as con:
+        open_now = business_hours.is_open(db.config(con), db.now())
         row = con.execute(
-            "SELECT o.* FROM outbox o WHERE o.state='pending' AND NOT EXISTS(SELECT 1 FROM outbox u WHERE u.chat_id=o.chat_id AND u.state='unknown') ORDER BY o.id LIMIT 1"
+            "SELECT o.* FROM outbox o WHERE o.state='pending' AND (? OR o.actor LIKE 'manager:%') "
+            "AND NOT EXISTS(SELECT 1 FROM outbox u WHERE u.chat_id=o.chat_id AND u.state='unknown') ORDER BY o.id LIMIT 1",
+            (open_now,),
         ).fetchone()
         if not row:
             return False
@@ -1086,6 +1089,9 @@ def send_one(adapter_factory=OzonAdapter):
             "SELECT * FROM chats WHERE id=?", (row["chat_id"],)
         ).fetchone()
         settings = db.config(con)
+        if not row["actor"].startswith("manager:") and not business_hours.is_open(settings, db.now()):
+            con.execute("UPDATE outbox SET state='pending' WHERE id=?", (row["id"],))
+            return False
         account = con.execute(
             "SELECT * FROM accounts WHERE id=?", (chat["account_id"],)
         ).fetchone()

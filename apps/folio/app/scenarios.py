@@ -6,7 +6,7 @@ import re
 import string
 from datetime import datetime, timedelta
 
-from . import db, image_tasks, policy, retailcrm, wish_intent
+from . import business_hours, db, image_tasks, policy, retailcrm, wish_intent
 
 TYPES = {
     "portrait_background": "Картина + фон",
@@ -1283,7 +1283,7 @@ def outgoing_confirmed(con, outbox_id):
     elif (row["kind"] == "text" and node and node["kind"] == "approval"
           and row["dedup"].endswith(f":{node['id']}")
           and instance["status"] == "waiting_approval"):
-        deadline = (datetime.fromisoformat(db.now()) + timedelta(hours=node["hours"])).isoformat()
+        deadline = business_hours.add_seconds(db.config(con), db.now(), node["hours"] * 3600)
         con.execute("UPDATE instances SET approval_due_at=? WHERE id=? AND approval_due_at IS NULL",
                     (deadline, instance["id"]))
         db.audit(con, "system", "approval.timer_started", "instance", instance["id"], instance["chat_id"])

@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import db, image_tasks, mattermost, media, policy, presentation, retailcrm, scenarios, security
+from . import business_hours, db, image_tasks, mattermost, media, policy, presentation, retailcrm, scenarios, security
 
 BASE = Path(__file__).parent
 PREFIX = os.environ.get("MODULE_PREFIX", "/folio").rstrip("/")
@@ -471,6 +471,45 @@ async def chat_action(request: Request, chat_id: int, action: str):
         chat = security.chat_access(con, actor, chat_id)
         if action == "takeover":
             scenarios.takeover(con, chat_id, actor["id"])
+        elif action in {"rework_retry", "rework_close"}:
+            job_id = number(form, "job_id", 1, integer=True)
+            job = con.execute("SELECT * FROM image_jobs WHERE id=? AND chat_id=? AND item_id=? "
+                              "AND instance_id IS NULL AND node_id LIKE 'rework:%'",
+                              (job_id, chat_id, chat["active_item"])).fetchone()
+            if not job:
+                raise HTTPException(404, "Доработка не найдена в этом заказе")
+            retry_node = f"rework:retry:{job_id}"
+            if action == "rework_retry" and con.execute(
+                    "SELECT 1 FROM image_jobs WHERE item_id=? AND node_id=?", (job["item_id"], retry_node)).fetchone():
+                return redirect(f"/chats/{chat_id}#rework")
+            if job["state"] not in {"unknown", "failed"}:
+                raise scenarios.Invalid("Повтор доступен только после ошибки или потерянного ответа")
+            if job["state"] == "unknown" and form.get("acknowledge_unknown") != "on":
+                raise scenarios.Invalid("Подтвердите закрытие неопределённой попытки: результат может ещё существовать у провайдера")
+            if action == "rework_retry":
+                if con.execute("SELECT 1 FROM items WHERE id=? AND external_status IN ('cancelled','delivered')", (job["item_id"],)).fetchone():
+                    raise scenarios.Invalid("Заказ завершён или отменён")
+                if con.execute("SELECT 1 FROM image_jobs WHERE item_id=? AND id!=? AND state NOT IN ('completed','failed')",
+                               (job["item_id"], job_id)).fetchone():
+                    raise scenarios.Invalid("Другая обработка этого заказа ещё выполняется")
+                sources = {source["id"] for source in image_tasks.rework_sources(con, chat_id, job["item_id"])}
+                mids = json.loads(job["media_ids"]) or [job["media_id"]]
+                if any(mid not in sources for mid in mids):
+                    raise scenarios.Invalid("Исходник доработки больше недоступен")
+                scenarios.takeover(con, chat_id, actor["id"])
+                con.execute(
+                    "INSERT INTO image_jobs(item_id,media_id,media_ids,input_token,prompt,model,prompt_mode,width_cm,height_cm,"
+                    "created_at,updated_at,node_id,chat_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (job["item_id"], job["media_id"], job["media_ids"], uuid.uuid4().hex + uuid.uuid4().hex,
+                     job["prompt"], job["model"], job["prompt_mode"], job["width_cm"], job["height_cm"],
+                     db.now(), db.now(), retry_node, chat_id))
+            # A late callback must not send the superseded result to the buyer.
+            con.execute("UPDATE image_jobs SET recovery_error=CASE WHEN error!='image_worker_closed_by_manager' THEN error ELSE recovery_error END,"
+                        "state='failed',error='image_worker_closed_by_manager',updated_at=? WHERE id=?",
+                        (db.now(), job_id))
+            db.audit(con, actor["id"], "image_job.retried" if action == "rework_retry" else "image_job.closed",
+                     "image_job", job_id, chat_id)
+            return redirect(f"/chats/{chat_id}#rework")
         elif action == "read":
             con.execute("UPDATE chats SET unread=0 WHERE id=?", (chat_id,))
         elif action == "buyer_name":
@@ -1109,6 +1148,22 @@ async def save_automation(request: Request):
         actor = security.user(request, con, admin=True)
         settings = dict(db.config(con))
         was_automated = bool(settings.get("automation_enabled") and settings.get("start_enabled"))
+        old_hours = dict(settings)
+        settings["business_hours_enabled"] = form.get("business_hours_enabled") == "on"
+        settings["business_start"] = str(form.get("business_start") or "")
+        settings["business_end"] = str(form.get("business_end") or "")
+        try:
+            business_hours.validate(settings)
+        except ValueError as exc:
+            raise scenarios.Invalid(str(exc)) from exc
+        if any(settings.get(key) != old_hours.get(key) for key in
+               ("business_hours_enabled", "business_start", "business_end")):
+            stamp = db.now()
+            for timer in con.execute("SELECT id,approval_due_at FROM instances WHERE status='waiting_approval' AND approval_due_at IS NOT NULL").fetchall():
+                remaining = business_hours.seconds_between(old_hours, stamp, timer["approval_due_at"])
+                due = business_hours.add_seconds(settings, stamp, remaining)
+                con.execute("UPDATE instances SET approval_due_at=? WHERE id=?", (due, timer["id"]))
+                db.audit(con, actor["id"], "approval.timer_rescheduled", "instance", timer["id"])
         settings["handoff_hours"] = number(
             form, "handoff_hours", 0, optional=True
         )
