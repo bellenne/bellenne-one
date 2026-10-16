@@ -9,6 +9,7 @@ const NODE_LABELS = {
   await_mockup: "Ждать макет менеджера", approval: "Согласовать макет",
   retailcrm_note: "Записать итог в RetailCRM",
   mattermost: "Сообщение в Mattermost",
+  order_webhook: "Передать заказ вебхуком",
   image_worker: "Создать макет через воркер",
   send_mockup: "Отправить макет",
   ready: "Проверить готовность", end: "Завершить"
@@ -29,6 +30,7 @@ const NODE_HELP = {
   approval: "После отправки макета отправляет настраиваемый текст и ждёт подтверждение, отказ или истечение срока.",
   retailcrm_note: "Дописывает итог в комментарий клиента той же сделки RetailCRM, сохраняя старый текст.",
   mattermost: "Отправляет текст в чат Mattermost через настроенный входящий webhook. При ошибке следует по отдельной ветке.",
+  order_webhook: "Передаёт заказ картины и печатный файл в приложение по настройкам интеграции. Разместите после согласования. Повторы используют один ID события.",
   image_worker: "После получения от одного до восьми фото ставит обработку в очередь. Следующий шаг начнётся после результата воркера.",
   send_mockup: "Отправляет покупателю превью готового макета и продолжает сценарий после подтверждения отправки.",
   ready: "Проверяет обязательные данные перед готовностью брифа.",
@@ -241,7 +243,7 @@ function initializeBuilder(root) {
         (rule === "image-worker" && kind === "image_worker") ||
         (rule === "approval" && kind === "approval") ||
         (rule === "next" && !TERMINAL_KINDS.has(kind)) ||
-        (rule === "error" && ["ask_text", "ask_photo", "ask_input", "choice", "confirm", "approval", "retailcrm", "retailcrm_note", "mattermost", "image_worker"].includes(kind));
+        (rule === "error" && ["ask_text", "ask_photo", "ask_input", "choice", "confirm", "approval", "retailcrm", "retailcrm_note", "mattermost", "image_worker", "order_webhook"].includes(kind));
       element.hidden = !visible;
     });
     const textLabel = inspector.querySelector("[data-text-label]");
@@ -258,6 +260,7 @@ function initializeBuilder(root) {
     if (conditionHelp) conditionHelp.hidden = node.kind !== "condition";
     const errorLabel = inspector.querySelector("[data-error-label]");
     if (errorLabel) errorLabel.textContent = ["retailcrm", "retailcrm_note"].includes(node.kind) ? "Если RetailCRM отклонила действие" : node.kind === "mattermost" ? "Если Mattermost отклонил сообщение" : node.kind === "image_worker" ? "Если обработка не удалась" : "Если ответ не подходит";
+    if (errorLabel && node.kind === "order_webhook") errorLabel.textContent = "Если вебхук не доставлен";
     const crmCommentLabel = inspector.querySelector("[data-retailcrm-comment-label]");
     if (crmCommentLabel) crmCommentLabel.textContent = node.kind === "retailcrm_note" ? "Итог в комментарии клиента RetailCRM" : "Комментарий менеджеру RetailCRM";
   }
@@ -310,6 +313,7 @@ function initializeBuilder(root) {
       comment: "Согласование макета: {approval_outcome}. Отправление: {posting}.", status: "", error: ""
     });
     if (kind === "mattermost") Object.assign(node, { message: "", error: "" });
+    if (kind === "order_webhook") Object.assign(node, { error: "" });
     if (kind === "image_worker") Object.assign(node, { prompt: "", error: "" });
     return node;
   }
@@ -350,6 +354,7 @@ function initializeBuilder(root) {
       if (["retailcrm", "retailcrm_note"].includes(node.kind) && !node.error) add(node, "Выберите переход на случай отказа RetailCRM.");
       if (node.kind === "mattermost" && !(node.message || "").trim()) add(node, "Заполните сообщение Mattermost.");
       if (node.kind === "mattermost" && !node.error) add(node, "Выберите переход на случай отказа Mattermost.");
+      if (node.kind === "order_webhook" && !node.error) add(node, "Выберите переход при ошибке вебхука.");
       if (node.kind === "image_worker" && !(node.prompt || "").trim()) add(node, "Заполните инструкцию обработки.");
       if (node.kind === "image_worker" && !node.error) add(node, "Выберите переход на случай ошибки воркера.");
       if (node.kind === "send_mockup" && !graph.nodes.some((candidate) => candidate.kind === "image_worker" && reaches(candidate.id, node.id))) add(node, "Перед отправкой макета добавьте шаг создания макета через воркер.");
@@ -395,7 +400,7 @@ function initializeBuilder(root) {
   const advancedPalette = root.querySelector("[data-node-palette-advanced]");
   ["send", "ask_text", "ask_photo", "ask_input", ...(productType === "template_art" ? ["choice"] : []), "retailcrm", "image_worker", "send_mockup", "await_mockup", "approval", "retailcrm_note", "handoff", "ready", "end"]
     .forEach((kind) => addPaletteButton(palette, kind));
-  ["condition", "wait", "confirm", "mattermost"].forEach((kind) => addPaletteButton(advancedPalette, kind));
+  ["condition", "wait", "confirm", "mattermost", "order_webhook"].forEach((kind) => addPaletteButton(advancedPalette, kind));
 
   inspector.addEventListener("input", (event) => {
     const node = nodeById(selected);

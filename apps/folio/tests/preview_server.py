@@ -104,7 +104,7 @@ with db.transaction() as con:
 @app.middleware("http")
 async def fixture_identity(request, call_next):
     request.scope["headers"] = [
-        (b"x-bellenne-user-id", b"preview" if request.url.path.startswith("/settings") else b"preview-manager"),
+        (b"x-bellenne-user-id", b"preview" if request.url.path.startswith(("/settings", "/scenarios")) else b"preview-manager"),
         (b"x-bellenne-csrf-token", b"preview-csrf"),
     ] + request.scope["headers"]
     return await call_next(request)

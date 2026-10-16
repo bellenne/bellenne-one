@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import business_hours, db, image_tasks, mattermost, media, policy, presentation, retailcrm, scenarios, security
+from . import business_hours, db, image_tasks, mattermost, media, order_webhook, policy, presentation, retailcrm, scenarios, security
 
 BASE = Path(__file__).parent
 PREFIX = os.environ.get("MODULE_PREFIX", "/folio").rstrip("/")
@@ -760,7 +760,7 @@ def private_media(request: Request, media_id: str):
 @app.get("/settings")
 @app.get("/settings/{section}")
 def settings_page(request: Request, section: str = "overview"):
-    if section not in {"overview", "ozon", "retailcrm", "mattermost", "image-worker", "automation", "users"}:
+    if section not in {"overview", "ozon", "retailcrm", "mattermost", "order-webhook", "image-worker", "automation", "users"}:
         raise HTTPException(404)
     with db.transaction() as con:
         actor = security.user(request, con, admin=True)
@@ -845,6 +845,8 @@ def settings_page(request: Request, section: str = "overview"):
             account_error_jobs=account_error_jobs,
             retailcrm_config=retailcrm_config,
             mattermost_config=mattermost_config,
+            order_webhook_config=order_webhook.config(con),
+            order_webhook_actions=con.execute("SELECT a.*,i.posting FROM order_webhook_actions a JOIN instances n ON n.id=a.instance_id JOIN items i ON i.id=n.item_id ORDER BY a.created_at DESC LIMIT 50").fetchall(),
             image_worker_config=image_worker_config,
             image_models=image_tasks.IMAGE_MODELS,
             image_prompt_mode=current_settings.get("image_prompt_mode", "direct"),
@@ -980,6 +982,56 @@ async def save_mattermost(request: Request):
                 con.execute("INSERT INTO mattermost_integrations(id,secret) VALUES(1,?)", (secret,))
             db.audit(con, actor["id"], "settings.mattermost_updated", "settings", 1)
     return redirect("/settings/mattermost")
+
+
+@app.post("/settings/order-webhook")
+async def save_order_webhook(request: Request):
+    form = await request.form()
+    security.csrf(request, form.get("csrf"))
+    with db.transaction() as con:
+        actor = security.user(request, con, admin=True)
+        try:
+            order_webhook.save(con, form)
+        except ValueError as exc:
+            raise scenarios.Invalid(str(exc)) from None
+        db.audit(con, actor["id"], "settings.order_webhook_updated", "settings", 1)
+    return redirect("/settings/order-webhook")
+
+
+@app.post("/settings/order-webhook/{event}/retry")
+async def retry_order_webhook(event: str, request: Request):
+    form = await request.form()
+    security.csrf(request, form.get("csrf"))
+    with db.transaction() as con:
+        actor = security.user(request, con, admin=True)
+        row = con.execute("SELECT * FROM order_webhook_actions WHERE id=?", (event,)).fetchone()
+        if not row or row["state"] != "failed":
+            raise scenarios.Invalid("Повтор доступен только для ошибочной доставки")
+        # Delivery only. Never rewind a scenario that already followed its error branch.
+        con.execute("UPDATE order_webhook_actions SET state='pending',delivery_only=1,attempts=0,due_at=?,error=NULL WHERE id=?", (db.now(), event))
+        db.audit(con, actor["id"], "order_webhook.retry", "order_webhook", event)
+    return redirect("/settings/order-webhook")
+
+
+@app.get("/integration-files/{event}")
+def integration_print_file(event: str, request: Request):
+    with db.transaction() as con:
+        settings = order_webhook.config(con, secrets=True)
+        expected = settings.get("download_token", "")
+        if not expected or not hmac.compare_digest(request.headers.get("authorization", "").encode(), ("Bearer " + expected).encode()):
+            raise HTTPException(401, "Требуется токен скачивания")
+        row = con.execute("SELECT payload FROM order_webhook_actions WHERE id=?", (event,)).fetchone()
+        if not row or not row[0]:
+            raise HTTPException(404, "Файл не найден")
+        metadata = json.loads(row[0])["print_file"]
+    try:
+        path = order_webhook.artifact_path(event)
+    except ValueError:
+        raise HTTPException(404, "Файл не найден") from None
+    if not path.is_file():
+        raise HTTPException(404, "Файл недоступен")
+    return FileResponse(path, media_type=metadata["mime_type"], filename=metadata["filename"],
+                        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
 
 
 @app.post("/settings/image-worker")

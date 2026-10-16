@@ -29,6 +29,7 @@ KINDS = {
     "approval": "Согласование макета",
     "retailcrm_note": "Записать итог в RetailCRM",
     "mattermost": "Сообщение в Mattermost",
+    "order_webhook": "Передать заказ вебхуком",
     "image_worker": "Создать макет через воркер",
     "send_mockup": "Отправить макет",
     "ready": "Проверка брифа",
@@ -411,6 +412,8 @@ def validate(graph, product_type):
             status_code = str(node.get("status") or "").strip()
             if status_code and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", status_code):
                 raise Invalid("Некорректный символьный код статуса RetailCRM")
+        if kind == "order_webhook" and not node.get("error"):
+            raise Invalid("Укажите переход при ошибке вебхука")
         if kind == "mattermost":
             if not str(node.get("message") or "").strip():
                 raise Invalid(f"Заполните сообщение Mattermost в шаге {node['id']}")
@@ -950,6 +953,19 @@ def advance(con, instance_id, reply=None, *, simulate_external=False):
                 chat["id"],
             )
             reply = None
+        if kind == "order_webhook":
+            if simulate_external:
+                node_id, prompted = node["next"], 0
+                continue
+            from . import order_webhook
+            action = order_webhook.enqueue(con, instance_id, node_id)
+            if action["state"] in {"sent", "failed"}:
+                if action["state"] == "failed":
+                    fields["integration_error"] = action["error"]
+                node_id, prompted = node["next"] if action["state"] == "sent" else node["error"], 0
+                continue
+            status = "waiting_integration"
+            break
         if kind == "mattermost":
             if simulate_external:
                 node_id, prompted = node["next"], 0

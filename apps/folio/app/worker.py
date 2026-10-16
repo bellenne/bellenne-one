@@ -1569,6 +1569,8 @@ def sync_job(job, adapter, settings):
 
 
 def tick():
+    from . import order_webhook
+    order_webhook.tick()
     with db.transaction() as con:
         close_cancelled_start_jobs(con)
         scenarios.release_due(con)
