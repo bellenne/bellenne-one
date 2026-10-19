@@ -354,7 +354,9 @@ class FolioTest(unittest.TestCase):
             result = simulate(value, 'portrait_background', [text])
             self.assertEqual(result['instance']['status'], 'needs_manager')
             self.assertNotIn('background', json.loads(result['instance']['fields']))
-        for text in ('Замените фон', 'Хочу в стиле акварели dream art', 'Сделайте фон посветлее'):
+        for text in ('Замените фон', 'Хочу в стиле акварели dream art', 'Сделайте фон посветлее',
+                     'Сделать более четкое изображение', 'Сделайте снимок чётче',
+                     'Повысьте резкость', 'Улучшите качество'):
             result = simulate(value, 'portrait_background', [text, 'photo:1'])
             self.assertEqual(json.loads(result['instance']['fields'])['background'], text)
             self.assertEqual(result['instance']['status'], 'needs_review')
@@ -366,6 +368,30 @@ class FolioTest(unittest.TestCase):
         value['nodes'][1]['options'] = 'missing'
         with self.assertRaises(scenarios.Invalid):
             scenarios.validate(value, 'portrait_background')
+
+    def test_quality_wish_after_photo_continues_to_next_question(self):
+        value = {'nodes': [
+            {'id': 'start', 'kind': 'start', 'next': 'photo'},
+            {'id': 'photo', 'kind': 'ask_photo', 'field': 'photos', 'required': True,
+             'text': 'Пришлите фото', 'min': 1, 'max': 1, 'next': 'wish'},
+            {'id': 'wish', 'kind': 'ask_input', 'field': 'background', 'required': True,
+             'text': 'Напишите пожелания к фону и обработке', 'min': 1, 'max': 1,
+             'wish_guard': True, 'options': 'manager', 'error': 'manager',
+             'otherwise': 'manager', 'next': 'approval'},
+            {'id': 'approval', 'kind': 'ask_text', 'field': 'wishes',
+             'text': 'Нужно согласование?', 'next': 'ready'},
+            {'id': 'manager', 'kind': 'handoff', 'next': 'end'},
+            {'id': 'end', 'kind': 'end'}, {'id': 'ready', 'kind': 'ready'},
+        ]}
+        scenarios.validate(value, 'portrait_background')
+        text = 'Сделать более четкое изображение'
+        result = simulate(value, 'portrait_background', ['photo:1', text])
+        fields = json.loads(result['instance']['fields'])
+        self.assertEqual(fields['background'], text)
+        self.assertEqual(len(fields['photos']), 1)
+        self.assertNotIn('integration_error', fields)
+        self.assertNotEqual(result['instance']['status'], 'needs_manager')
+        self.assertEqual(result['timeline'][-1]['body'], 'Нужно согласование?')
 
     def test_manager_can_choose_source_and_background_but_not_foreign_media(self):
         config = {'FOLIO_IMAGE_WORKER_URL': 'https://worker.example.com', 'FOLIO_IMAGE_WORKER_API_KEY': 'KEY'}
