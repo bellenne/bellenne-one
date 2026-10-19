@@ -142,22 +142,31 @@ def approval_variants(node, key):
 
 def approval_decision(node, text):
     """Recognize a clear refusal followed by an explanation, never a qualified approval."""
+    # Punctuation normalization must not turn a question into consent.
+    question = "?" in text or "？" in text
     phrase = approval_phrase(text)
     if phrase in approval_variants(node, "accept"):
-        return "accept"
+        return None if question else "accept"
     reject = approval_variants(node, "reject")
     if phrase in reject:
         return "reject"
+    # "Нет замечаний" negates the presence of issues, not the mockup.
+    # Keep these and contradictory statements for clarification, not rejection.
+    if re.match(r"^нет (?:замечаний|претензий|возражений|правок|нареканий)\b", phrase):
+        return None
     # Buyers usually explain a refusal in the same message. The first words
     # still answer the question; an affirmative sentence after them is
     # contradictory and must go to a manager instead of changing the order.
     if any(phrase.startswith(value + " ") for value in reject):
         if any(value in phrase for value in (
             "все устраивает", "макет подходит", "можно печатать", "да согласен",
+            "нет согласовано", "нет подтверждаю", "нет утверждаю",
         )):
             return None
         return "reject"
     if node.get("dictionary_version") == 2:
+        if question:
+            return None
         # Consume the WHOLE reply as affirmative phrases, not just a leading
         # "yes". Unknown words, qualifications and mixed yes/no stay ambiguous.
         words = phrase.split()
