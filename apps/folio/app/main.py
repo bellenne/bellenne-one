@@ -1015,8 +1015,19 @@ async def retry_order_webhook(event: str, request: Request):
             raise scenarios.Invalid("Старый контракт: повтор запрещён, требуется сверка с MES")
         if row["http_code"] == 409 and form.get("reconciled") != "yes":
             raise scenarios.Invalid("Подтвердите ручную сверку конфликта с MES")
-        if order_webhook.config(con).get("paused_reason"):
-            raise scenarios.Invalid("Исправьте настройки MES и сохраните подключение перед повтором")
+        settings = order_webhook.config(con)
+        if settings.get("paused_reason"):
+            configuration_pause = (
+                settings.get("paused_code") == "CONFIGURATION_ERROR"
+                or (not settings.get("paused_code") and settings["paused_reason"].startswith("Ошибка настройки MES."))
+            )
+            if not configuration_pause:
+                raise scenarios.Invalid("Исправьте токен MES и сохраните подключение перед повтором")
+            # Explicit operator retry after fixing MES, not an automatic retry.
+            raw = json.loads(con.execute("SELECT value FROM order_webhook_settings WHERE id=1").fetchone()[0])
+            raw.pop("paused_reason", None)
+            raw.pop("paused_code", None)
+            con.execute("UPDATE order_webhook_settings SET value=? WHERE id=1", (db.dump(raw),))
         # Delivery only. Never rewind a scenario that already followed its error branch.
         con.execute("UPDATE order_webhook_actions SET state='pending',delivery_only=1,due_at=?,error=NULL WHERE id=?", (db.now(), event))
         db.audit(con, actor["id"], "order_webhook.retry", "order_webhook", event)

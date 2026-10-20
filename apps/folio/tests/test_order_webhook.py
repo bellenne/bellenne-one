@@ -262,6 +262,40 @@ class OrderWebhookTest(unittest.TestCase):
         with db.transaction() as con:
             self.assertEqual(order_webhook.enqueue(con, iid, "yet-another-node")["id"], event)
 
+    def test_configuration_retry_without_resaving_connection(self):
+        _, event = self.fixture()
+        order_webhook.tick(lambda *a: httpx.Response(503, json={"code": "CONFIGURATION_ERROR"}))
+        snapshot = self.row()["payload"]
+        with db.transaction() as con:
+            # Existing deployments have a human-readable pause without a code.
+            raw = json.loads(con.execute("SELECT value FROM order_webhook_settings WHERE id=1").fetchone()[0])
+            raw.pop("paused_code", None)
+            raw["paused_reason"] = "Ошибка настройки MES. Исправьте MES и сохраните подключение Folio."
+            con.execute("UPDATE order_webhook_settings SET value=? WHERE id=1", (db.dump(raw),))
+        response = self.client.post(f"/settings/order-webhook/{event}/retry", headers=self.admin,
+                                    data={"csrf": "csrf"}, follow_redirects=False)
+        self.assertEqual(response.status_code, 303)
+        def send(url, token, payload, key):
+            self.assertEqual(payload, snapshot)
+            self.assertEqual(key, event)
+            return httpx.Response(503, json={"code": "CONFIGURATION_ERROR"})
+        order_webhook.tick(send)
+        with db.transaction() as con:
+            self.assertEqual(order_webhook.config(con)["paused_code"], "CONFIGURATION_ERROR")
+        self.assertFalse(order_webhook.tick(lambda *a: self.fail("Must wait for explicit retry")))
+        self.assertEqual(self.client.post(f"/settings/order-webhook/{event}/retry", headers=self.admin,
+                         data={"csrf": "csrf"}, follow_redirects=False).status_code, 303)
+        order_webhook.tick(lambda *a: httpx.Response(202, json={"accepted": True, "external_order_id": "MES-123"}))
+        self.assertEqual(self.row()["state"], "sent")
+        self.assertEqual(self.row()["payload"], snapshot)
+
+    def test_auth_pause_still_requires_connection_update(self):
+        _, event = self.fixture()
+        order_webhook.tick(lambda *a: httpx.Response(401, json={"message": "Bad token"}))
+        self.assertEqual(self.client.post(f"/settings/order-webhook/{event}/retry", headers=self.admin,
+                         data={"csrf": "csrf"}).status_code, 422)
+        self.assertFalse(order_webhook.tick(lambda *a: self.fail("Token not fixed")))
+
     def test_legacy_events_are_never_replayed(self):
         iid, event = self.fixture()
         with db.transaction() as con:

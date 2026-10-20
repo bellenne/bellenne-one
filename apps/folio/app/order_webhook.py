@@ -250,7 +250,7 @@ def tick(sender=send):
                 if code == 401:
                     pause = "Ошибка токена MES. Исправьте folio.send_token и сохраните подключение."
                 elif code == 503 and error_code == "CONFIGURATION_ERROR":
-                    pause = "Ошибка настройки MES. Исправьте MES и сохраните подключение Folio."
+                    pause = "Ошибка настройки MES. После исправления MES повторите доставку кнопкой ниже."
                 elif code in {408, 429} or code >= 500:
                     state = "pending"
                 if state == "pending":
@@ -269,6 +269,7 @@ def tick(sender=send):
         if pause:
             raw = json.loads(con.execute("SELECT value FROM order_webhook_settings WHERE id=1").fetchone()[0])
             raw["paused_reason"] = pause
+            raw["paused_code"] = "AUTH_ERROR" if code == 401 else "CONFIGURATION_ERROR"
             con.execute("UPDATE order_webhook_settings SET value=? WHERE id=1", (db.dump(raw),))
         con.execute("UPDATE order_webhook_actions SET state=?,error=?,due_at=?,http_code=?,external_order_id=COALESCE(?,external_order_id),error_code=? WHERE id=?",
                     (state, error, due, code, external_id, error_code, action["id"]))

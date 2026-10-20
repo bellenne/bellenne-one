@@ -17,7 +17,7 @@
 <section class="card card-body folio-stack folio-section">
   <h2>Передача заказов в MES</h2>
   <p>После согласования блок «Передать заказ вебхуком» отправляет в MES только данные позиции. MES возвращает имена экземпляров, а воркер-владелец размещает файлы и сообщает результат. Core не читает и не копирует файлы. «Принято MES» не означает «Размещено» или «Напечатано».</p>
-  {% if order_webhook_config.paused_reason %}<p class="alert alert-warning">{{ order_webhook_config.paused_reason }} После сохранения повторите ошибочную передачу кнопкой ниже.</p>{% endif %}
+  {% if order_webhook_config.paused_reason %}<p class="alert alert-warning">{% if order_webhook_config.paused_code == 'CONFIGURATION_ERROR' or order_webhook_config.paused_reason.startswith('Ошибка настройки MES.') %}Ошибка настройки MES. После исправления на стороне MES нажмите «Повторить доставку с тем же ID». Пересохранять подключение Folio не требуется.{% else %}{{ order_webhook_config.paused_reason }} После сохранения повторите ошибочную передачу кнопкой ниже.{% endif %}</p>{% endif %}
   <form method="post" action="{{ prefix }}/settings/order-webhook" class="folio-stack">{{ token() }}
     <label class="field">Адрес MES<input class="input" type="url" name="url" value="{{ order_webhook_config.url or '' }}" placeholder="https://mes.example.ru" required><span class="field-help">HTTPS-домен MES или полный адрес /api/v1/folio/orders.</span></label>
     <label class="field">Bearer-токен MES — folio.send_token<input class="input" type="password" name="send_token" autocomplete="new-password" minlength="32"><span class="field-help">{{ 'Настроен. Пустое поле сохраняет текущий токен.' if order_webhook_config.send_token_set else 'Ключ folio.send_token из раздела MES «API Ключи», минимум 32 символа.' }}</span></label>
@@ -26,7 +26,7 @@
     {% endfor %}
     <button class="button button-primary">Сохранить подключение</button>
   </form>
-  <p class="field-help">При ошибке сохранения вебхук не отправляется. Старые доставки с seller_account_id требуют ручной сверки и повторно не отправляются. После исправления настроек MES сохраните подключение и повторите ошибочную передачу. JSON уже созданного события не изменяется.</p>
+  <p class="field-help">Старые доставки с seller_account_id требуют ручной сверки и повторно не отправляются. После исправления настроек на стороне MES повторите ошибочную передачу кнопкой ниже. При изменении токена сначала сохраните подключение. JSON и ID уже созданного события не изменяются.</p>
 </section>
 <section class="card card-body folio-stack"><h2>Последние доставки</h2>
 {% for delivery in order_webhook_actions %}<article class="folio-account-card"><strong>{{ delivery.posting }}</strong>
