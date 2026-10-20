@@ -1,4 +1,5 @@
 {% extends "base.html" %}{% block content %}
+{% from "approval_timer.html" import approval_timer with context %}
 <div class="page-header"><div><h1 class="page-title">Заказы и брифы</h1><p class="page-subtitle">Только позиции с артикулом продавца, привязанным к опубликованному сценарию</p></div></div>
 <section class="card card-body folio-stack folio-section">
   <p class="field-help">Folio сам начинает чат по подходящему отправлению Ozon. Вручную связывать заказ с чатом не требуется.</p>
@@ -19,7 +20,7 @@
         {% else %}<span class="field-help">Ожидает следующей синхронизации и проверки прав Ozon.</span>{% endif %}
       </td>
       <td>{{ instance_labels.get(item.brief_status, 'Не начат') }}</td>
-      <td>{% if item.brief_status == 'ready' %}<a href="{{ prefix }}/briefs/{{ item.instance_id }}/export">Экспортировать бриф</a>{% endif %}</td>
+      <td>{% if item.brief_status == 'waiting_approval' and item.external_status != 'cancelled' %}{{ approval_timer(item.instance_id, item.approval_due_at, item.approval_remaining_seconds, 'orders') }}{% endif %}{% if item.brief_status == 'ready' and actor.role == 'admin' %}<a href="{{ prefix }}/briefs/{{ item.instance_id }}/export">Экспортировать бриф</a>{% endif %}</td>
     </tr>{% else %}<tr><td colspan="8">Подходящих заказов пока нет. Настройте артикул и сценарий, затем синхронизируйте Ozon.</td></tr>{% endfor %}
   </tbody></table></div>
 </section>

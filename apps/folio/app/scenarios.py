@@ -946,6 +946,8 @@ def advance(con, instance_id, reply=None, *, simulate_external=False):
                     if fields["approval_outcome"] != "Макет подтверждён покупателем":
                         con.execute("UPDATE instances SET approved_image_job_id=NULL WHERE id=?", (instance_id,))
                     con.execute("UPDATE instances SET approval_due_at=NULL WHERE id=?", (instance_id,))
+                    if not simulate_external:
+                        con.execute("UPDATE instances SET approval_remaining_seconds=NULL WHERE id=?", (instance_id,))
             if not valid:
                 fields["integration_error"] = "Ответ покупателя не соответствует ожидаемому формату"
                 db.audit(
@@ -1227,11 +1229,40 @@ def resume(con, chat_id, node_id, actor):
         raise Invalid("Выберите существующий шаг зафиксированной версии")
     con.execute("UPDATE chats SET mode='bot',epoch=epoch+1 WHERE id=?", (chat_id,))
     con.execute(
-        "UPDATE instances SET node=?,status='collecting',prompted=0,confirmed_at=NULL,reviewed_at=NULL,ready_at=NULL WHERE id=?",
+        "UPDATE instances SET node=?,status='collecting',prompted=0,confirmed_at=NULL,reviewed_at=NULL,ready_at=NULL,"
+        "approval_due_at=NULL,approval_remaining_seconds=NULL,approved_image_job_id=NULL WHERE id=?",
         (node_id, instance["id"]),
     )
     db.audit(con, actor, "chat.resumed", "instance", instance["id"], chat_id)
     advance(con, instance["id"])
+
+
+def approval_timer(con, instance_id, action, actor):
+    instance = con.execute("SELECT s.*,i.external_status,c.active_item FROM instances s "
+                           "JOIN items i ON i.id=s.item_id JOIN chats c ON c.id=s.chat_id WHERE s.id=?",
+                           (instance_id,)).fetchone()
+    if (not instance or instance["status"] != "waiting_approval"
+            or instance["external_status"] == "cancelled" or instance["active_item"] != instance["item_id"]):
+        raise Invalid("Для этого заказа нет активного согласования")
+    remaining = instance["approval_remaining_seconds"]
+    if action == "pause":
+        if remaining is None:
+            if not instance["approval_due_at"]:
+                raise Invalid("Отсчёт ещё не начался: дождитесь отправки сообщения согласования")
+            remaining = max(0, business_hours.seconds_between(db.config(con), db.now(), instance["approval_due_at"]))
+            con.execute("UPDATE instances SET approval_remaining_seconds=?,approval_due_at=NULL WHERE id=?",
+                        (remaining, instance_id))
+    elif action == "resume":
+        if remaining is not None:
+            due = business_hours.add_seconds(db.config(con), db.now(), remaining)
+            con.execute("UPDATE instances SET approval_due_at=?,approval_remaining_seconds=NULL WHERE id=?",
+                        (due, instance_id))
+        elif not instance["approval_due_at"]:
+            raise Invalid("Отсчёт ещё не начался")
+    else:
+        raise Invalid("Выберите паузу или продолжение таймера")
+    db.audit(con, actor, "approval.timer_" + action, "instance", instance_id, instance["chat_id"])
+    return instance["chat_id"]
 
 
 def approve(con, instance_id, actor):
@@ -1319,7 +1350,7 @@ def outgoing_confirmed(con, outbox_id):
           and row["dedup"].endswith(f":{node['id']}")
           and instance["status"] == "waiting_approval"):
         deadline = business_hours.add_seconds(db.config(con), db.now(), node["hours"] * 3600)
-        con.execute("UPDATE instances SET approval_due_at=? WHERE id=? AND approval_due_at IS NULL",
+        con.execute("UPDATE instances SET approval_due_at=? WHERE id=? AND approval_due_at IS NULL AND approval_remaining_seconds IS NULL",
                     (deadline, instance["id"]))
         db.audit(con, "system", "approval.timer_started", "instance", instance["id"], instance["chat_id"])
 

@@ -1480,7 +1480,6 @@ class FolioTest(unittest.TestCase):
             "/scenarios",
             "/scenarios/1",
             "/catalog",
-            "/orders",
             "/audit",
             f"/briefs/{iid}/export",
             f"/chats/{cid}",
@@ -4723,7 +4722,7 @@ class FolioIntegrationsTest(unittest.TestCase):
                 mids = [self.image(con, chat_id, item_id) for _ in range(8)]
                 con.execute("UPDATE instances SET fields=? WHERE id=?",
                             (db.dump({"photos": mids}), instance_id))
-            self.assertEqual(self.client.get("/image-jobs", headers=self.manager).status_code, 403)
+            self.assertEqual(self.client.get("/image-jobs", headers=self.manager).status_code, 200)
             listed = self.client.get("/image-jobs", headers=self.admin)
             self.assertEqual(listed.status_code, 200)
             with db.transaction() as con:

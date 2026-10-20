@@ -654,8 +654,6 @@ async def chat_action(request: Request, chat_id: int, action: str):
             scenarios.takeover(con, chat_id, actor["id"])
             db.audit(con, actor["id"], "image_job.rework_requested", "item", item["id"], chat_id)
         elif action == "resume":
-            if actor["role"] != "admin" and not db.config(con).get("manager_resume"):
-                raise HTTPException(403, "Возврат боту не разрешён политикой")
             scenarios.resume(con, chat_id, required(form, "node"), actor["id"])
         elif action == "approve":
             instance = con.execute(
@@ -1220,7 +1218,6 @@ async def save_automation(request: Request):
         elif not settings["automation_enabled"]:
             settings.pop("automation_enabled_at", None)
         settings.pop("start_statuses", None)
-        settings["manager_resume"] = form.get("manager_resume") == "on"
         for key, options in {
             "manager_scope": {"all", "assigned"},
             "timer_origin": {"confirmation", "review"},
@@ -1847,10 +1844,22 @@ async def template_save(request: Request):
     return redirect("/catalog")
 
 
+@app.post("/instances/{instance_id}/approval-timer")
+async def control_approval_timer(request: Request, instance_id: int):
+    form = await request.form()
+    security.csrf(request, form.get("csrf"))
+    with db.transaction() as con:
+        actor = security.user(request, con)
+        instance = get_record(con, "instances", instance_id)
+        security.chat_access(con, actor, instance["chat_id"])
+        chat_id = scenarios.approval_timer(con, instance_id, required(form, "action"), actor["id"])
+    return redirect("/orders" if form.get("return_to") == "orders" else f"/chats/{chat_id}")
+
+
 @app.get("/orders")
 def orders_page(request: Request):
     with db.transaction() as con:
-        actor = security.user(request, con, admin=True)
+        actor = security.user(request, con)
         return render(
             request,
             con,
@@ -1859,6 +1868,7 @@ def orders_page(request: Request):
             items=con.execute(
                 "SELECT i.*,a.name AS account_name,a.capabilities AS account_capabilities,"
                 "a.error AS account_error,s.status AS brief_status,s.id AS instance_id,"
+                "s.approval_due_at,s.approval_remaining_seconds,"
                 "(SELECT c.id FROM chats c JOIN chat_items ci ON ci.chat_id=c.id "
                 "WHERE ci.item_id=i.id AND c.start_job_id IS NOT NULL LIMIT 1) AS folio_chat_id,"
                 "(SELECT j.state FROM jobs j WHERE j.kind='start_chat' "
@@ -1878,7 +1888,9 @@ def orders_page(request: Request):
                 "WHERE m.account_id=i.account_id AND m.key_kind='seller_article' "
                 "AND (m.active=1 OR s.id IS NOT NULL) "
                 "AND m.sku=i.offer_id AND configured.published IS NOT NULL "
-                "ORDER BY i.id DESC"
+                "AND (? OR EXISTS(SELECT 1 FROM assignments ass WHERE ass.chat_id=s.chat_id AND ass.user_id=?)) "
+                "ORDER BY i.id DESC",
+                (actor["role"] == "admin" or db.config(con).get("manager_scope") == "all", actor["id"]),
             ).fetchall(),
         )
 
@@ -1936,20 +1948,24 @@ def export(request: Request, instance_id: int):
 @app.get("/image-jobs")
 def image_jobs_page(request: Request):
     with db.transaction() as con:
-        actor = security.user(request, con, admin=True)
+        actor = security.user(request, con)
         return render(
             request, con, actor, "image_jobs.html",
             worker_configured=image_tasks.configured(con),
             image_job_labels=image_tasks.STATE_LABELS,
             image_job_errors=image_tasks.ERROR_LABELS,
             image_models=image_tasks.IMAGE_MODELS,
-            image_jobs=con.execute(
+            image_jobs=[{**dict(row), "print_file": row["print_file"] if actor["role"] == "admin" else None}
+                for row in con.execute(
                 "SELECT j.*,i.posting,i.name AS product_name,"
                 "COALESCE(j.chat_id,inst.chat_id) AS result_chat_id "
                 "FROM image_jobs j JOIN items i ON i.id=j.item_id "
                 "LEFT JOIN instances inst ON inst.item_id=j.item_id "
-                "ORDER BY j.id DESC LIMIT 200"
-            ).fetchall(),
+                "WHERE (? OR EXISTS(SELECT 1 FROM assignments ass "
+                "WHERE ass.chat_id=COALESCE(j.chat_id,inst.chat_id) AND ass.user_id=?)) "
+                "ORDER BY j.id DESC LIMIT 200",
+                (actor["role"] == "admin" or db.config(con).get("manager_scope") == "all", actor["id"]),
+            )],
         )
 
 
@@ -2095,8 +2111,11 @@ async def image_worker_vendor_callback(request: Request, token: str):
 @app.get("/image-jobs/{image_job_id}/preview")
 def image_job_preview(request: Request, image_job_id: int):
     with db.transaction() as con:
-        security.user(request, con, admin=True)
+        actor = security.user(request, con)
         record = get_record(con, "image_jobs", image_job_id)
+        if actor["role"] != "admin":
+            context = con.execute("SELECT chat_id FROM instances WHERE item_id=?", (record["item_id"],)).fetchone()
+            security.chat_access(con, actor, record["chat_id"] or (context["chat_id"] if context else None))
         if record["state"] != "completed" or not record["preview_media_id"]:
             raise HTTPException(404, "Предпросмотр ещё не готов")
         path = db.DATA / "media" / record["preview_media_id"]

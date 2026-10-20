@@ -1,0 +1,15 @@
+{% macro approval_timer(id, due, remaining, return_to='chat') %}
+{% if remaining is not none or due %}
+<form method="post" action="{{ prefix }}/instances/{{ id }}/approval-timer" class="folio-actions" aria-label="Таймер согласования">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="return_to" value="{{ return_to }}">
+  {% if remaining is not none %}
+  <span class="field-help">Согласование на паузе · осталось {{ (remaining / 60)|round(0, 'ceil')|int }} мин.</span>
+  <button class="button button-secondary button-small" name="action" value="resume">Продолжить отсчёт</button>
+  {% else %}
+  <span class="field-help">Согласование до {{ due|folio_time }}</span>
+  <button class="button button-secondary button-small" name="action" value="pause">Приостановить отсчёт</button>
+  {% endif %}
+</form>
+{% endif %}
+{% endmacro %}
