@@ -927,6 +927,14 @@ def advance(con, instance_id, reply=None, *, simulate_external=False):
                     valid = True
                 elif (decision := approval_decision(node, text)) == "accept":
                     fields["approval_outcome"] = "Макет подтверждён покупателем"
+                    approved = con.execute(
+                        "SELECT j.id FROM outbox o JOIN media m ON m.id=o.media_id AND m.item_id=? "
+                        "LEFT JOIN image_jobs j ON j.preview_media_id=m.id AND j.item_id=m.item_id AND j.state='completed' "
+                        "WHERE o.chat_id=? AND o.kind='file' AND o.state='sent' ORDER BY o.id DESC LIMIT 1",
+                        (instance["item_id"], chat["id"]),
+                    ).fetchone()
+                    con.execute("UPDATE instances SET approved_image_job_id=? WHERE id=?",
+                                (approved[0] if approved else None, instance_id))
                     valid = True
                 elif decision == "reject":
                     fields["approval_outcome"] = "Покупатель отказался от макета"
@@ -935,6 +943,8 @@ def advance(con, instance_id, reply=None, *, simulate_external=False):
                 else:
                     valid = False
                 if valid:
+                    if fields["approval_outcome"] != "Макет подтверждён покупателем":
+                        con.execute("UPDATE instances SET approved_image_job_id=NULL WHERE id=?", (instance_id,))
                     con.execute("UPDATE instances SET approval_due_at=NULL WHERE id=?", (instance_id,))
             if not valid:
                 fields["integration_error"] = "Ответ покупателя не соответствует ожидаемому формату"

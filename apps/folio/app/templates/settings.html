@@ -16,7 +16,7 @@
 {% if section == 'order-webhook' %}
 <section class="card card-body folio-stack folio-section">
   <h2>Передача заказов в MES</h2>
-  <p>Блок «Передать заказ вебхуком» отправляет в MES только данные позиции, UUID и имя печатного файла. Файл сохраняет воркер; Core не читает и не копирует его. «Принято MES» не означает «напечатано».</p>
+  <p>После согласования блок «Передать заказ вебхуком» отправляет в MES только данные позиции. MES возвращает имена экземпляров, а воркер-владелец размещает файлы и сообщает результат. Core не читает и не копирует файлы. «Принято MES» не означает «Размещено» или «Напечатано».</p>
   {% if order_webhook_config.paused_reason %}<p class="alert alert-warning">{{ order_webhook_config.paused_reason }} После сохранения повторите ошибочную передачу кнопкой ниже.</p>{% endif %}
   <form method="post" action="{{ prefix }}/settings/order-webhook" class="folio-stack">{{ token() }}
     <label class="field">Адрес MES<input class="input" type="url" name="url" value="{{ order_webhook_config.url or '' }}" placeholder="https://mes.example.ru" required><span class="field-help">HTTPS-домен MES или полный адрес /api/v1/folio/orders.</span></label>
@@ -32,6 +32,10 @@
 {% for delivery in order_webhook_actions %}<article class="folio-account-card"><strong>{{ delivery.posting }}</strong>
 <p>{% if delivery.protocol != 2 %}Старый контракт · требуется сверка{% elif delivery.state == 'sent' %}Принято MES{% elif delivery.state == 'failed' %}Ошибка{% elif delivery.attempts %}Повтор запланирован{% else %}Ожидает{% endif %} · попыток: {{ delivery.attempts }}</p>
 <p>Последняя попытка: {{ delivery.last_attempt_at|folio_time }} · HTTP: {{ delivery.http_code or '—' }} · ID заказа MES: {{ delivery.external_order_id or '—' }}</p>
+<p>Размещение файлов: {{ {'pending':'Ожидает воркера','running':'В работе','partial':'Частично выполнено, повтор запланирован','completed':'Завершено','stale':'Остановлено: версия или заказ изменились'}.get(delivery.placement_state, 'Не назначено') }}</p>
+{% if delivery.placement_error %}<p class="alert alert-warning">{{ delivery.placement_error }}</p>
+{% if delivery.state == 'sent' %}<form method="post" action="{{ prefix }}/settings/order-webhook/{{ delivery.id }}/retry">{{ token() }}<button class="button button-secondary">Повторить запрос MES с тем же ID</button></form>{% endif %}{% endif %}
+{% for file in delivery.file_results.values() %}<p>{{ file.filename }} — {{ 'Размещён' if file.status == 'completed' else 'Ошибка' }}: {{ file.saved_path or file.error }}{% if file.size_bytes %} · {{ file.size_bytes }} байт{% endif %}</p>{% endfor %}
 {% if delivery.state == 'pending' and delivery.attempts %}<p>Следующая попытка: {{ delivery.due_at|folio_time }}</p>{% endif %}
 {% if delivery.error %}<p>{{ delivery.error }}</p>{% endif %}<details><summary>ID события</summary>{{ delivery.id }}</details>
 {% if delivery.state == 'failed' and delivery.protocol == 2 %}<form method="post" action="{{ prefix }}/settings/order-webhook/{{ delivery.id }}/retry">{{ token() }}

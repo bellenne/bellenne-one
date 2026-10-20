@@ -28,6 +28,7 @@ class OrderWebhookTest(unittest.TestCase):
             mid = self.image(con, chat, item)
             job = con.execute("INSERT INTO image_jobs(item_id,media_id,prompt,width_cm,height_cm,state,print_file,preview_media_id,created_at,updated_at,instance_id) VALUES(?,?,'prompt',40,60,'completed','D:/Print/print.png',?,?,?,?)",
                               (item, mid, mid, db.now(), db.now(), iid)).lastrowid
+            con.execute("UPDATE instances SET approved_image_job_id=? WHERE id=?", (job, iid))
             con.execute("INSERT INTO outbox(chat_id,instance_id,actor,body,dedup,epoch,state,created_at,kind,media_id) VALUES(?,?,'bot','','sent-preview',0,'sent',?,'file',?)", (chat, iid, db.now(), mid))
             g = {"nodes": [{"id": "hook", "kind": "order_webhook", "next": "end", "error": "end"}, {"id": "end", "kind": "end"}]}
             con.execute("UPDATE versions SET graph=? WHERE id=(SELECT version_id FROM instances WHERE id=?)", (db.dump(g), iid))

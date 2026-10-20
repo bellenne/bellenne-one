@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS chats(id INTEGER PRIMARY KEY, account_id INTEGER NOT 
 CREATE TABLE IF NOT EXISTS chat_items(chat_id INTEGER NOT NULL REFERENCES chats(id), item_id INTEGER NOT NULL REFERENCES items(id), PRIMARY KEY(chat_id,item_id));
 CREATE TABLE IF NOT EXISTS order_lookup_attempts(account_id INTEGER NOT NULL REFERENCES accounts(id), order_number TEXT NOT NULL, checked_at TEXT NOT NULL, PRIMARY KEY(account_id,order_number));
 CREATE TABLE IF NOT EXISTS assignments(chat_id INTEGER NOT NULL REFERENCES chats(id), user_id TEXT NOT NULL REFERENCES users(id), PRIMARY KEY(chat_id,user_id));
-CREATE TABLE IF NOT EXISTS instances(id INTEGER PRIMARY KEY, item_id INTEGER NOT NULL UNIQUE REFERENCES items(id), chat_id INTEGER NOT NULL REFERENCES chats(id), version_id INTEGER NOT NULL REFERENCES versions(id), node TEXT NOT NULL, fields TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'collecting', revision INTEGER NOT NULL DEFAULT 0, prompted INTEGER NOT NULL DEFAULT 0, confirmed_at TEXT, reviewed_at TEXT, reviewed_by TEXT, ready_at TEXT, template_ids TEXT NOT NULL DEFAULT '[]', approval_due_at TEXT);
+CREATE TABLE IF NOT EXISTS instances(id INTEGER PRIMARY KEY, item_id INTEGER NOT NULL UNIQUE REFERENCES items(id), chat_id INTEGER NOT NULL REFERENCES chats(id), version_id INTEGER NOT NULL REFERENCES versions(id), node TEXT NOT NULL, fields TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'collecting', revision INTEGER NOT NULL DEFAULT 0, prompted INTEGER NOT NULL DEFAULT 0, confirmed_at TEXT, reviewed_at TEXT, reviewed_by TEXT, ready_at TEXT, template_ids TEXT NOT NULL DEFAULT '[]', approval_due_at TEXT, approved_image_job_id INTEGER);
 CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY, chat_id INTEGER NOT NULL REFERENCES chats(id), external_id TEXT, actor TEXT NOT NULL, body TEXT NOT NULL, media_ids TEXT NOT NULL DEFAULT '[]', order_number TEXT NOT NULL DEFAULT '', context_sku TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, UNIQUE(chat_id,external_id));
 CREATE TABLE IF NOT EXISTS media(id TEXT PRIMARY KEY, chat_id INTEGER REFERENCES chats(id), item_id INTEGER REFERENCES items(id), mime TEXT NOT NULL, size INTEGER NOT NULL, digest TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL REFERENCES accounts(id), external_key TEXT NOT NULL, chat_id INTEGER NOT NULL REFERENCES chats(id), body TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', error TEXT, UNIQUE(account_id,external_key));
@@ -159,6 +159,8 @@ def initialize():
                 "http_code": "INTEGER",
                 "external_order_id": "TEXT",
                 "error_code": "TEXT",
+                "print_files": "TEXT",
+                "placement_error": "TEXT",
             },
             "items": {
                 "order_number": "TEXT NOT NULL DEFAULT ''",
@@ -184,7 +186,7 @@ def initialize():
                 "kind": "TEXT NOT NULL DEFAULT 'text'",
                 "media_id": "TEXT REFERENCES media(id)",
             },
-            "instances": {"approval_due_at": "TEXT"},
+            "instances": {"approval_due_at": "TEXT", "approved_image_job_id": "INTEGER"},
             "retailcrm_actions": {"kind": "TEXT NOT NULL DEFAULT 'create'"},
             "retailcrm_integrations": {"statuses": "TEXT NOT NULL DEFAULT '[]'"},
             "image_jobs": {"instance_id": "INTEGER REFERENCES instances(id)", "node_id": "TEXT",
@@ -195,7 +197,17 @@ def initialize():
                            "prompt_mode": "TEXT NOT NULL DEFAULT 'direct'",
                            "media_ids": "TEXT NOT NULL DEFAULT '[]'",
                            "preview_media_id": "TEXT REFERENCES media(id)",
-                           "pull_claimed": "INTEGER NOT NULL DEFAULT 0"},
+                           "pull_claimed": "INTEGER NOT NULL DEFAULT 0",
+                           "owner_id": "TEXT",
+                           "placement_id": "TEXT",
+                           "placement_version": "TEXT",
+                           "placement_files": "TEXT",
+                           "placement_results": "TEXT NOT NULL DEFAULT '{}'",
+                           "placement_state": "TEXT",
+                           "placement_session": "TEXT",
+                           "placement_token": "TEXT",
+                           "placement_until": "TEXT",
+                           "placement_due": "TEXT"},
         }
         for table, expected in upgrades.items():
             present = {

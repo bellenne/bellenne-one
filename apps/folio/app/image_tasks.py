@@ -476,22 +476,23 @@ def authenticate_pull(con, authorization: str) -> None:
         raise ImageTaskError("image_worker_auth_failed")
 
 
-def claim_next(con) -> dict | None:
+def claim_next(con, owner_id=None) -> dict | None:
     """Return the same claimed job until its terminal result is acknowledged."""
     row = con.execute(
         "SELECT j.*,i.external_status FROM image_jobs j JOIN items i ON i.id=j.item_id "
-        "WHERE j.pull_claimed=1 AND j.state NOT IN ('completed','failed','unknown') ORDER BY j.id LIMIT 1"
+        "WHERE j.pull_claimed=1 AND j.state NOT IN ('completed','failed','unknown') "
+        "AND (j.owner_id IS NULL OR j.owner_id=?) ORDER BY j.id LIMIT 1", (owner_id,)
     ).fetchone()
     if not row:
         row = con.execute(
             "SELECT j.*,i.external_status FROM image_jobs j JOIN items i ON i.id=j.item_id "
             "WHERE j.pull_claimed=0 AND j.worker_id IS NOT NULL "
-            "AND j.state NOT IN ('completed','failed','unknown') ORDER BY j.id LIMIT 1"
+            "AND j.state NOT IN ('completed','failed','unknown') AND (j.owner_id IS NULL OR j.owner_id=?) ORDER BY j.id LIMIT 1", (owner_id,)
         ).fetchone()
     if not row:
         row = con.execute(
             "SELECT j.*,i.external_status FROM image_jobs j JOIN items i ON i.id=j.item_id "
-            "WHERE j.state='pending' ORDER BY j.id LIMIT 1"
+            "WHERE j.state='pending' AND (j.owner_id IS NULL OR j.owner_id=?) ORDER BY j.id LIMIT 1", (owner_id,)
         ).fetchone()
     if not row:
         return None
@@ -509,8 +510,10 @@ def claim_next(con) -> dict | None:
         con.execute("UPDATE image_jobs SET state=?,pull_claimed=1,worker_id=?,updated_at=? WHERE id=?",
                     ("queued" if row["state"] == "pending" else row["state"], worker_id, db.now(), row["id"]))
     media_ids = json.loads(row["media_ids"]) or [row["media_id"]]
+    if owner_id:
+        con.execute("UPDATE image_jobs SET owner_id=COALESCE(owner_id,?) WHERE id=?", (owner_id, row["id"]))
     prefix = os.environ.get("MODULE_PREFIX", "/folio").rstrip("/")
-    return {"id": row["id"], "worker_id": worker_id, "prompt": row["prompt"], "model": row["model"], "prompt_mode": row["prompt_mode"],
+    return {"action": "generate", "id": row["id"], "worker_id": worker_id, "prompt": row["prompt"], "model": row["model"], "prompt_mode": row["prompt_mode"],
             "width_cm": row["width_cm"], "height_cm": row["height_cm"],
             "image_urls": [f"{public_base}{prefix}/image-worker/input/{quote(row['input_token'], safe='')}/{index}"
                            for index in range(len(media_ids))]}

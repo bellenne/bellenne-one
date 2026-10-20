@@ -846,7 +846,10 @@ def settings_page(request: Request, section: str = "overview"):
             retailcrm_config=retailcrm_config,
             mattermost_config=mattermost_config,
             order_webhook_config=order_webhook.config(con),
-            order_webhook_actions=con.execute("SELECT a.*,i.posting FROM order_webhook_actions a JOIN instances n ON n.id=a.instance_id JOIN items i ON i.id=n.item_id ORDER BY a.created_at DESC LIMIT 50").fetchall(),
+            order_webhook_actions=[{**dict(row), "file_results": json.loads(row["placement_results"] or "{}")}
+                for row in con.execute("SELECT a.*,i.posting,j.placement_state,j.placement_results "
+                    "FROM order_webhook_actions a JOIN instances n ON n.id=a.instance_id JOIN items i ON i.id=n.item_id "
+                    "LEFT JOIN image_jobs j ON j.id=a.image_job_id ORDER BY a.created_at DESC LIMIT 50")],
             image_worker_config=image_worker_config,
             image_models=image_tasks.IMAGE_MODELS,
             image_prompt_mode=current_settings.get("image_prompt_mode", "direct"),
@@ -1005,7 +1008,7 @@ async def retry_order_webhook(event: str, request: Request):
     with db.transaction() as con:
         actor = security.user(request, con, admin=True)
         row = con.execute("SELECT * FROM order_webhook_actions WHERE id=?", (event,)).fetchone()
-        if not row or row["state"] != "failed":
+        if not row or (row["state"] != "failed" and not (row["state"] == "sent" and row["placement_error"])):
             raise scenarios.Invalid("Повтор доступен только для ошибочной доставки")
         if row["protocol"] != 2:
             raise scenarios.Invalid("Старый контракт: повтор запрещён, требуется сверка с MES")
@@ -1983,11 +1986,18 @@ async def image_worker_webhook(request: Request):
 
 @app.get("/image-worker/next")
 def image_worker_next(request: Request):
+    from . import placement
+    owner, session = request.headers.get("X-Folio-Worker-Id"), request.headers.get("X-Folio-Session-Id")
+    if owner or session:
+        try:
+            owner, session = placement.identity(owner), placement.identity(session)
+        except (ValueError, TypeError, AttributeError):
+            raise HTTPException(422, "Нужны UUID X-Folio-Worker-Id и X-Folio-Session-Id") from None
     with db.transaction() as con:
         try:
             image_tasks.authenticate_pull(con, request.headers.get("Authorization", ""))
             con.execute("UPDATE image_worker_integrations SET checked_at=?,error=NULL WHERE id=1", (db.now(),))
-            job = image_tasks.claim_next(con)
+            job = (placement.claim(con, owner, session) if owner else None) or image_tasks.claim_next(con, owner)
         except image_tasks.ImageTaskError as exc:
             status = 401 if exc.code == "image_worker_auth_failed" else 409 if exc.code == "image_worker_model_unsupported" else 503
             raise HTTPException(status, exc.code) from exc
@@ -1996,10 +2006,37 @@ def image_worker_next(request: Request):
 
 @app.post("/image-worker/jobs/{image_job_id}")
 async def image_worker_update(request: Request, image_job_id: int):
+    from . import placement
+    owner, session = request.headers.get("X-Folio-Worker-Id"), request.headers.get("X-Folio-Session-Id")
+    if owner or session:
+        try:
+            owner, session = placement.identity(owner), placement.identity(session)
+        except (ValueError, TypeError, AttributeError):
+            raise HTTPException(422, "Нужны UUID X-Folio-Worker-Id и X-Folio-Session-Id") from None
     # Authenticate before parsing multipart data or reading an uploaded file.
     with db.transaction() as con:
         try:
             image_tasks.authenticate_pull(con, request.headers.get("Authorization", ""))
+        except image_tasks.ImageTaskError:
+            raise HTTPException(401, "Недействительный ключ воркера") from None
+        row = con.execute("SELECT owner_id FROM image_jobs WHERE id=?", (image_job_id,)).fetchone()
+        if row and row["owner_id"] and owner != row["owner_id"]:
+            raise HTTPException(409, "Другой воркер-владелец")
+    if request.headers.get("content-type", "").split(";")[0] == "application/json":
+        raw = bytearray()
+        async for chunk in request.stream():
+            raw.extend(chunk)
+            if len(raw) > 65536:
+                raise HTTPException(413, "Отчёт превышает 64 KiB")
+        try:
+            payload = json.loads(raw)
+            if not isinstance(payload, dict) or payload.get("action") != "place_print_files":
+                raise ValueError("Неизвестное действие")
+            with db.transaction() as con:
+                image_tasks.authenticate_pull(con, request.headers.get("Authorization", ""))
+                return placement.report(con, image_job_id, owner, session, payload)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
         except image_tasks.ImageTaskError:
             raise HTTPException(401, "Недействительный ключ воркера") from None
     form = await request.form()

@@ -167,11 +167,16 @@ def tick(sender=send):
         job = con.execute("SELECT * FROM image_jobs WHERE id=?", (action["image_job_id"],)).fetchone()
     state, error, delay = "failed", None, (60, 120, 300, 900, 1800)[min(action["attempts"], 4)] if action["attempts"] < 5 else 3600
     code, error_code, external_id, pause = None, None, None, None
+    print_files, placement_error = None, None
     try:
         with db.transaction() as con:
             settings = config(con, secrets=True)
         if not settings.get("url"):
             raise ValueError("Настройте подключение вебхука в Folio")
+        from . import placement
+        with db.transaction() as con:
+            if not placement.approved(con, instance["id"], job):
+                raise ValueError("Выбранный макет не согласован покупателем")
         payload = action["payload"]
         if not payload:
             payload = db.dump(prepare(action, settings, item, job))
@@ -204,6 +209,8 @@ def tick(sender=send):
                                       (action["instance_id"],)).fetchone()
                 if current["external_status"] == "cancelled":
                     raise ValueError("Заказ отменён")
+                if not placement.approved(con, action["instance_id"], job):
+                    raise ValueError("Согласованная версия макета изменилась")
                 if config(con).get("paused_reason") or (not action["delivery_only"] and
                         (current["mode"] != "bot" or current["active_item"] != item["id"] or current["node"] != action["node_id"])):
                     con.execute("UPDATE order_webhook_actions SET state='pending',due_at=? WHERE id=?", (lease, action["id"]))
@@ -224,6 +231,15 @@ def tick(sender=send):
                 external_id = body.get("external_order_id")
                 if body.get("accepted") is True and isinstance(external_id, str) and external_id.strip() and len(external_id) <= 255:
                     state = "sent"
+                    from . import placement
+                    try:
+                        print_files = placement.validate_files(body.get("print_files"), json.loads(payload)["order"]["quantity"])
+                    except ValueError as exc:
+                        placement_error = str(exc)
+                    if action["external_order_id"] and action["external_order_id"] != external_id:
+                        external_id = action["external_order_id"]
+                        print_files = None
+                        placement_error = "MES изменила external_order_id; требуется ручная сверка"
                 else:
                     external_id = None
                     state, error = "pending", "MES вернула некорректное подтверждение; повтор с тем же ID"
@@ -243,7 +259,7 @@ def tick(sender=send):
                     except ValueError:
                         pass
     except (httpx.TransportError, OSError):
-        error = "Не удалось сохранить печатный файл в папке производства"
+        error = "Ошибка передачи данных в MES"
     except ValueError as exc:
         error = str(exc) if not isinstance(exc, json.JSONDecodeError) else "Некорректный JSON ответа Laravel"
     except Exception:
@@ -254,8 +270,18 @@ def tick(sender=send):
             raw = json.loads(con.execute("SELECT value FROM order_webhook_settings WHERE id=1").fetchone()[0])
             raw["paused_reason"] = pause
             con.execute("UPDATE order_webhook_settings SET value=? WHERE id=1", (db.dump(raw),))
-        con.execute("UPDATE order_webhook_actions SET state=?,error=?,due_at=?,http_code=?,external_order_id=?,error_code=? WHERE id=?",
+        con.execute("UPDATE order_webhook_actions SET state=?,error=?,due_at=?,http_code=?,external_order_id=COALESCE(?,external_order_id),error_code=? WHERE id=?",
                     (state, error, due, code, external_id, error_code, action["id"]))
+        if state == "sent":
+            from . import placement
+            if print_files is not None:
+                existing = con.execute("SELECT print_files FROM order_webhook_actions WHERE id=?", (action["id"],)).fetchone()[0]
+                if existing and json.loads(existing) != print_files:
+                    placement_error = "MES изменила print_files; требуется ручная сверка"
+                else:
+                    con.execute("UPDATE order_webhook_actions SET print_files=? WHERE id=?", (db.dump(print_files), action["id"]))
+                    placement_error = placement.schedule(con, action, print_files)
+            con.execute("UPDATE order_webhook_actions SET placement_error=? WHERE id=?", (placement_error, action["id"]))
         db.audit(con, "system", "order_webhook." + state, "order_webhook", action["id"], instance["chat_id"])
         if state in {"sent", "failed"} and not action["delivery_only"]:
             scenarios.advance(con, action["instance_id"])
