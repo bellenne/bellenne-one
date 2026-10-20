@@ -107,6 +107,24 @@ class OrderWebhookTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 order_webhook.https_url(url)
 
+    def test_worker_unc_jpg_is_saved_before_mes_metadata(self):
+        _, event = self.fixture()
+        source = db.DATA / "mount" / "portrait.jpg"
+        source.write_bytes(b"print-jpg")
+        with db.transaction() as con:
+            settings = self.webhook_settings()
+            settings["worker_root"] = r"\\worker-pc\Print"
+            order_webhook.save(con, settings)
+            con.execute("UPDATE image_jobs SET print_file=?", (r"\\worker-pc\Print\portrait.jpg",))
+        calls = []
+        def sender(url, token, payload, key):
+            self.assertEqual((db.DATA / "production" / event / "portrait.jpg").read_bytes(), b"print-jpg")
+            calls.append(json.loads(payload))
+            return httpx.Response(202, json={"accepted": True, "external_order_id": "MES-JPG"})
+        self.assertTrue(order_webhook.tick(sender))
+        self.assertEqual(calls[0]["print_file"]["filename"], "portrait.jpg")
+        self.assertEqual(set(calls[0]["print_file"]), {"id", "filename"})
+
     def test_http_auth_redirect_not_followed(self):
         def handler(request):
             self.assertEqual(request.headers["Idempotency-Key"], "event")

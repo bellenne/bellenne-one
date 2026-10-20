@@ -1978,25 +1978,7 @@ async def create_image_job(request: Request):
 
 @app.post("/image-worker/webhook")
 async def image_worker_webhook(request: Request):
-    chunks, size = [], 0
-    async for chunk in request.stream():
-        size += len(chunk)
-        if size > 16_384:
-            raise HTTPException(413, "Слишком большое уведомление")
-        chunks.append(chunk)
-    try:
-        matched = image_tasks.accept_webhook(
-            b"".join(chunks), request.headers.get("X-Folio-Signature", ""),
-            request.headers.get("X-Folio-Event", ""),
-            request.headers.get("X-Folio-Delivery-Id", ""),
-        )
-    except image_tasks.ImageTaskError:
-        raise HTTPException(401, "Недействительное уведомление воркера") from None
-    if not matched:
-        # The worker may complete before its 202 response is committed here.
-        # A retry is safer than acknowledging an orphaned result.
-        raise HTTPException(503, "Задание ещё не зарегистрировано")
-    return {"ok": True}
+    raise HTTPException(410, "Используйте POST /folio/image-worker/jobs/{id} с Bearer-ключом")
 
 
 @app.get("/image-worker/next")
@@ -2005,11 +1987,7 @@ def image_worker_next(request: Request):
         try:
             image_tasks.authenticate_pull(con, request.headers.get("Authorization", ""))
             con.execute("UPDATE image_worker_integrations SET checked_at=?,error=NULL WHERE id=1", (db.now(),))
-            job = image_tasks.claim_next(
-                con, supports_models=request.headers.get("X-Folio-Image-Models") == "1",
-                provider=request.headers.get("X-Folio-Image-Provider", ""),
-                supports_planner=request.headers.get("X-Folio-Prompt-Planner") == "1",
-            )
+            job = image_tasks.claim_next(con)
         except image_tasks.ImageTaskError as exc:
             status = 401 if exc.code == "image_worker_auth_failed" else 409 if exc.code == "image_worker_model_unsupported" else 503
             raise HTTPException(status, exc.code) from exc
@@ -2018,6 +1996,12 @@ def image_worker_next(request: Request):
 
 @app.post("/image-worker/jobs/{image_job_id}")
 async def image_worker_update(request: Request, image_job_id: int):
+    # Authenticate before parsing multipart data or reading an uploaded file.
+    with db.transaction() as con:
+        try:
+            image_tasks.authenticate_pull(con, request.headers.get("Authorization", ""))
+        except image_tasks.ImageTaskError:
+            raise HTTPException(401, "Недействительный ключ воркера") from None
     form = await request.form()
     upload = form.get("preview")
     preview_bytes = None
@@ -2068,17 +2052,7 @@ def image_worker_input_at(token: str, index: int):
 
 @app.post("/image-worker/vendor-callback/{token}")
 async def image_worker_vendor_callback(request: Request, token: str):
-    expected = image_tasks.vendor_token()
-    if len(expected) < 32 or not hmac.compare_digest(token, expected):
-        raise HTTPException(404, "Недоступно")
-    size = 0
-    async for chunk in request.stream():
-        size += len(chunk)
-        if size > 16_384:
-            raise HTTPException(413, "Слишком большое уведомление")
-    # Nano Banana requires a callback URL, while FolioImageWorker's polling
-    # remains the source of truth. Never change job state from this callback.
-    return Response(status_code=204)
+    raise HTTPException(410, "Callback провайдера больше не используется")
 
 
 @app.get("/image-jobs/{image_job_id}/preview")

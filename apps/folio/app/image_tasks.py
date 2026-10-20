@@ -39,8 +39,8 @@ DEFAULT_IMAGE_MODELS = {
 STATE_LABELS = {
     "pending": "В очереди", "submitting": "Передаётся воркеру",
     "unknown": "Результат задания не подтверждён", "queued": "Принято воркером",
-    "generating": "Генерация", "waiting_topaz": "Ожидание Topaz",
-    "composing": "Подготовка печатного файла", "webhook_pending": "Ожидание уведомления",
+    "generating": "Генерация", "waiting_topaz": "Обработка (старое задание)",
+    "composing": "Подготовка печатного JPG", "webhook_pending": "Ожидание результата (старое задание)",
     "completed": "Готово", "failed": "Ошибка",
 }
 ERROR_LABELS = {
@@ -116,9 +116,13 @@ def configuration(con=None):
 
 def configured(con=None) -> bool:
     try:
-        configuration(con)
-        return True
-    except ImageTaskError:
+        row = _stored(con)
+        if not row:
+            return False
+        # Pull uses one shared key, never the obsolete worker URL/webhook secret.
+        key = security.cipher().decrypt(row["api_key_secret"].encode()).decode()
+        return bool(key)
+    except Exception:
         return False
 
 
@@ -249,15 +253,13 @@ def enqueue(con, item_id: int, media_id: str | list[str], prompt: str,
 
 
 def _request(method: str, path: str, *, files=None, data=None, client=None):
+    # Retained only for legacy adapter fixtures/migrations. Never open a network
+    # connection to a worker PC; the running application uses the pull routes.
+    if client is None:
+        raise ImageTaskError("image_worker_push_retired")
     base, key, _, _ = configuration()
-    owned = client is None
-    client = client or httpx.Client(timeout=30, follow_redirects=False)
-    try:
-        return client.request(method, base + path, headers={"Authorization": f"Bearer {key}"},
-                              files=files, data=data)
-    finally:
-        if owned:
-            client.close()
+    return client.request(method, base + path, headers={"Authorization": f"Bearer {key}"},
+                          files=files, data=data)
 
 
 def _validate_job(payload, worker_id: str):
@@ -290,6 +292,8 @@ def _rejection_reason(response) -> str:
 
 
 def submit_one(*, client=None) -> bool:
+    if client is None:
+        return False
     if not configured():
         return False
     with db.transaction() as con:
@@ -379,6 +383,8 @@ def _next_poll() -> str:
 
 
 def poll_one(*, client=None) -> bool:
+    if client is None:
+        return False
     if not configured():
         return False
     with db.transaction() as con:
@@ -470,7 +476,7 @@ def authenticate_pull(con, authorization: str) -> None:
         raise ImageTaskError("image_worker_auth_failed")
 
 
-def claim_next(con, *, supports_models: bool = False, provider: str = "", supports_planner: bool = False) -> dict | None:
+def claim_next(con) -> dict | None:
     """Return the same claimed job until its terminal result is acknowledged."""
     row = con.execute(
         "SELECT j.*,i.external_status FROM image_jobs j JOIN items i ON i.id=j.item_id "
@@ -493,10 +499,8 @@ def claim_next(con, *, supports_models: bool = False, provider: str = "", suppor
         con.execute("UPDATE image_jobs SET state='failed',error=?,updated_at=? WHERE id=?",
                     ("image_worker_order_cancelled", db.now(), row["id"]))
         return None
-    if row["prompt_mode"] == "vision" and (not supports_planner or provider not in {"aitunnel", "mock"}):
-        raise ImageTaskError("image_worker_model_unsupported")
-    if row["model"] != LEGACY_IMAGE_MODEL and (not supports_models or provider not in {"aitunnel", "mock"}):
-        raise ImageTaskError("image_worker_model_unsupported")
+    # Model and prompt mode are part of the pull contract. Bearer authentication
+    # is sufficient; optional headers from older workers are not prerequisites.
     public_base = os.environ.get("FOLIO_PUBLIC_BASE_URL", "").rstrip("/")
     if urlsplit(public_base).scheme != "https":
         raise ImageTaskError("image_worker_url_invalid")
@@ -523,15 +527,19 @@ def receive_update(con, job_id: int, worker_id: str, state: str,
         if row["state"] != state:
             raise ImageTaskError("image_worker_result_conflict")
         return
-    ranks = {"queued": 0, "generating": 1, "waiting_topaz": 2, "composing": 3,
+    ranks = {"queued": 0, "generating": 1, "composing": 3,
              "completed": 4, "failed": 4, "unknown": 4}
     if state not in ranks:
         raise ImageTaskError("image_worker_response_invalid")
+    if state in {"failed", "unknown"} and not error.strip():
+        raise ImageTaskError("image_worker_result_incomplete")
     if ranks[state] < ranks.get(row["state"], 0):
         return
     preview_media_id = None
     if state == "completed":
         if not print_file.strip() or len(print_file) > 1000 or not preview_bytes:
+            raise ImageTaskError("image_worker_result_incomplete")
+        if Path(print_file).suffix.lower() not in {".jpg", ".jpeg"} or "\x00" in print_file:
             raise ImageTaskError("image_worker_result_incomplete")
         if len(preview_bytes) > 10 * 1024 * 1024:
             raise ImageTaskError("image_worker_preview_invalid")
@@ -539,6 +547,7 @@ def receive_update(con, job_id: int, worker_id: str, state: str,
             with Image.open(io.BytesIO(preview_bytes)) as image:
                 if image.format != "JPEG" or max(image.size) != 1000:
                     raise ImageTaskError("image_worker_preview_invalid")
+                image.load()
         except OSError as exc:
             raise ImageTaskError("image_worker_preview_invalid") from exc
         from . import media, scenarios

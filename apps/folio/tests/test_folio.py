@@ -4068,7 +4068,7 @@ class FolioIntegrationsTest(unittest.TestCase):
                 Image.new("RGB", (1000, 1000)).save(result, format="JPEG")
                 image_tasks.receive_update(
                     con, job["id"], "rework-worker", "completed",
-                    print_file="print-result", preview_bytes=result.getvalue(),
+                    print_file="print-result.jpg", preview_bytes=result.getvalue(),
                 )
                 preview_result = con.execute(
                     "SELECT preview_media_id FROM image_jobs WHERE id=?", (job["id"],)
@@ -4136,7 +4136,7 @@ class FolioIntegrationsTest(unittest.TestCase):
                 )
                 image_tasks.receive_update(
                     con, second_job, "second-worker", "completed",
-                    print_file="second-print", preview_bytes=result.getvalue(),
+                    print_file="second-print.jpg", preview_bytes=result.getvalue(),
                 )
                 con.execute("UPDATE items SET external_status='cancelled' WHERE id=?", (item_id,))
             self.assertTrue(worker.send_one(Adapter))
@@ -4670,11 +4670,11 @@ class FolioIntegrationsTest(unittest.TestCase):
             auth = {"Authorization": "Bearer MODEL_KEY"}
             self.assertEqual(self.client.post(mode_path, headers=self.admin,
                 data={**mode_data, "prompt_mode": "direct"}, follow_redirects=False).status_code, 303)
-            self.assertEqual(self.client.get("/image-worker/next", headers=auth).status_code, 409)
+            self.assertEqual(self.client.get("/image-worker/next", headers=auth).status_code, 200)
             self.assertEqual(self.client.get("/image-worker/next", headers={**auth,
-                "X-Folio-Image-Models": "1", "X-Folio-Image-Provider": "nanobanana"}).status_code, 409)
+                "X-Folio-Image-Models": "1", "X-Folio-Image-Provider": "nanobanana"}).status_code, 200)
             self.assertEqual(self.client.get("/image-worker/next", headers={**auth,
-                "X-Folio-Image-Models": "1", "X-Folio-Image-Provider": "aitunnel"}).status_code, 409)
+                "X-Folio-Image-Models": "1", "X-Folio-Image-Provider": "aitunnel"}).status_code, 200)
             pulled = self.client.get("/image-worker/next", headers={**auth,
                 "X-Folio-Image-Models": "1", "X-Folio-Image-Provider": "aitunnel", "X-Folio-Prompt-Planner": "1"})
             self.assertEqual(pulled.status_code, 200, pulled.text)
@@ -4749,8 +4749,10 @@ class FolioIntegrationsTest(unittest.TestCase):
             self.assertEqual(self.client.post(endpoint, headers=auth, data={"worker_id": pulled["worker_id"], "status": "generating"}).status_code, 200)
             preview = io.BytesIO()
             Image.new("RGB", (667, 1000), "blue").save(preview, format="JPEG")
-            data = {"worker_id": pulled["worker_id"], "status": "completed", "print_file": r"\\server\prints\file.tif"}
+            data = {"worker_id": pulled["worker_id"], "status": "completed", "print_file": r"\\server\prints\file.jpg"}
             files = {"preview": ("preview.jpg", preview.getvalue(), "image/jpeg")}
+            self.assertEqual(self.client.post(endpoint, headers=auth,
+                data={**data, "print_file": r"\\server\prints\file.tif"}, files=files).status_code, 422)
             accepted = self.client.post(endpoint, headers=auth, data=data, files=files)
             self.assertEqual(accepted.status_code, 200, accepted.text)
             self.assertEqual(self.client.post(endpoint, headers=auth, data=data, files=files).status_code, 200)
@@ -4765,6 +4767,69 @@ class FolioIntegrationsTest(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.content, preview.getvalue())
             self.assertEqual(self.client.get("/image-worker/next", headers=auth).status_code, 204)
+
+    def test_pull_contract_all_photo_counts_and_restart(self):
+        with patch("app.image_tasks.httpx.Client", side_effect=AssertionError("No outbound worker calls")):
+            self.assertFalse(image_tasks.submit_one())
+            self.assertFalse(image_tasks.poll_one())
+        instance_id, item_id, chat_id, _ = self.setup_instance()
+        with self.image_worker_settings({"FOLIO_IMAGE_WORKER_API_KEY": "PULL_KEY",
+                                         "FOLIO_IMAGE_WORKER_URL": "https://unused.example.com"}):
+            auth = {"Authorization": "Bearer PULL_KEY"}
+            for count in range(1, 9):
+                with self.subTest(count=count):
+                    with db.transaction() as con:
+                        mids = [self.image(con, chat_id, item_id) for _ in range(count)]
+                        con.execute("UPDATE instances SET fields=? WHERE id=?",
+                                    (db.dump({"photos": mids}), instance_id))
+                        job_id = image_tasks.enqueue(con, item_id, mids, "Фото", 40, 60, "1")
+                    job = self.client.get("/image-worker/next", headers=auth).json()
+                    self.assertEqual(job["id"], job_id)
+                    self.assertEqual(len(job["image_urls"]), count)
+                    db.initialize()
+                    self.assertEqual(self.client.get("/image-worker/next", headers=auth).json(), job)
+                    for index, url in enumerate(job["image_urls"]):
+                        self.assertTrue(url.startswith("https://"))
+                        self.assertTrue(url.endswith(f"/{index}"))
+                        with db.transaction() as con:
+                            stored = json.loads(con.execute(
+                                "SELECT media_ids FROM image_jobs WHERE id=?", (job_id,)).fetchone()[0])
+                        self.assertEqual(stored[index], mids[index])
+                    endpoint = f"/image-worker/jobs/{job_id}"
+                    self.assertEqual(self.client.post(endpoint, headers=auth, data={
+                        "worker_id": job["worker_id"], "status": "waiting_topaz"}).status_code, 422)
+                    response = self.client.post(endpoint, headers=auth, data={
+                        "worker_id": job["worker_id"], "status": "failed", "error": "Ошибка генерации"})
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertEqual(self.client.get("/image-worker/next", headers=auth).status_code, 204)
+
+    def test_pull_failed_resumes_scenario_error_branch(self):
+        instance_id, item_id, chat_id, _ = self.setup_instance()
+        with self.image_worker_settings({"FOLIO_IMAGE_WORKER_API_KEY": "FAIL_KEY",
+                                         "FOLIO_IMAGE_WORKER_URL": "https://unused.example.com"}):
+            with db.transaction() as con:
+                mid = self.image(con, chat_id, item_id)
+                graph = {"nodes": [
+                    {"id": "make", "kind": "image_worker", "prompt": "Фото",
+                     "next": "success", "error": "error"},
+                    {"id": "success", "kind": "end"},
+                    {"id": "error", "kind": "handoff"},
+                ]}
+                version = con.execute("SELECT version_id FROM instances WHERE id=?", (instance_id,)).fetchone()[0]
+                con.execute("UPDATE versions SET graph=? WHERE id=?", (db.dump(graph), version))
+                con.execute("UPDATE instances SET node='make',status='waiting_integration',fields=? WHERE id=?",
+                            (db.dump({"photos": [mid]}), instance_id))
+                image_tasks.enqueue(con, item_id, mid, "Фото", 40, 60, "1",
+                                    instance_id=instance_id, node_id="make")
+            auth = {"Authorization": "Bearer FAIL_KEY"}
+            job = self.client.get("/image-worker/next", headers=auth).json()
+            data = {"worker_id": job["worker_id"], "status": "failed", "error": "Ошибка"}
+            endpoint = f"/image-worker/jobs/{job['id']}"
+            for _ in range(2):
+                self.assertEqual(self.client.post(endpoint, headers=auth, data=data).status_code, 200)
+            with db.transaction() as con:
+                state = con.execute("SELECT node,status FROM instances WHERE id=?", (instance_id,)).fetchone()
+                self.assertEqual(tuple(state), ("error", "needs_manager"))
 
     def test_send_mockup_block_sends_worker_preview(self):
         instance_id, item_id, chat_id, _ = self.setup_instance()
@@ -4790,7 +4855,7 @@ class FolioIntegrationsTest(unittest.TestCase):
             preview = io.BytesIO()
             Image.new("RGB", (667, 1000), "blue").save(preview, format="JPEG")
             response = self.client.post(f"/image-worker/jobs/{pulled['id']}", headers=auth,
-                data={"worker_id": pulled["worker_id"], "status": "completed", "print_file": "local.tif"},
+                data={"worker_id": pulled["worker_id"], "status": "completed", "print_file": "local.jpg"},
                 files={"preview": ("preview.jpg", preview.getvalue(), "image/jpeg")})
             self.assertEqual(response.status_code, 200, response.text)
             with db.transaction() as con:
@@ -4879,9 +4944,9 @@ class FolioIntegrationsTest(unittest.TestCase):
             self.assertEqual(source.status_code, 200)
             self.assertEqual(source.headers["content-type"], "image/png")
             self.assertEqual(self.client.get("/image-worker/input/wrong").status_code, 404)
-            self.assertEqual(self.client.post("/image-worker/vendor-callback/wrong").status_code, 404)
+            self.assertEqual(self.client.post("/image-worker/vendor-callback/wrong").status_code, 410)
             self.assertEqual(self.client.post("/image-worker/vendor-callback/" + image_tasks.vendor_token(),
-                                              content=b'{}').status_code, 204)
+                                              content=b'{}').status_code, 410)
             def submit(request):
                 from urllib.parse import parse_qs
                 self.assertNotIn(b'name="image"', request.content)
