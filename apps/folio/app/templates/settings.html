@@ -15,21 +15,31 @@
 
 {% if section == 'order-webhook' %}
 <section class="card card-body folio-stack folio-section">
-  <h2>Передача заказов в приложение</h2>
-  <p>Добавьте в сценарий блок «Передать заказ вебхуком» после согласования. Передаётся картина, размер, количество и ссылка на печатный файл отправленного макета.</p>
+  <h2>Передача заказов в MES</h2>
+  <p>Блок «Передать заказ вебхуком» сохраняет печатный макет на сервер производства, затем отправляет только данные позиции. MES не скачивает файл. «Принято MES» не означает «напечатано».</p>
+  {% if order_webhook_config.paused_reason %}<p class="alert alert-warning">{{ order_webhook_config.paused_reason }} После сохранения повторите ошибочную передачу кнопкой ниже.</p>{% endif %}
   <form method="post" action="{{ prefix }}/settings/order-webhook" class="folio-stack">{{ token() }}
-    <label class="field">URL обработчика Laravel<input class="input" type="url" name="url" value="{{ order_webhook_config.url or '' }}" required></label>
-    <label class="field">Публичный адрес Folio с /folio<input class="input" type="url" name="public_url" value="{{ order_webhook_config.public_url or '' }}" placeholder="https://one.example.ru/folio" required></label>
-    <label class="field">Токен отправки в Laravel<input class="input" type="password" name="send_token" autocomplete="new-password" minlength="32"><span class="field-help">{{ 'Настроен. Пустое поле сохраняет текущий токен.' if order_webhook_config.send_token_set else 'Минимум 32 символа. Такой же токен настройте в Laravel.' }}</span></label>
-    <label class="field">Токен скачивания из Folio<input class="input" type="password" name="download_token" autocomplete="new-password" minlength="32"><span class="field-help">{{ 'Настроен. Пустое поле сохраняет текущий токен.' if order_webhook_config.download_token_set else 'Отдельный токен, минимум 32 символа. Передайте разработчику Laravel.' }}</span></label>
+    <label class="field">Адрес MES<input class="input" type="url" name="url" value="{{ order_webhook_config.url or '' }}" placeholder="https://mes.example.ru" required><span class="field-help">HTTPS-домен MES или полный адрес /api/v1/folio/orders.</span></label>
+    <label class="field">Bearer-токен MES — folio.send_token<input class="input" type="password" name="send_token" autocomplete="new-password" minlength="32"><span class="field-help">{{ 'Настроен. Пустое поле сохраняет текущий токен.' if order_webhook_config.send_token_set else 'Ключ folio.send_token из раздела MES «API Ключи», минимум 32 символа.' }}</span></label>
+    {% for account in accounts %}
+    <label class="field">ID магазина MES — {{ account.name }}<input class="input" type="number" min="1" step="1" name="shop_{{ account.id }}" value="{{ (order_webhook_config.shops or {}).get(account.id|string, '') }}"><span class="field-help">Введите положительный ID магазина из MES. Пустое поле запрещает передачу заказов этого кабинета.</span></label>
+    {% endfor %}
     <label class="field">Корень печатных файлов на воркере<input class="input" name="worker_root" value="{{ order_webhook_config.worker_root or '' }}" required><span class="field-help">Префикс пути print_file, например D:/Print. Вложенные папки сохраняются при сопоставлении.</span></label>
     <label class="field">Папка монтирования в Core<input class="input" name="mount_root" value="{{ order_webhook_config.mount_root or '' }}" required><span class="field-help">Абсолютный путь внутри контейнера Folio, например /mnt/folio-print. Монтируйте только папку печатных файлов, желательно read-only.</span></label>
+    <label class="field">Папка сервера производства<input class="input" name="production_root" value="{{ order_webhook_config.production_root or '' }}" required><span class="field-help">Существующая папка, примонтированная в Core с правом записи. Файл сохраняется в ней как UUID макета / исходное имя файла.</span></label>
     <button class="button button-primary">Сохранить подключение</button>
   </form>
-  <p class="field-help">До отправки создаётся защищённая копия файла в хранилище Folio. Срок автоматического удаления не задан. Laravel должен скачивать файл своей очередью.</p>
+  <p class="field-help">При ошибке сохранения вебхук не отправляется. Старые доставки с seller_account_id требуют ручной сверки и повторно не отправляются. После исправления настроек MES сохраните подключение и повторите ошибочную передачу. JSON уже созданного события не изменяется.</p>
 </section>
 <section class="card card-body folio-stack"><h2>Последние доставки</h2>
-{% for delivery in order_webhook_actions %}<article class="folio-account-card"><strong>{{ delivery.posting }}</strong><p>{{ {'pending':'Ожидает отправки / повтора','sending':'Отправляется','sent':'Принято приложением','failed':'Ошибка доставки'}.get(delivery.state, delivery.state) }} · попыток: {{ delivery.attempts }}</p>{% if delivery.error %}<p>{{ delivery.error }}</p>{% endif %}<details><summary>ID события</summary>{{ delivery.id }}</details>{% if delivery.state == 'failed' %}<form method="post" action="{{ prefix }}/settings/order-webhook/{{ delivery.id }}/retry">{{ token() }}<button class="button button-secondary">Повторить доставку с тем же ID</button></form>{% endif %}</article>{% else %}<p>Доставок пока нет.</p>{% endfor %}
+{% for delivery in order_webhook_actions %}<article class="folio-account-card"><strong>{{ delivery.posting }}</strong>
+<p>{% if delivery.protocol != 2 %}Старый контракт · требуется сверка{% elif delivery.state == 'sent' %}Принято MES{% elif delivery.state == 'failed' %}Ошибка{% elif delivery.attempts %}Повтор запланирован{% else %}Ожидает{% endif %} · попыток: {{ delivery.attempts }}</p>
+<p>Последняя попытка: {{ delivery.last_attempt_at|folio_time }} · HTTP: {{ delivery.http_code or '—' }} · ID заказа MES: {{ delivery.external_order_id or '—' }}</p>
+{% if delivery.state == 'pending' and delivery.attempts %}<p>Следующая попытка: {{ delivery.due_at|folio_time }}</p>{% endif %}
+{% if delivery.error %}<p>{{ delivery.error }}</p>{% endif %}<details><summary>ID события</summary>{{ delivery.id }}</details>
+{% if delivery.state == 'failed' and delivery.protocol == 2 %}<form method="post" action="{{ prefix }}/settings/order-webhook/{{ delivery.id }}/retry">{{ token() }}
+{% if delivery.http_code == 409 %}<label class="field"><input type="checkbox" name="reconciled" value="yes" required>Конфликт вручную сверен с MES; повторить то же событие</label>{% endif %}
+<button class="button button-secondary">Повторить доставку с тем же ID</button></form>{% endif %}</article>{% else %}<p>Доставок пока нет.</p>{% endfor %}
 </section>
 {% endif %}
 

@@ -153,6 +153,13 @@ def initialize():
         con.executescript(SCHEMA)
         con.execute("BEGIN IMMEDIATE")
         upgrades = {
+            "order_webhook_actions": {
+                "protocol": "INTEGER NOT NULL DEFAULT 1",
+                "last_attempt_at": "TEXT",
+                "http_code": "INTEGER",
+                "external_order_id": "TEXT",
+                "error_code": "TEXT",
+            },
             "items": {
                 "order_number": "TEXT NOT NULL DEFAULT ''",
                 "customer_name": "TEXT NOT NULL DEFAULT ''",
@@ -199,6 +206,9 @@ def initialize():
                     con.execute(
                         f"ALTER TABLE {table} ADD COLUMN {column} {declaration}"
                     )
+        con.execute("UPDATE order_webhook_actions SET state='failed',error_code='LEGACY',"
+                    "error='Старый контракт: требуется ручная сверка с MES; повтор запрещён' "
+                    "WHERE protocol=1 AND state IN ('pending','sending')")
         con.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS image_jobs_scenario_node "
             "ON image_jobs(instance_id,node_id) WHERE instance_id IS NOT NULL"

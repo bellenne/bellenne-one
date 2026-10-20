@@ -1,5 +1,7 @@
 import json
 import unittest
+from unittest.mock import patch
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -15,14 +17,16 @@ class OrderWebhookTest(unittest.TestCase):
     image = test_folio.FolioTest.image
 
     def webhook_settings(self):
-        return {"csrf": "csrf", "url": "https://laravel.example.com/api/folio",
-                "public_url": "https://folio.example.com/folio", "send_token": "s" * 32,
-                "download_token": "d" * 32, "worker_root": "D:/Print", "mount_root": str(db.DATA / "mount")}
+        return {"csrf": "csrf", "url": "https://mes.example.com",
+                "send_token": "s" * 32, "shop_1": "12",
+                "production_root": str(db.DATA / "production"),
+                "worker_root": "D:/Print", "mount_root": str(db.DATA / "mount")}
 
     def fixture(self):
         iid, item, chat, sid = self.setup_instance()
         root = db.DATA / "mount"
         root.mkdir()
+        (db.DATA / "production").mkdir()
         (root / "print.png").write_bytes(b"immutable-print")
         with db.transaction() as con:
             order_webhook.save(con, self.webhook_settings())
@@ -44,7 +48,7 @@ class OrderWebhookTest(unittest.TestCase):
         calls = []
         def sender(url, token, payload, key):
             calls.append((payload, key))
-            return httpx.Response(503 if len(calls) == 1 else 202, json={"accepted": True})
+            return httpx.Response(503 if len(calls) == 1 else 202, json={"accepted": True, "external_order_id": "MES-1"})
         order_webhook.tick(sender)
         with db.transaction() as con:
             row = con.execute("SELECT * FROM order_webhook_actions").fetchone()
@@ -54,12 +58,14 @@ class OrderWebhookTest(unittest.TestCase):
         order_webhook.tick(sender)
         self.assertEqual(calls[0], calls[1])
         payload = json.loads(calls[0][0])
-        self.assertEqual(payload["order"]["type"], "Картина")
+        self.assertNotIn("type", payload["order"])
+        self.assertNotIn("seller_account_id", payload["order"])
+        self.assertEqual(payload["order"]["shop_id"], 12)
+        self.assertEqual(set(payload["print_file"]), {"id", "filename"})
         self.assertEqual(payload["order"]["width_cm"], 40)
         self.assertNotIn("approval_outcome", payload["order"])
-        self.assertEqual(self.client.get(f"/integration-files/{event}").status_code, 401)
-        result = self.client.get(f"/integration-files/{event}", headers={"Authorization": "Bearer " + "d" * 32})
-        self.assertEqual(result.content, b"immutable-print")
+        self.assertEqual(self.client.get(f"/integration-files/{event}").status_code, 410)
+        self.assertEqual((db.DATA / "production" / event / "print.png").read_bytes(), b"immutable-print")
         with db.transaction() as con:
             self.assertEqual(con.execute("SELECT state FROM order_webhook_actions").fetchone()[0], "sent")
             self.assertEqual(con.execute("SELECT node FROM instances WHERE id=?", (iid,)).fetchone()[0], "end")
@@ -86,7 +92,7 @@ class OrderWebhookTest(unittest.TestCase):
         (db.DATA / "mount/print.png").write_bytes(b"fixed")
         response = self.client.post(f"/settings/order-webhook/{event}/retry", headers=self.admin, data={"csrf": "csrf"}, follow_redirects=False)
         self.assertEqual(response.status_code, 303)
-        order_webhook.tick(lambda *a: httpx.Response(202, json={"accepted": True}))
+        order_webhook.tick(lambda *a: httpx.Response(202, json={"accepted": True, "external_order_id": "MES-1"}))
         with db.transaction() as con:
             self.assertEqual(con.execute("SELECT state FROM order_webhook_actions").fetchone()[0], "sent")
 
@@ -105,6 +111,7 @@ class OrderWebhookTest(unittest.TestCase):
         def handler(request):
             self.assertEqual(request.headers["Idempotency-Key"], "event")
             self.assertEqual(request.headers["Authorization"], "Bearer secret")
+            self.assertEqual(request.headers["Accept"], "application/json")
             return httpx.Response(302, headers={"Location": "https://other.example"})
         result = order_webhook.send("https://laravel.example/hook", "secret", "{}", "event", transport=httpx.MockTransport(handler))
         self.assertEqual(result.status_code, 302)
@@ -142,7 +149,7 @@ class OrderWebhookTest(unittest.TestCase):
         def sender(url, token, body, key):
             self.assertEqual(body, snapshot)
             self.assertEqual(key, event)
-            return httpx.Response(200, json={"accepted": True, "duplicate": True})
+            return httpx.Response(200, json={"accepted": True, "duplicate": True, "external_order_id": "MES-1"})
         order_webhook.tick(sender)
         with db.transaction() as con:
             self.assertEqual(con.execute("SELECT state FROM order_webhook_actions").fetchone()[0], "sent")
@@ -160,3 +167,151 @@ class OrderWebhookTest(unittest.TestCase):
             con.execute("INSERT INTO outbox(chat_id,actor,body,dedup,epoch,state,created_at,kind,media_id) VALUES(?,'manager:1','','new-manual',0,'sent',?,'file',?)", (instance['chat_id'], db.now(), mid))
             row = order_webhook.enqueue(con, iid, 'hook')
             self.assertIsNone(row['image_job_id'])
+
+    def row(self):
+        with db.transaction() as con:
+            return con.execute("SELECT * FROM order_webhook_actions").fetchone()
+
+    def test_timeout_restart_and_backoff_are_durable(self):
+        _, event = self.fixture()
+        calls = []
+        def timeout(url, token, payload, key):
+            calls.append((payload, key))
+            raise httpx.ReadTimeout("timeout")
+        for attempt, minutes in enumerate((1, 2, 5, 15, 30, 60, 60), 1):
+            order_webhook.tick(timeout)
+            row = self.row()
+            self.assertEqual(row["state"], "pending")
+            self.assertEqual(row["attempts"], attempt)
+            delta = datetime.fromisoformat(row["due_at"]) - datetime.fromisoformat(row["last_attempt_at"])
+            self.assertAlmostEqual(delta.total_seconds(), minutes * 60, delta=3)
+            db.initialize()
+            with db.transaction() as con:
+                con.execute("UPDATE order_webhook_actions SET due_at='2000-01-01'")
+        self.assertTrue(all(call == calls[0] for call in calls))
+        order_webhook.tick(lambda *a: httpx.Response(200, json={"accepted": True, "duplicate": True, "external_order_id": "MES-42"}))
+        self.assertEqual(self.row()["external_order_id"], "MES-42")
+        self.assertEqual(self.row()["state"], "sent")
+
+    def test_response_matrix_and_no_html_success(self):
+        self.fixture()
+        for code, body, state in (
+            (400, {"message": "Ошибка данных"}, "failed"),
+            (422, {"message": "Магазин не существует"}, "failed"),
+            (409, {"message": "Позиция изменена"}, "failed"),
+            (502, {}, "pending"),
+            (503, {}, "pending"),
+            (200, {"accepted": False}, "pending"),
+            (202, {"accepted": True}, "pending"),
+            (200, {"accepted": True, "external_order_id": 123}, "pending"),
+        ):
+            with self.subTest(code=code, body=body):
+                with db.transaction() as con:
+                    con.execute("UPDATE order_webhook_actions SET state='pending',delivery_only=1,due_at='2000-01-01'")
+                order_webhook.tick(lambda *a: httpx.Response(code, json=body))
+                self.assertEqual(self.row()["state"], state)
+                self.assertEqual(self.row()["http_code"], code)
+        with db.transaction() as con:
+            con.execute("UPDATE order_webhook_actions SET due_at='2000-01-01'")
+        order_webhook.tick(lambda *a: httpx.Response(200, text="<html>OK</html>"))
+        self.assertEqual(self.row()["state"], "pending")
+        self.assertIsNone(self.row()["external_order_id"])
+
+    def test_auth_and_configuration_pause_until_settings_fixed(self):
+        self.fixture()
+        for code, body in ((401, {"message": "Неверный токен"}),
+                           (503, {"code": "CONFIGURATION_ERROR", "message": "Настройте MES"})):
+            with self.subTest(code=code):
+                with db.transaction() as con:
+                    con.execute("UPDATE order_webhook_actions SET state='pending',delivery_only=1,due_at='2000-01-01'")
+                order_webhook.tick(lambda *a: httpx.Response(code, json=body))
+                self.assertEqual(self.row()["state"], "failed")
+                self.assertFalse(order_webhook.tick(lambda *a: self.fail("Paused integration")))
+                with db.transaction() as con:
+                    self.assertTrue(order_webhook.config(con)["paused_reason"])
+                    order_webhook.save(con, self.webhook_settings())
+                    self.assertFalse(order_webhook.config(con).get("paused_reason"))
+
+    def test_conflict_requires_reconciliation_and_reuses_event(self):
+        iid, event = self.fixture()
+        order_webhook.tick(lambda *a: httpx.Response(409, json={"message": "Conflict"}))
+        snapshot = self.row()["payload"]
+        self.assertEqual(self.client.post(f"/settings/order-webhook/{event}/retry", headers=self.admin,
+                         data={"csrf": "csrf"}).status_code, 422)
+        self.assertEqual(self.client.post(f"/settings/order-webhook/{event}/retry", headers=self.admin,
+                         data={"csrf": "csrf", "reconciled": "yes"}, follow_redirects=False).status_code, 303)
+        self.assertEqual(self.row()["attempts"], 1)
+        with db.transaction() as con:
+            self.assertEqual(order_webhook.enqueue(con, iid, "another-node")["id"], event)
+        def sent(url, token, payload, key):
+            self.assertEqual(payload, snapshot)
+            self.assertEqual(key, event)
+            return httpx.Response(202, json={"accepted": True, "external_order_id": "X"})
+        order_webhook.tick(sent)
+        with db.transaction() as con:
+            self.assertEqual(order_webhook.enqueue(con, iid, "yet-another-node")["id"], event)
+
+    def test_legacy_events_are_never_replayed(self):
+        iid, event = self.fixture()
+        with db.transaction() as con:
+            con.execute("UPDATE order_webhook_actions SET protocol=1,payload=?",
+                        (db.dump({"order": {"seller_account_id": "1"}}),))
+        db.initialize()
+        self.assertEqual(self.row()["state"], "failed")
+        self.assertFalse(order_webhook.tick(lambda *a: self.fail("legacy")))
+        self.assertEqual(self.client.post(f"/settings/order-webhook/{event}/retry", headers=self.admin,
+                         data={"csrf": "csrf"}).status_code, 422)
+
+    def test_no_webhook_when_production_save_fails(self):
+        self.fixture()
+        with patch("app.order_webhook.os.fsync", side_effect=OSError("disk full")):
+            order_webhook.tick(lambda *a: self.fail("File not saved"))
+        self.assertEqual(self.row()["state"], "failed")
+        self.assertEqual(self.row()["attempts"], 0)
+        self.assertIsNone(self.row()["payload"])
+
+    def test_payload_limits_and_shop_validation(self):
+        self.fixture()
+        with db.transaction() as con:
+            action = con.execute("SELECT * FROM order_webhook_actions").fetchone()
+            instance = con.execute("SELECT * FROM instances").fetchone()
+            item = dict(con.execute("SELECT * FROM items WHERE id=?", (instance["item_id"],)).fetchone())
+            job = dict(con.execute("SELECT * FROM image_jobs").fetchone())
+            settings = order_webhook.config(con)
+        for key, value in (("offer_id", ""), ("posting", "a" * 256), ("quantity", 1.5), ("quantity", 0)):
+            with self.subTest(key=key):
+                with self.assertRaises(ValueError):
+                    order_webhook.prepare(action, settings, {**item, key: value}, job)
+        for value in (0, -1, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                order_webhook.prepare(action, settings, item, {**job, "width_cm": value})
+        with db.transaction() as con:
+            for value in ("-1", "0", "1.5", "abc"):
+                with self.assertRaises(ValueError):
+                    order_webhook.save(con, {**self.webhook_settings(), "shop_1": value})
+
+    def test_multiple_items_and_shops_keep_identity(self):
+        _, event = self.fixture()
+        with db.transaction() as con:
+            action = dict(con.execute("SELECT * FROM order_webhook_actions").fetchone())
+            instance = con.execute("SELECT * FROM instances").fetchone()
+            item = dict(con.execute("SELECT * FROM items WHERE id=?", (instance["item_id"],)).fetchone())
+            job = con.execute("SELECT * FROM image_jobs").fetchone()
+            settings = order_webhook.config(con)
+        import uuid
+        payloads = []
+        for item_id, account_id, shop in ((1, 1, 12), (2, 1, 12), (3, 2, 19)):
+            payloads.append(order_webhook.prepare(
+                {**action, "id": str(uuid.uuid4())},
+                {**settings, "shops": {"1": 12, "2": 19}},
+                {**item, "id": item_id, "account_id": account_id, "quantity": 2}, job))
+        self.assertEqual(payloads[0]["order"]["posting_number"], payloads[1]["order"]["posting_number"])
+        self.assertEqual([p["order"]["shop_id"] for p in payloads], [12, 12, 19])
+        self.assertEqual(len({p["order"]["item_id"] for p in payloads}), 3)
+        self.assertEqual(len({p["print_file"]["id"] for p in payloads}), 3)
+
+    def test_diagnostics_do_not_expose_token(self):
+        self.fixture()
+        token = "s" * 32
+        order_webhook.tick(lambda *a: httpx.Response(422, json={"message": "Invalid Bearer " + token}))
+        self.assertNotIn(token, self.row()["error"])

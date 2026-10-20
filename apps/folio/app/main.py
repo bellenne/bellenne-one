@@ -1007,31 +1007,21 @@ async def retry_order_webhook(event: str, request: Request):
         row = con.execute("SELECT * FROM order_webhook_actions WHERE id=?", (event,)).fetchone()
         if not row or row["state"] != "failed":
             raise scenarios.Invalid("Повтор доступен только для ошибочной доставки")
+        if row["protocol"] != 2:
+            raise scenarios.Invalid("Старый контракт: повтор запрещён, требуется сверка с MES")
+        if row["http_code"] == 409 and form.get("reconciled") != "yes":
+            raise scenarios.Invalid("Подтвердите ручную сверку конфликта с MES")
+        if order_webhook.config(con).get("paused_reason"):
+            raise scenarios.Invalid("Исправьте настройки MES и сохраните подключение перед повтором")
         # Delivery only. Never rewind a scenario that already followed its error branch.
-        con.execute("UPDATE order_webhook_actions SET state='pending',delivery_only=1,attempts=0,due_at=?,error=NULL WHERE id=?", (db.now(), event))
+        con.execute("UPDATE order_webhook_actions SET state='pending',delivery_only=1,due_at=?,error=NULL WHERE id=?", (db.now(), event))
         db.audit(con, actor["id"], "order_webhook.retry", "order_webhook", event)
     return redirect("/settings/order-webhook")
 
 
 @app.get("/integration-files/{event}")
 def integration_print_file(event: str, request: Request):
-    with db.transaction() as con:
-        settings = order_webhook.config(con, secrets=True)
-        expected = settings.get("download_token", "")
-        if not expected or not hmac.compare_digest(request.headers.get("authorization", "").encode(), ("Bearer " + expected).encode()):
-            raise HTTPException(401, "Требуется токен скачивания")
-        row = con.execute("SELECT payload FROM order_webhook_actions WHERE id=?", (event,)).fetchone()
-        if not row or not row[0]:
-            raise HTTPException(404, "Файл не найден")
-        metadata = json.loads(row[0])["print_file"]
-    try:
-        path = order_webhook.artifact_path(event)
-    except ValueError:
-        raise HTTPException(404, "Файл не найден") from None
-    if not path.is_file():
-        raise HTTPException(404, "Файл недоступен")
-    return FileResponse(path, media_type=metadata["mime_type"], filename=metadata["filename"],
-                        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
+    raise HTTPException(410, "Скачивание макетов через MES-интеграцию отключено")
 
 
 @app.post("/settings/image-worker")
