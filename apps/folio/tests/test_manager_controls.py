@@ -128,3 +128,55 @@ class ManagerControlsTest(unittest.TestCase):
         self.assertNotIn('href="/folio/settings', page.text)
         self.assertEqual(self.client.get(f"/image-jobs/{jobs[0]}/preview", headers=self.manager).status_code, 200)
         self.assertEqual(self.client.get(f"/image-jobs/{jobs[1]}/preview", headers=self.manager).status_code, 403)
+
+    def test_colloquial_approval_and_qualified_replies(self):
+        for version in (1, 2):
+            node = {"dictionary_version": version}
+            for text in ("Всё окей", "Все ок!", "Всё okay"):
+                self.assertEqual(scenarios.approval_decision(node, text), "accept")
+            for text in ("Всё окей?", "Всё окей, но замените фон", "Не всё окей"):
+                self.assertNotEqual(scenarios.approval_decision(node, text), "accept")
+        self.assertIsNone(scenarios.approval_decision({"accept": "Да"}, "Всё окей"))
+
+    def test_manual_mockup_approval_survives_stage_change(self):
+        from app import placement
+        instance, item, chat, _ = self.setup_approval()
+        with db.transaction() as con:
+            mid = self.image(con, chat, item)
+            job = con.execute(
+                "INSERT INTO image_jobs(item_id,media_id,preview_media_id,prompt,width_cm,height_cm,state,created_at,updated_at)"
+                " VALUES(?,?,?,'prompt',40,60,'completed',?,?)",
+                (item, mid, mid, db.now(), db.now())).lastrowid
+            con.execute("UPDATE outbox SET kind='file',media_id=? WHERE chat_id=?", (mid, chat))
+            scenarios.takeover(con, chat, "2")
+            con.execute("INSERT INTO order_webhook_actions(id,instance_id,node_id,image_job_id,state,error,due_at,created_at,protocol) "
+                        "VALUES('same-event',?,'end',?,'failed','Выбранный макет не согласован покупателем',?,?,2)",
+                        (instance, job, db.now(), db.now()))
+        endpoint = f"/chats/{chat}/approve_mockup"
+        self.assertEqual(self.client.post(endpoint, headers=self.manager, data={"job_id": job}).status_code, 403)
+        self.assertEqual(self.client.post(endpoint, headers=self.manager,
+            data={"csrf": "csrf", "job_id": job+1}).status_code, 422)
+        for _ in range(2):
+            self.assertEqual(self.client.post(endpoint, headers=self.manager,
+                data={"csrf": "csrf", "job_id": job}, follow_redirects=False).status_code, 303)
+        self.assertEqual(self.record(instance)["approved_image_job_id"], job)
+        self.assertIsNone(self.record(instance)["approval_due_at"])
+        page = self.client.get(f"/chats/{chat}", headers=self.manager)
+        self.assertIn("Заказ согласован", page.text)
+        with db.transaction() as con:
+            event = con.execute("SELECT * FROM order_webhook_actions WHERE id='same-event'").fetchone()
+            self.assertEqual(event["state"], "pending")
+        self.client.post(f"/chats/{chat}/resume", headers=self.manager,
+                         data={"csrf": "csrf", "node": "end"}, follow_redirects=False)
+        with db.transaction() as con:
+            row = con.execute("SELECT * FROM image_jobs WHERE id=?", (job,)).fetchone()
+            self.assertTrue(placement.approved(con, instance, row))
+            newer = self.image(con, chat, item)
+            con.execute("UPDATE outbox SET media_id=? WHERE chat_id=?", (newer, chat))
+            self.assertFalse(placement.approved(con, instance, row))
+        self.assertEqual(self.client.post(endpoint, headers=self.manager,
+            data={"csrf": "csrf", "job_id": job}).status_code, 422)
+        with db.transaction() as con:
+            con.execute("UPDATE items SET external_status='cancelled' WHERE id=?", (item,))
+        self.assertEqual(self.client.post(endpoint, headers=self.manager,
+            data={"csrf": "csrf", "job_id": job}).status_code, 422)

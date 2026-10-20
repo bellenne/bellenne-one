@@ -145,6 +145,10 @@ def approval_decision(node, text):
     # Punctuation normalization must not turn a question into consent.
     question = "?" in text or "？" in text
     phrase = approval_phrase(text)
+    # Normalize colloquial equivalents without accepting qualified/mixed replies.
+    # This recognition fix also applies to already published dictionary nodes.
+    if node.get("dictionary_version") is not None or node.get("use_dictionary"):
+        phrase = re.sub(r"\bвсе (?:окей|ок|ok|okay)\b", "окей", phrase)
     if phrase in approval_variants(node, "accept"):
         return None if question else "accept"
     reject = approval_variants(node, "reject")
@@ -1230,11 +1234,43 @@ def resume(con, chat_id, node_id, actor):
     con.execute("UPDATE chats SET mode='bot',epoch=epoch+1 WHERE id=?", (chat_id,))
     con.execute(
         "UPDATE instances SET node=?,status='collecting',prompted=0,confirmed_at=NULL,reviewed_at=NULL,ready_at=NULL,"
-        "approval_due_at=NULL,approval_remaining_seconds=NULL,approved_image_job_id=NULL WHERE id=?",
+        "approval_due_at=NULL,approval_remaining_seconds=NULL WHERE id=?",
         (node_id, instance["id"]),
     )
     db.audit(con, actor, "chat.resumed", "instance", instance["id"], chat_id)
     advance(con, instance["id"])
+
+
+def sent_mockup(con, chat_id, item_id):
+    return con.execute(
+        "SELECT j.id FROM outbox o JOIN media m ON m.id=o.media_id AND m.item_id=? "
+        "LEFT JOIN image_jobs j ON j.preview_media_id=m.id AND j.item_id=m.item_id AND j.state='completed' "
+        "WHERE o.chat_id=? AND o.kind='file' AND o.state='sent' ORDER BY o.id DESC LIMIT 1",
+        (item_id, chat_id),
+    ).fetchone()
+
+
+def manager_approve_mockup(con, chat_id, job_id, actor):
+    chat = con.execute("SELECT * FROM chats WHERE id=?", (chat_id,)).fetchone()
+    instance = con.execute("SELECT s.*,i.external_status FROM instances s JOIN items i ON i.id=s.item_id "
+                           "WHERE s.chat_id=? AND s.item_id=?", (chat_id, chat["active_item"])).fetchone()
+    if not instance or instance["external_status"] == "cancelled":
+        raise Invalid("Нельзя согласовать макет отменённого заказа")
+    latest = sent_mockup(con, chat_id, instance["item_id"])
+    if not latest or latest[0] != job_id:
+        raise Invalid("Макет изменился или ещё не отправлен. Обновите чат и проверьте актуальное превью")
+    fields = json.loads(instance["fields"])
+    fields["approval_outcome"] = "Макет подтверждён менеджером"
+    fields.pop("integration_error", None)
+    con.execute("UPDATE instances SET approved_image_job_id=?,fields=?,approval_due_at=NULL,"
+                "approval_remaining_seconds=NULL WHERE id=?", (job_id, db.dump(fields), instance["id"]))
+    # Recover only the local approval precondition failure, never an MES conflict
+    # or a rejected payload. Preserve the immutable event and any saved JSON.
+    con.execute("UPDATE order_webhook_actions SET state='pending',error=NULL,due_at=? "
+                "WHERE instance_id=? AND image_job_id=? AND state='failed' AND attempts=0 "
+                "AND error='Выбранный макет не согласован покупателем'",
+                (db.now(), instance["id"], job_id))
+    db.audit(con, actor, "approval.manager_confirmed", "image_job", job_id, chat_id)
 
 
 def approval_timer(con, instance_id, action, actor):
