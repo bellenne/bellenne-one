@@ -18,16 +18,10 @@ class OrderWebhookTest(unittest.TestCase):
 
     def webhook_settings(self):
         return {"csrf": "csrf", "url": "https://mes.example.com",
-                "send_token": "s" * 32, "shop_1": "12",
-                "production_root": str(db.DATA / "production"),
-                "worker_root": "D:/Print", "mount_root": str(db.DATA / "mount")}
+                "send_token": "s" * 32, "shop_1": "12"}
 
     def fixture(self):
         iid, item, chat, sid = self.setup_instance()
-        root = db.DATA / "mount"
-        root.mkdir()
-        (db.DATA / "production").mkdir()
-        (root / "print.png").write_bytes(b"immutable-print")
         with db.transaction() as con:
             order_webhook.save(con, self.webhook_settings())
             con.execute("UPDATE items SET order_number='123-1' WHERE id=?", (item,))
@@ -54,7 +48,8 @@ class OrderWebhookTest(unittest.TestCase):
             row = con.execute("SELECT * FROM order_webhook_actions").fetchone()
             self.assertEqual(row["state"], "pending")
             con.execute("UPDATE order_webhook_actions SET due_at='2000-01-01'")
-        (db.DATA / "mount/print.png").write_bytes(b"changed")
+        with db.transaction() as con:
+            con.execute("UPDATE image_jobs SET print_file='D:/Print/changed.jpg'")
         order_webhook.tick(sender)
         self.assertEqual(calls[0], calls[1])
         payload = json.loads(calls[0][0])
@@ -65,7 +60,8 @@ class OrderWebhookTest(unittest.TestCase):
         self.assertEqual(payload["order"]["width_cm"], 40)
         self.assertNotIn("approval_outcome", payload["order"])
         self.assertEqual(self.client.get(f"/integration-files/{event}").status_code, 410)
-        self.assertEqual((db.DATA / "production" / event / "print.png").read_bytes(), b"immutable-print")
+        self.assertEqual(payload["print_file"]["filename"], "print.png")
+        self.assertFalse((db.DATA / "production").exists())
         with db.transaction() as con:
             self.assertEqual(con.execute("SELECT state FROM order_webhook_actions").fetchone()[0], "sent")
             self.assertEqual(con.execute("SELECT node FROM instances WHERE id=?", (iid,)).fetchone()[0], "end")
@@ -78,6 +74,8 @@ class OrderWebhookTest(unittest.TestCase):
         self.assertEqual(page.status_code, 200)
         self.assertNotIn("s" * 32, page.text)
         self.assertNotIn("d" * 32, page.text)
+        for name in ("worker_root", "mount_root", "production_root"):
+            self.assertNotIn('name="' + name + '"', page.text)
         self.assertEqual(self.client.post("/settings/order-webhook", headers=self.manager, data=self.webhook_settings()).status_code, 403)
         self.assertEqual(self.client.get("/settings/order-webhook", headers=self.manager).status_code, 403)
         with db.transaction() as con:
@@ -85,11 +83,13 @@ class OrderWebhookTest(unittest.TestCase):
 
     def test_missing_file_and_manual_retry(self):
         iid, event = self.fixture()
-        (db.DATA / "mount/print.png").unlink()
+        with db.transaction() as con:
+            con.execute("UPDATE image_jobs SET print_file=NULL")
         order_webhook.tick(lambda *a: self.fail("No send without file"))
         with db.transaction() as con:
             self.assertEqual(con.execute("SELECT state FROM order_webhook_actions").fetchone()[0], "failed")
-        (db.DATA / "mount/print.png").write_bytes(b"fixed")
+        with db.transaction() as con:
+            con.execute("UPDATE image_jobs SET print_file='D:/Print/fixed.jpg'")
         response = self.client.post(f"/settings/order-webhook/{event}/retry", headers=self.admin, data={"csrf": "csrf"}, follow_redirects=False)
         self.assertEqual(response.status_code, 303)
         order_webhook.tick(lambda *a: httpx.Response(202, json={"accepted": True, "external_order_id": "MES-1"}))
@@ -97,28 +97,20 @@ class OrderWebhookTest(unittest.TestCase):
             self.assertEqual(con.execute("SELECT state FROM order_webhook_actions").fetchone()[0], "sent")
 
     def test_path_escape_and_url(self):
-        root = db.DATA / "mount"
-        root.mkdir()
-        (db.DATA / "secret.png").write_bytes(b"secret")
-        for name in ["D:/Print/../secret.png", "D:/Other/secret.png", "D:/Print/C:/secret.png"]:
+        for name in [None, "", "D:/Print/", "D:/Print/..", "D:/Print/a\x00.jpg"]:
             with self.assertRaises(ValueError):
-                order_webhook.mounted_file(self.webhook_settings(), name)
+                order_webhook.print_filename(name)
         for url in ["http://example.com", "https://127.0.0.1", "https://example.com/?token=secret"]:
             with self.assertRaises(ValueError):
                 order_webhook.https_url(url)
 
-    def test_worker_unc_jpg_is_saved_before_mes_metadata(self):
+    def test_worker_unc_jpg_metadata_without_core_file_access(self):
         _, event = self.fixture()
-        source = db.DATA / "mount" / "portrait.jpg"
-        source.write_bytes(b"print-jpg")
         with db.transaction() as con:
-            settings = self.webhook_settings()
-            settings["worker_root"] = r"\\worker-pc\Print"
-            order_webhook.save(con, settings)
             con.execute("UPDATE image_jobs SET print_file=?", (r"\\worker-pc\Print\portrait.jpg",))
         calls = []
         def sender(url, token, payload, key):
-            self.assertEqual((db.DATA / "production" / event / "portrait.jpg").read_bytes(), b"print-jpg")
+            self.assertFalse((db.DATA / "production").exists())
             calls.append(json.loads(payload))
             return httpx.Response(202, json={"accepted": True, "external_order_id": "MES-JPG"})
         self.assertTrue(order_webhook.tick(sender))
@@ -280,10 +272,11 @@ class OrderWebhookTest(unittest.TestCase):
         self.assertEqual(self.client.post(f"/settings/order-webhook/{event}/retry", headers=self.admin,
                          data={"csrf": "csrf"}).status_code, 422)
 
-    def test_no_webhook_when_production_save_fails(self):
+    def test_no_webhook_until_worker_completed(self):
         self.fixture()
-        with patch("app.order_webhook.os.fsync", side_effect=OSError("disk full")):
-            order_webhook.tick(lambda *a: self.fail("File not saved"))
+        with db.transaction() as con:
+            con.execute("UPDATE image_jobs SET state='failed'")
+        order_webhook.tick(lambda *a: self.fail("Worker has not completed"))
         self.assertEqual(self.row()["state"], "failed")
         self.assertEqual(self.row()["attempts"], 0)
         self.assertIsNone(self.row()["payload"])

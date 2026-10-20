@@ -1,14 +1,12 @@
-"""Durable, idempotent order delivery; mounted files never become public paths."""
+"""Durable metadata-only delivery to MES; print files stay on the worker."""
 import ipaddress
 import json
 import math
-import os
 import re
 import socket
-import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from urllib.parse import urlsplit
 
 import httpx
@@ -21,6 +19,8 @@ def config(con, *, secrets=False):
     value = json.loads(row[0]) if row else {}
     value.pop("download_token", None)
     value.pop("public_url", None)
+    for key in ("worker_root", "mount_root", "production_root"):
+        value.pop(key, None)
     for key in ("send_token",):
         encoded = value.pop(key, "")
         value[key + "_set"] = bool(encoded)
@@ -48,18 +48,13 @@ def https_url(value):
 
 def save(con, form):
     old = config(con, secrets=True)
-    value = {key: str(form.get(key) or "").strip() for key in
-             ("url", "worker_root", "mount_root", "production_root")}
+    value = {"url": str(form.get("url") or "").strip()}
     value["url"] = https_url(value["url"])
     parsed = urlsplit(value["url"])
     if parsed.path in ("", "/"):
         value["url"] += "/api/v1/folio/orders"
     elif parsed.path != "/api/v1/folio/orders":
         raise ValueError("Укажите адрес MES или полный путь /api/v1/folio/orders")
-    if not value["worker_root"] or not Path(value["mount_root"]).is_absolute():
-        raise ValueError("Укажите корень печатных файлов воркера и абсолютный путь монтирования в Core")
-    if not Path(value["production_root"]).is_absolute():
-        raise ValueError("Укажите абсолютный путь к примонтированной папке сервера производства")
     value["shops"] = {}
     for account in con.execute("SELECT id FROM accounts"):
         shop = str(form.get("shop_" + str(account["id"])) or "").strip()
@@ -76,22 +71,15 @@ def save(con, form):
                 (db.dump(value),))
 
 
-def mounted_file(settings, filename):
-    source = PurePosixPath(str(filename).replace("\\", "/"))
-    root = PurePosixPath(settings["worker_root"].replace("\\", "/"))
-    try:
-        relative = source.relative_to(root)
-    except ValueError:
-        raise ValueError("Печатный файл вне настроенного корня воркера") from None
-    if not relative.parts or any(p in {"..", "."} or ":" in p for p in relative.parts):
-        raise ValueError("Недопустимый путь печатного файла")
-    mount = Path(settings["mount_root"]).resolve()
-    path = (mount / Path(*relative.parts)).resolve()
-    if not path.is_relative_to(mount) or not path.is_file():
-        raise ValueError("Печатный файл не найден в примонтированной папке")
-    if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".pdf"}:
-        raise ValueError("Неподдерживаемый формат печатного файла")
-    return path
+def print_filename(value):
+    """Extract metadata, without accessing a Windows/UNC path from Core."""
+    path = str(value or "").replace("\\", "/")
+    if not path.strip() or path.endswith("/") or any(ord(c) < 32 for c in path):
+        raise ValueError("Воркер не сообщил имя сохранённого печатного файла")
+    name = PurePosixPath(path).name
+    if name in {"", ".", ".."} or ":" in name or len(name) > 255:
+        raise ValueError("Недопустимое имя печатного файла")
+    return name
 
 
 def enqueue(con, instance_id, node_id):
@@ -116,7 +104,7 @@ def enqueue(con, instance_id, node_id):
 
 
 def prepare(action, settings, item, job):
-    if not job:
+    if not job or job["state"] != "completed":
         raise ValueError("Нет отправленного макета с печатным файлом для этой позиции")
     if not item["order_number"] or not item["posting"] or item["quantity"] <= 0:
         raise ValueError("Не заполнены номер заказа, отправление или количество")
@@ -126,52 +114,20 @@ def prepare(action, settings, item, job):
     for number in (job["width_cm"], job["height_cm"]):
         if not isinstance(number, (int, float)) or not math.isfinite(number) or number <= 0:
             raise ValueError("Размеры макета должны быть положительными числами")
-    source = mounted_file(settings, job["print_file"])
+    filename = print_filename(job["print_file"])
     payload = {"version": 1, "order": {
         "source": "ozon", "shop_id": shop,
         "order_number": item["order_number"], "posting_number": item["posting"],
         "item_id": "folio-item-" + str(item["id"]), "offer_id": item["offer_id"],
         "width_cm": job["width_cm"], "height_cm": job["height_cm"], "quantity": item["quantity"],
-    }, "print_file": {"id": action["id"], "filename": source.name}}
-    for value in (*payload["order"].values(), source.name):
+    }, "print_file": {"id": action["id"], "filename": filename}}
+    for value in (*payload["order"].values(), filename):
         if isinstance(value, str) and (not value.strip() or len(value) > 255):
             raise ValueError("Строки заказа и имя файла должны содержать от 1 до 255 символов")
     if type(item["quantity"]) is not int or item["quantity"] <= 0:
         raise ValueError("Количество должно быть положительным целым числом")
     if len(db.dump(payload).encode("utf-8")) > 64 * 1024:
         raise ValueError("Тело вебхука превышает 64 KiB")
-    production = Path(settings.get("production_root", "")).resolve()
-    if not settings.get("production_root") or not production.is_dir():
-        raise ValueError("Папка сервера производства не подключена")
-    target = production / str(uuid.UUID(action["id"])) / source.name
-    target.parent.mkdir(exist_ok=True)
-    if not target.resolve().is_relative_to(production):
-        raise ValueError("Печатный файл вне папки производства")
-    # A crash after rename but before the DB commit must not overwrite the file.
-    if target.is_file() and target.stat().st_size:
-        return payload
-    fd, temp_name = tempfile.mkstemp(prefix=".folio-", dir=target.parent)
-    temporary = Path(temp_name)
-    size = 0
-    # Freeze bytes before sending; subsequent changes to the mount cannot change a delivery.
-    try:
-        with os.fdopen(fd, "wb") as dst, source.open("rb") as src:
-            for chunk in iter(lambda: src.read(1024 * 1024), b""):
-                size += len(chunk)
-                dst.write(chunk)
-            dst.flush()
-            os.fsync(dst.fileno())
-        if not size:
-            raise ValueError("Печатный файл пуст")
-        temporary.replace(target)
-    finally:
-        temporary.unlink(missing_ok=True)
-    if os.name != "nt":
-        fd = os.open(target.parent, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
     return payload
 
 
@@ -223,8 +179,7 @@ def tick(sender=send):
                 con.execute("UPDATE order_webhook_actions SET payload=?,destination=? WHERE id=?", (payload, settings["url"], action["id"]))
         if action["destination"] and action["destination"] != settings["url"]:
             raise ValueError("Адрес подключения изменился после первой попытки; восстановите адрес перед повтором")
-        # Serialize takeover/cancellation with the actual send, after potentially
-        # slow copying. Same transaction boundary as the chat outbox sender.
+        # Serialize takeover/cancellation with the actual metadata send.
         with db.transaction() as con:
             current = con.execute("SELECT c.mode,c.active_item,i.node,t.external_status FROM instances i "
                                   "JOIN chats c ON c.id=i.chat_id JOIN items t ON t.id=i.item_id WHERE i.id=?",
