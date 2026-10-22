@@ -56,3 +56,6 @@ def migrate(engine):
                 connection.execute(text("ALTER TABLE sync_policies ADD COLUMN browser_client_id VARCHAR(36)"))
             Base.metadata.create_all(connection)
             connection.execute(text("INSERT INTO schema_migrations(version) VALUES (3)"))
+        if not connection.scalar(text("SELECT version FROM schema_migrations WHERE version=4")):
+            Base.metadata.create_all(connection)
+            connection.execute(text("INSERT INTO schema_migrations(version) VALUES (4)"))

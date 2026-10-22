@@ -209,3 +209,19 @@ class BrowserTask(Base):
     token: Mapped[str] = mapped_column(String(64))
     state: Mapped[str] = mapped_column(default="pending")
     error_code: Mapped[str | None] = mapped_column(String(40))
+
+
+class IngestToken(Base):
+    __tablename__ = "price_ingest_tokens"
+    owner_id: Mapped[int] = mapped_column(primary_key=True)
+    digest: Mapped[str] = mapped_column(String(64), unique=True)
+
+
+class IngestEvent(Base):
+    __tablename__ = "price_ingest_events"
+    __table_args__ = (UniqueConstraint("owner_id", "event_id"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    owner_id: Mapped[int] = mapped_column(index=True)
+    event_id: Mapped[str] = mapped_column(String(36))
+    digest: Mapped[str] = mapped_column(String(64))
+    job_id: Mapped[int] = mapped_column(ForeignKey("sync_jobs.id"))

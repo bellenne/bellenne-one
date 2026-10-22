@@ -25,7 +25,9 @@ from .reporting import comparison_summary, excel_report
 from .security import account_view, cipher
 from .storefront import ERRORS as COLLECTION_ERRORS, CollectionError, product_url
 from .service import enqueue, ensure_owner, is_stale, log, manual_link, recalculate, summarize_errors, stop_job, unlink, write_lock
-from . import browser
+from . import browser, ingest
+from .models import IngestToken
+from pydantic import ValidationError
 
 ROOT = Path(__file__).parent
 STATUS_LABELS = {"matched": "Совпадают", "mismatch": "Расхождение", "missing_wb": "Нет товара WB", "missing_ozon": "Нет товара Ozon", "mapping_required": "Нужна связь", "price_unavailable": "Цены недоступны", "stale": "Данные устарели", "unavailable": "Недоступно", "not_configured": "Не настроено", "not_checked": "Не проверено", "connected": "Подключено", "failed": "Ошибка", "running": "В работе", "success": "Успешно", "partial": "Частично", "not_compared": "Не сравнивается", "pending": "Ожидает сбора", "not_collected": "Ещё не собрана", "cancelled": "Остановлено", "paused": "Пауза", "attention": "Нужно ваше действие"}
@@ -98,6 +100,38 @@ def create_app(settings=None):
     def db():
         with factory() as session:
             yield session
+
+    @app.get("/api/v1/products")
+    def external_products(request: Request, marketplace: Literal["wb", "ozon"] | None = None,
+                          after_id: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=500), session=Depends(db)):
+        owner = ingest.authenticate(session, request.headers.get("Authorization", ""))
+        query = select(Product).where(Product.owner_id == owner, Product.id > after_id, Product.present.is_(True))
+        if marketplace:
+            query = query.where(Product.marketplace == marketplace)
+        rows = list(session.scalars(query.order_by(Product.id).limit(limit + 1)))
+        return {"items": [{"id": p.id, "marketplace": p.marketplace, "sku": p.sku,
+                           "offer_id": p.seller_article, "name": p.name, "external_id": p.external_id}
+                          for p in rows[:limit]], "next_after_id": rows[limit-1].id if len(rows) > limit else None}
+
+    @app.post("/api/v1/prices")
+    async def external_prices(request: Request, session=Depends(db)):
+        # Authenticate before reading payload; never echo submitted tokens or raw validation input.
+        owner = ingest.authenticate(session, request.headers.get("Authorization", ""))
+        session.rollback()
+        raw = bytearray()
+        async for chunk in request.stream():
+            raw.extend(chunk)
+            if len(raw) > 65536:
+                raise HTTPException(413, "Payload exceeds 64 KiB")
+        try:
+            batch = ingest.Batch.model_validate_json(bytes(raw))
+        except (ValidationError, ValueError, ArithmeticError):
+            raise HTTPException(422, "Invalid price payload; check the API contract") from None
+        write_lock(session)
+        owner = ingest.authenticate(session, request.headers.get("Authorization", ""))
+        result = ingest.accept(session, owner, batch)
+        session.commit()
+        return result
 
     def identity(request: Request):
         try:
@@ -180,7 +214,36 @@ def create_app(settings=None):
         ensure_owner(session, owner)
         session.commit()
         active = session.get(ActiveJob, owner)
-        return render(request, session, "integrations", "Интеграции", accounts=[account_view(a) for a in session.scalars(select(Account).where(Account.owner_id == owner))], active_job=session.get(Job, active.job_id) if active else None, error_labels=ERRORS, saved=request.query_params.get("saved") == "1")
+        return render(request, session, "integrations", "Интеграции", accounts=[account_view(a) for a in session.scalars(select(Account).where(Account.owner_id == owner))], active_job=session.get(Job, active.job_id) if active else None, api_token_configured=session.get(IngestToken, owner) is not None, error_labels=ERRORS, saved=request.query_params.get("saved") == "1")
+
+    @app.post("/api-token")
+    def save_api_token(request: Request, csrf_token: str = Form(...), token: str = Form("", max_length=256), action: str = Form("save"), owner=Depends(identity), session=Depends(db)):
+        csrf(request, csrf_token)
+        write_lock(session)
+        ensure_owner(session, owner)
+        current = session.get(IngestToken, owner)
+        if action == "revoke":
+            if current:
+                session.delete(current)
+        elif action == "save":
+            if token:
+                if len(token) < 32 or not token.isascii() or any(c.isspace() for c in token):
+                    raise HTTPException(422, "Используйте случайный токен из 32–256 ASCII-символов без пробелов.")
+                hashed = ingest.digest(token)
+                existing = session.scalar(select(IngestToken).where(IngestToken.digest == hashed))
+                if existing and existing.owner_id != owner:
+                    raise HTTPException(422, "Выберите другой случайный токен.")
+                if current:
+                    current.digest = hashed
+                else:
+                    session.add(IngestToken(owner_id=owner, digest=hashed))
+            elif not current:
+                raise HTTPException(422, "Введите токен.")
+        else:
+            raise HTTPException(422, "Неизвестное действие.")
+        log(session, owner, "api_token_changed", action=action)
+        session.commit()
+        return redirect("/integrations?saved=1")
 
     @app.post("/integrations/{marketplace}")
     def save_integration(marketplace: str, request: Request, csrf_token: str = Form(...), client_id: str = Form("", max_length=80), api_key: str = Form("", max_length=8192), owner=Depends(identity), session=Depends(db)):
