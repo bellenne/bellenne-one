@@ -1,6 +1,12 @@
 {% extends 'base.html' %}{% from 'components.html' import badge,csrf,sync_form %}{% block content %}
 <div class="page-header"><div><h1 class="page-title">Интеграции</h1><p class="page-subtitle">Витринные цены для Москвы: WB Кошелёк и Ozon Карта.</p></div>{{ sync_form(module_prefix,platform_csrf_token,disabled=active_job is not none) }}</div>
 {% if saved %}<p class="notice" role="status">Настройки сохранены.</p>{% endif %}
+<section class="card panel stack"><h2 class="section-title">Импорт цен из JSON</h2>
+<p>Загрузите файл в формате API: version, event_id и prices. Токен не требуется — данные попадут в ваш кабинет.</p>
+<form method="post" action="{{ module_prefix }}/prices/import" enctype="multipart/form-data" class="stack">{{ csrf(platform_csrf_token) }}
+<label class="field" for="price-json"><span>JSON-файл с ценами</span><input class="input" id="price-json" type="file" name="file" accept=".json,application/json" required></label>
+<p class="field-help">До 64 KiB и 100 цен. Повтор файла с тем же event_id не создаёт дубли. Ошибка одной записи отменяет весь импорт. Сначала остановите активное задание. Импорт использует контекст внешнего приложения и выключает серверное расписание.</p>
+<div><button class="button button-secondary" {{ 'disabled' if active_job else '' }}>Импортировать JSON</button></div></form></section>
 <section class="card panel stack"><h2 class="section-title">API внешнего приложения</h2>
 <p>Один Bearer-токен для чтения вашего каталога и передачи цен. Браузерная сессия и расширение не нужны.</p>
 <p>{{ 'Токен настроен. Пустое поле сохраняет текущий токен.' if api_token_configured else 'Токен не настроен.' }}</p>

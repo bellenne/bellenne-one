@@ -11,6 +11,25 @@ class ExternalApiTests(unittest.TestCase):
     setUp = StorefrontJobsTests.setUp
     tearDown = StorefrontJobsTests.tearDown
 
+    def test_ui_json_import_without_token_and_shared_dedup(self):
+        import json
+        body = self.payload()
+        raw = ('\ufeff' + json.dumps(body)).encode('utf-8')
+        def upload(content=raw, csrf='csrf', headers=None):
+            return self.client.post('/prices/import', headers=headers or self.headers,
+                data={'csrf_token':csrf}, files={'file':('prices.json',content,'application/json')}, follow_redirects=False)
+        self.assertEqual(upload(csrf='wrong').status_code,403)
+        self.assertEqual(upload(b'not json').status_code,422)
+        self.assertEqual(upload(b'x'*65537).status_code,413)
+        result = upload()
+        self.assertEqual(result.status_code,303,result.text)
+        self.assertEqual(upload().headers['location'],result.headers['location'])
+        auth = self.configure()
+        self.assertTrue(self.client.post('/api/v1/prices',headers=auth,json=body).json()['duplicate'])
+        with self.factory() as session:
+            self.assertEqual(session.scalar(select(func.count()).select_from(Snapshot)),2)
+        self.assertIn('Импортировать JSON',self.client.get('/integrations',headers=self.headers).text)
+
     def configure(self, token='a'*48):
         response = self.client.post('/api-token', headers=self.headers,
             data={'csrf_token':'csrf', 'token':token}, follow_redirects=False)

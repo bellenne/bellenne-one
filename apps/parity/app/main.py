@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import unquote, urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -27,7 +27,6 @@ from .storefront import ERRORS as COLLECTION_ERRORS, CollectionError, product_ur
 from .service import enqueue, ensure_owner, is_stale, log, manual_link, recalculate, summarize_errors, stop_job, unlink, write_lock
 from . import browser, ingest
 from .models import IngestToken
-from pydantic import ValidationError
 
 ROOT = Path(__file__).parent
 STATUS_LABELS = {"matched": "Совпадают", "mismatch": "Расхождение", "missing_wb": "Нет товара WB", "missing_ozon": "Нет товара Ozon", "mapping_required": "Нужна связь", "price_unavailable": "Цены недоступны", "stale": "Данные устарели", "unavailable": "Недоступно", "not_configured": "Не настроено", "not_checked": "Не проверено", "connected": "Подключено", "failed": "Ошибка", "running": "В работе", "success": "Успешно", "partial": "Частично", "not_compared": "Не сравнивается", "pending": "Ожидает сбора", "not_collected": "Ещё не собрана", "cancelled": "Остановлено", "paused": "Пауза", "attention": "Нужно ваше действие"}
@@ -123,10 +122,7 @@ def create_app(settings=None):
             raw.extend(chunk)
             if len(raw) > 65536:
                 raise HTTPException(413, "Payload exceeds 64 KiB")
-        try:
-            batch = ingest.Batch.model_validate_json(bytes(raw))
-        except (ValidationError, ValueError, ArithmeticError):
-            raise HTTPException(422, "Invalid price payload; check the API contract") from None
+        batch = ingest.parse_batch(bytes(raw))
         write_lock(session)
         owner = ingest.authenticate(session, request.headers.get("Authorization", ""))
         result = ingest.accept(session, owner, batch)
@@ -244,6 +240,21 @@ def create_app(settings=None):
         log(session, owner, "api_token_changed", action=action)
         session.commit()
         return redirect("/integrations?saved=1")
+
+    @app.post("/prices/import")
+    async def import_prices(request: Request, csrf_token: str = Form(...), file: UploadFile = File(...), owner=Depends(identity), session=Depends(db)):
+        csrf(request, csrf_token)
+        try:
+            raw = await file.read(65537)
+        finally:
+            await file.close()
+        batch = ingest.parse_batch(raw)
+        write_lock(session)
+        ensure_owner(session, owner)
+        result = ingest.accept(session, owner, batch)
+        log(session, owner, "price_json_import", result["job_id"], duplicate=result["duplicate"])
+        session.commit()
+        return redirect(f"/jobs/{result['job_id']}")
 
     @app.post("/integrations/{marketplace}")
     def save_integration(marketplace: str, request: Request, csrf_token: str = Form(...), client_id: str = Form("", max_length=80), api_key: str = Form("", max_length=8192), owner=Depends(identity), session=Depends(db)):

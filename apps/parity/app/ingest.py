@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID
 from fastapi import HTTPException
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from sqlalchemy import select
 from typing import Literal
 from .domain import now
@@ -61,6 +61,15 @@ def authenticate(session, authorization):
     if not token:
         raise HTTPException(401, "Invalid Bearer token")
     return token.owner_id
+
+
+def parse_batch(raw):
+    if len(raw) > 65536:
+        raise HTTPException(413, "JSON превышает 64 KiB.")
+    try:
+        return Batch.model_validate_json(raw.decode("utf-8-sig"))
+    except (ValidationError, ValueError, ArithmeticError):
+        raise HTTPException(422, "Неверный JSON цен. Проверьте version, event_id и prices по контракту API; цены передаются строками, время — с часовым поясом.") from None
 
 
 def accept(session, owner, batch):
