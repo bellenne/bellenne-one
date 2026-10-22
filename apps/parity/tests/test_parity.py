@@ -86,6 +86,52 @@ class ParityTests(unittest.TestCase):
         with self.factory() as session:
             return session.scalar(select(Mapping).where(Mapping.wb_product_id.is_not(None), Mapping.ozon_product_id.is_not(None)))
 
+    def test_stop_queued_job_is_idempotent_and_owner_scoped(self):
+        with self.factory() as session:
+            job = enqueue(session, 1, kind="catalog")
+            session.commit()
+            job_id = job.id
+        endpoint = f"/jobs/{job_id}/stop"
+        self.assertIn("Остановить задание", self.client.get(f"/jobs/{job_id}", headers=self.headers).text)
+        self.assertEqual(self.client.post(endpoint, headers=self.headers, data={"csrf_token": "wrong"}).status_code, 403)
+        foreign = {**self.headers, "X-Bellenne-User-Id": "2"}
+        self.assertEqual(self.client.post(endpoint, headers=foreign, data={"csrf_token": "csrf"}).status_code, 404)
+        for _ in range(2):
+            self.assertEqual(self.client.post(endpoint, headers=self.headers, data={"csrf_token": "csrf"}, follow_redirects=False).status_code, 303)
+        self.assertIsNone(claim(self.factory, self.settings))
+        with self.factory() as session:
+            self.assertEqual(session.get(Job, job_id).status, "cancelled")
+            self.assertIsNone(session.get(ActiveJob, 1))
+        self.assertNotIn("Остановить задание", self.client.get(f"/jobs/{job_id}", headers=self.headers).text)
+
+    def test_stop_catalog_discards_late_result_without_account_failure(self):
+        from app.service import stop_job
+        from app.models import StagedProduct
+        with self.factory() as session:
+            job = enqueue(session, 1, "wb", kind="catalog")
+            session.commit()
+            job_id = job.id
+        claim(self.factory, self.settings)
+        outer = self
+        class StoppingAdapter:
+            def products(self, **kwargs):
+                yield product(100)
+                with outer.factory() as session:
+                    write_lock(session)
+                    stop_job(session, session.get(Job, job_id))
+                    session.commit()
+                yield product(101)
+            def close(self):
+                self.closed = True
+        adapter = StoppingAdapter()
+        run_job(self.factory, self.settings, job_id, lambda a: adapter)
+        with self.factory() as session:
+            self.assertEqual(session.get(Job, job_id).status, "cancelled")
+            self.assertEqual(session.scalar(select(func.count()).select_from(Product)), 0)
+            self.assertEqual(session.scalar(select(func.count()).select_from(StagedProduct)), 0)
+            self.assertIsNone(session.scalar(select(Account).where(Account.marketplace == "wb")).last_error)
+        self.assertTrue(adapter.closed)
+
     def test_exact_article_automatic_and_equal_prices(self):
         self.sync([product(1)], [product(2)])
         mapping = self.mapping()

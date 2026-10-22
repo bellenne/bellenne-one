@@ -1,5 +1,8 @@
 {% extends 'base.html' %}{% from 'components.html' import badge,csrf %}{% block content %}
 <div class="page-header"><div><h1 class="page-title">{{ 'Проверка карточки' if job.kind == 'probe' else 'Импорт каталога' if job.kind == 'catalog' else 'Сбор цен' }} #{{ job.id }}</h1><p class="page-subtitle">{{ job.marketplace or 'Wildberries + Ozon' }}</p></div><a class="button button-secondary" href="{{ module_prefix }}/integrations">К интеграциям</a></div>
+{% if not browser_run and not job.finished_at %}
+<section class="card panel"><form action="{{ module_prefix }}/jobs/{{ job.id }}/stop" method="post">{{ csrf(platform_csrf_token) }}<button class="button button-secondary">Остановить задание</button></form><p class="field-help">Уже сохранённые данные останутся. Текущий внешний запрос может завершиться, но его результат после остановки не будет применён.</p></section>
+{% endif %}
 {% if browser_run and not job.finished_at %}
 <section class="card panel" data-browser-job="{{ job.id }}">
 <h2 class="section-title">Сбор в вашем браузере</h2><p data-extension-status role="status">Ожидаем расширение. Если оно ещё не установлено, скачайте его в разделе «Интеграции» и обновите страницу.</p>

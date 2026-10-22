@@ -12,6 +12,7 @@
   }));
   const job = document.querySelector('[data-job-id]');
   const phases = {waiting_browser:'Ожидаем подключения расширения',running:'Сбор в вашем браузере',paused:'Сбор приостановлен',attention:'Ожидаем вашего действия в рабочей вкладке',storefront_wb:'Просмотр карточек Wildberries',storefront_ozon:'Просмотр карточек Ozon',catalog_wb:'Импорт каталога Wildberries',catalog_ozon:'Импорт каталога Ozon',queued:'Задание в очереди',starting:'Начало задания',sync_wb:'Получение товаров и цен Wildberries',sync_ozon:'Получение товаров и цен Ozon',probe_wb:'Проверка прав Wildberries',probe_ozon:'Проверка прав Ozon',comparing:'Сопоставление товаров и сравнение цен',complete:'Задание завершено',interrupted:'Задание прервано'};
+  phases.cancelled = 'Задание остановлено пользователем';
   if (job) job.querySelector('[data-job-phase]').textContent = phases[job.querySelector('[data-job-phase]').textContent] || 'Обработка задания';
   async function poll() {
     try {

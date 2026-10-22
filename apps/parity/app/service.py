@@ -53,6 +53,24 @@ def enqueue(session, owner, marketplace=None, kind="sync", trigger="manual", tar
     return job
 
 
+def stop_job(session, job):
+    """Called under write_lock; terminal results and prior snapshots are retained."""
+    if job.finished_at:
+        return
+    if job.kind == "browser":
+        from .browser import control
+        control(session, job, "stop")
+        return
+    job.status, job.phase, job.finished_at = "cancelled", "cancelled", now()
+    job.heartbeat_at = job.finished_at
+    session.execute(delete(StagedProduct).where(StagedProduct.job_id == job.id))
+    session.execute(delete(ActiveJob).where(ActiveJob.job_id == job.id))
+    for product in session.scalars(select(Product).where(Product.owner_id == job.owner_id, Product.collection_status == "pending")):
+        product.collection_status, product.collection_error = "failed", "cancelled"
+    recalculate(session, job.owner_id)
+    log(session, job.owner_id, "sync_finish", job.id, status="cancelled")
+
+
 def unlink(session, mapping):
     # Manual singletons suppress automatic relinking on subsequent syncs.
     if mapping.wb_product_id and mapping.ozon_product_id:
@@ -280,6 +298,8 @@ def claim(factory, settings):
 def run_job(factory, settings, job_id, adapter_factory=None, collector_factory=None):
     with factory() as session:
         pending = session.get(Job, job_id)
+        if pending.finished_at:
+            return
         policy = session.get(Policy, pending.owner_id)
         use_storefront = policy.price_source == "storefront" and pending.kind in ("sync", "probe")
         use_catalog = pending.kind == "catalog"
@@ -305,6 +325,9 @@ def run_job(factory, settings, job_id, adapter_factory=None, collector_factory=N
         try:
             heartbeat()
             with factory() as session:
+                write_lock(session)
+                if session.get(Job, job_id).finished_at:
+                    return
                 session.execute(update(Job).where(Job.id == job_id).values(phase=f"{kind}_{account.marketplace}"))
                 session.commit()
             if not account.secret:

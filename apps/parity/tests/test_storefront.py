@@ -101,6 +101,31 @@ class StorefrontJobsTests(unittest.TestCase):
             self.assertEqual(session.scalar(select(func.count()).select_from(CollectionAttempt)), 2)
             self.assertEqual(catalog(session, 1, status="mismatch")["total"], 1)
 
+    def test_stop_during_collection_preserves_previous_snapshots_and_ignores_late_result(self):
+        self.run_collection()
+        with self.factory() as session:
+            count = session.scalar(select(func.count()).select_from(Snapshot))
+            job = enqueue(session, 1)
+            session.commit()
+            job_id = job.id
+        claim(self.factory, self.settings)
+        parent = self
+        class StoppingCollector:
+            def collect(self, product):
+                response = parent.client.post(f"/jobs/{job_id}/stop", headers=parent.headers,
+                                              data={"csrf_token": "csrf"}, follow_redirects=False)
+                parent.assertEqual(response.status_code, 303)
+                return Observation(NormalizedPrice(Decimal('999'), Decimal('999'), Decimal('999'), 'RUB', {}, {}), 'https://example.com', {})
+            def close(self):
+                self.closed = True
+        collector = StoppingCollector()
+        run_job(self.factory, self.settings, job_id, collector_factory=lambda *args: collector)
+        with self.factory() as session:
+            self.assertEqual(session.get(Job, job_id).status, 'cancelled')
+            self.assertEqual(session.scalar(select(func.count()).select_from(Snapshot)), count)
+            self.assertEqual(session.scalar(select(func.count()).select_from(Product).where(Product.collection_status == 'pending')), 0)
+        self.assertTrue(collector.closed)
+
     def test_failed_page_keeps_history_but_disables_comparison(self):
         self.run_collection()
         self.run_collection(errors={"wb": "region"})

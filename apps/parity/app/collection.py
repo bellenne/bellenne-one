@@ -41,7 +41,10 @@ def finish(factory, job_id, results):
 
 def run_storefront_job(factory, settings, job_id, collector_factory=None):
     with factory() as session:
+        write_lock(session)
         job = session.get(Job, job_id)
+        if job.finished_at:
+            return
         owner = job.owner_id
         policy = session.get(Policy, owner)
         query = select(Product).where(Product.owner_id == owner, Product.present.is_(True)).order_by(Product.marketplace, Product.id)
@@ -66,6 +69,9 @@ def run_storefront_job(factory, settings, job_id, collector_factory=None):
             selected = [p for p in products if p.marketplace == market]
             successes, failures, blocked_code, attempted, last_code = 0, 0, None, 0, None
             with factory() as session:
+                write_lock(session)
+                if session.get(Job, job_id).finished_at:
+                    return
                 session.get(Job, job_id).phase = f"storefront_{market}"
                 session.commit()
             for product in selected:
@@ -123,6 +129,9 @@ def run_storefront_job(factory, settings, job_id, collector_factory=None):
             if not selected:
                 failures, blocked_code = 1, "no_products"
                 with factory() as session:
+                    write_lock(session)
+                    if session.get(Job, job_id).finished_at:
+                        return
                     session.get(Job, job_id).errors_count += 1
                     session.commit()
             results[market] = {"status": "success" if not failures else "partial" if successes else "failed",
@@ -142,22 +151,31 @@ def run_storefront_job(factory, settings, job_id, collector_factory=None):
 def run_catalog_job(factory, settings, job_id, adapter_factory=None):
     with factory() as session:
         job = session.get(Job, job_id)
+        if job.finished_at:
+            return
         accounts = list(session.scalars(select(Account).where(Account.owner_id == job.owner_id)))
         accounts = [a for a in accounts if not job.marketplace or a.marketplace == job.marketplace]
     results = {}
     for account in accounts:
         adapter = None
         try:
+            heartbeat(factory, job_id)
             if not account.secret:
                 raise ApiError("not_configured")
             adapter = adapter_factory(account) if adapter_factory else (WildberriesAdapter(settings, decrypt(settings, account.secret), heartbeat=lambda: heartbeat(factory, job_id))
                          if account.marketplace == "wb" else OzonAdapter(settings, account.client_id, decrypt(settings, account.secret), heartbeat=lambda: heartbeat(factory, job_id)))
             with factory() as session:
+                write_lock(session)
+                if session.get(Job, job_id).finished_at:
+                    return
                 session.get(Job, job_id).phase = f"catalog_{account.marketplace}"
                 session.commit()
             received = 0
             for product in adapter.products(include_prices=False):
                 with factory() as session:
+                    write_lock(session)
+                    if session.get(Job, job_id).finished_at:
+                        return
                     session.add(StagedProduct(job_id=job_id, account_id=account.id, external_id=product.external_id, payload=product.payload()))
                     session.commit()
                 received += 1
@@ -196,6 +214,9 @@ def run_catalog_job(factory, settings, job_id, adapter_factory=None):
         except Exception as exc:
             code = exc.code if isinstance(exc, ApiError) else "credential_unreadable" if isinstance(exc, ValueError) and str(exc) == "credential_unreadable" else "internal"
             with factory() as session:
+                write_lock(session)
+                if session.get(Job, job_id).finished_at:
+                    return
                 session.get(Job, job_id).errors_count += 1
                 current_account = session.get(Account, account.id)
                 current_account.status, current_account.last_error = "failed", API_ERRORS[code]

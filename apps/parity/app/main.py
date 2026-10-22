@@ -24,7 +24,7 @@ from .queries import catalog, history
 from .reporting import comparison_summary, excel_report
 from .security import account_view, cipher
 from .storefront import ERRORS as COLLECTION_ERRORS, CollectionError, product_url
-from .service import enqueue, ensure_owner, is_stale, log, manual_link, recalculate, summarize_errors, unlink, write_lock
+from .service import enqueue, ensure_owner, is_stale, log, manual_link, recalculate, summarize_errors, stop_job, unlink, write_lock
 from . import browser
 
 ROOT = Path(__file__).parent
@@ -286,6 +286,14 @@ def create_app(settings=None):
         return {**{key: getattr(job, key) for key in ("id", "status", "phase", "kind", "marketplace", "started_at", "finished_at", "products_received", "products_updated", "prices_updated", "errors_count", "results")},
                 "browser": browser.view(session, job) if job.kind == "browser" else None,
                 "error_summary": summarize_errors(job.results) or job.error_summary}
+
+    @app.post("/jobs/{job_id}/stop")
+    def stop_job_action(job_id: int, request: Request, csrf_token: str = Form(...), owner=Depends(identity), session=Depends(db)):
+        csrf(request, csrf_token)
+        write_lock(session)
+        stop_job(session, own_job(session, owner, job_id))
+        session.commit()
+        return redirect(f"/jobs/{job_id}")
 
     @app.get("/jobs/{job_id}", response_class=HTMLResponse)
     def job_page(job_id: int, request: Request, owner=Depends(identity), session=Depends(db)):
