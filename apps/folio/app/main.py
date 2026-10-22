@@ -443,6 +443,7 @@ def inbox(
             outgoing=outgoing,
             items=items,
             instance=instance,
+            reference_templates=con.execute("SELECT id,name,media_id FROM templates WHERE active=1 AND media_id IS NOT NULL ORDER BY name,id").fetchall() if chat else [],
             approvable_mockup=scenarios.sent_mockup(con, chat_id, chat["active_item"]) if chat and instance else None,
             media=media_rows,
             nodes=nodes,
@@ -474,6 +475,8 @@ async def chat_action(request: Request, chat_id: int, action: str):
             scenarios.takeover(con, chat_id, actor["id"])
         elif action == "approve_mockup":
             scenarios.manager_approve_mockup(con, chat_id, number(form, "job_id", 1, integer=True), actor["id"])
+        elif action in {"save_wishes", "save_photo"}:
+            scenarios.manager_brief(con, chat_id, action, form, actor["id"])
         elif action in {"rework_retry", "rework_close"}:
             job_id = number(form, "job_id", 1, integer=True)
             job = con.execute("SELECT * FROM image_jobs WHERE id=? AND chat_id=? AND item_id=? "
@@ -631,9 +634,17 @@ async def chat_action(request: Request, chat_id: int, action: str):
             if not selected:
                 # Older open forms retain the historical latest-preview default.
                 selected = next((source["id"] for source in sources if source["is_preview"]), "")
-            reference = str(form.get("background_media_id") or "")
-            if selected not in allowed or (reference and (reference not in allowed or reference == selected)):
-                raise scenarios.Invalid("Выберите исходник и, при необходимости, другой образец фона из вложений этого заказа")
+            if selected not in allowed:
+                raise scenarios.Invalid("Выберите исходник этого заказа")
+            reference = ""
+            template_id = str(form.get("reference_template_id") or "")
+            if form.get("background_media_id"):
+                raise scenarios.Invalid("Обновите чат и выберите образец из каталога шаблонов")
+            if template_id:
+                reference_row = con.execute("SELECT media_id FROM templates WHERE id=? AND active=1", (template_id,)).fetchone()
+                if not reference_row or not reference_row[0] or not (db.DATA / "media" / reference_row[0]).is_file():
+                    raise scenarios.Invalid("Образец каталога недоступен")
+                reference = media.store(con, (db.DATA / "media" / reference_row[0]).read_bytes(), db.config(con), chat_id, item["id"])
             fields = json.loads(instance["fields"])
             try:
                 prompt = scenarios.image_prompt(
@@ -716,6 +727,17 @@ async def chat_action(request: Request, chat_id: int, action: str):
         else:
             raise HTTPException(404)
     return redirect(f"/chats/{chat_id}" + ("#rework" if action == "rework" else ""))
+
+
+@app.get("/chats/{chat_id}/reference-templates/{template_id}")
+def reference_template_preview(request: Request, chat_id: int, template_id: int):
+    with db.transaction() as con:
+        actor = security.user(request, con)
+        security.chat_access(con, actor, chat_id)
+        row = con.execute("SELECT m.* FROM templates t JOIN media m ON m.id=t.media_id WHERE t.id=? AND t.active=1", (template_id,)).fetchone()
+        if not row or not (db.DATA / "media" / row["id"]).is_file():
+            raise HTTPException(404)
+        return FileResponse(db.DATA / "media" / row["id"], media_type=row["mime"])
 
 
 @app.get("/media/{media_id}")

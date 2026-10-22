@@ -138,10 +138,45 @@ class ManagerControlsTest(unittest.TestCase):
                 self.assertNotEqual(scenarios.approval_decision(node, text), "accept")
         self.assertIsNone(scenarios.approval_decision({"accept": "Да"}, "Всё окей"))
 
+    def test_manager_saves_brief_without_resuming_bot(self):
+        instance, item, chat, _ = self.setup_approval()
+        with db.transaction() as con:
+            scenarios.takeover(con, chat, "2")
+            photo = self.image(con, chat, item)
+        def save(action, **fields):
+            return self.client.post(f"/chats/{chat}/{action}", headers=self.manager,
+                data={"csrf": "csrf", "revision": self.record(instance)["revision"], **fields}, follow_redirects=False)
+        self.assertEqual(save("save_wishes", background="Оставить комнату", wishes="Согласовать").status_code, 303)
+        self.assertEqual(save("save_photo", media_id=photo).status_code, 303)
+        self.assertEqual(save("save_photo", media_id=photo).status_code, 303)
+        import json
+        fields = json.loads(self.record(instance)["fields"])
+        self.assertEqual(fields["background"], "Оставить комнату")
+        self.assertEqual(fields["wishes"], "Согласовать")
+        self.assertEqual(fields["photos"], [photo])
+        with db.transaction() as con:
+            self.assertEqual(con.execute("SELECT mode FROM chats WHERE id=?", (chat,)).fetchone()["mode"], "manual")
+        stale = self.client.post(f"/chats/{chat}/save_wishes", headers=self.manager,
+            data={"csrf": "csrf", "revision": -1, "background": "Потеря данных"})
+        self.assertEqual(stale.status_code, 422)
+        _, other_item, other_chat, _ = self.setup_instance(posting="FOREIGN", external_chat="FOREIGN")
+        with db.transaction() as con:
+            foreign = self.image(con, other_chat, other_item)
+        self.assertEqual(save("save_photo", media_id=foreign).status_code, 422)
+        self.assertEqual(self.client.post(f"/chats/{other_chat}/save_wishes", headers=self.manager,
+            data={"csrf": "csrf", "revision": 0}).status_code, 403)
+        with db.transaction() as con:
+            con.execute("UPDATE items SET external_status='cancelled' WHERE id=?", (item,))
+        self.assertEqual(save("save_wishes", background="Не менять").status_code, 422)
+
     def test_manual_mockup_approval_survives_stage_change(self):
         from app import placement
         instance, item, chat, _ = self.setup_approval()
         with db.transaction() as con:
+            graph = {"nodes": [{"id": "approve", "kind": "approval", "next": "thanks"},
+                               {"id": "thanks", "kind": "send", "text": "Спасибо за согласование!", "next": "end"},
+                               {"id": "end", "kind": "end"}]}
+            con.execute("UPDATE versions SET graph=? WHERE id=(SELECT version_id FROM instances WHERE id=?)", (db.dump(graph), instance))
             mid = self.image(con, chat, item)
             job = con.execute(
                 "INSERT INTO image_jobs(item_id,media_id,preview_media_id,prompt,width_cm,height_cm,state,created_at,updated_at)"
@@ -161,6 +196,9 @@ class ManagerControlsTest(unittest.TestCase):
                 data={"csrf": "csrf", "job_id": job}, follow_redirects=False).status_code, 303)
         self.assertEqual(self.record(instance)["approved_image_job_id"], job)
         self.assertIsNone(self.record(instance)["approval_due_at"])
+        with db.transaction() as con:
+            self.assertEqual(con.execute("SELECT COUNT(*) FROM outbox WHERE body='Спасибо за согласование!' AND chat_id=?", (chat,)).fetchone()[0], 1)
+            con.execute("UPDATE outbox SET state='sent' WHERE chat_id=?", (chat,))
         page = self.client.get(f"/chats/{chat}", headers=self.manager)
         self.assertIn("Заказ согласован", page.text)
         with db.transaction() as con:

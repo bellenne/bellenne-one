@@ -651,9 +651,9 @@ document.querySelectorAll("[data-chat-composer]").forEach((composer) => {
   const preview = composer.querySelector("[data-file-preview]");
   const filename = composer.querySelector("[data-file-name]");
   const hint = composer.querySelector(".folio-compose-hint");
-  const originalHint = hint.textContent;
-  const originalHintHidden = hint.hidden;
-  const enabled = composer.dataset.sendEnabled === "true";
+  let originalHint = hint.textContent;
+  let originalHintHidden = hint.hidden;
+  let enabled = composer.dataset.sendEnabled === "true";
   let submitting = false;
   function update() {
     const attached = file.files.length > 0;
@@ -696,6 +696,17 @@ document.querySelectorAll("[data-chat-composer]").forEach((composer) => {
     });
   });
   window.addEventListener("pageshow", () => { submitting = false; update(); });
+  composer.addEventListener('folio:refresh', (event) => {
+    const fresh = event.detail;
+    enabled = fresh.dataset.sendEnabled === 'true';
+    composer.dataset.sendEnabled = fresh.dataset.sendEnabled;
+    composer.dataset.fileHelp = fresh.dataset.fileHelp;
+    originalHint = fresh.querySelector('.folio-compose-hint').textContent;
+    originalHintHidden = fresh.querySelector('.folio-compose-hint').hidden;
+    text.disabled = !enabled;
+    composer.querySelector('[data-attach-photo]').disabled = !enabled;
+    update();
+  });
   update();
 });
 
@@ -710,11 +721,9 @@ document.querySelectorAll("[data-insert-correction]").forEach((button) => {
   });
 });
 
-document.querySelectorAll("[data-open-drawer]").forEach((button) => {
-  button.addEventListener("click", () => document.querySelector("[data-order-drawer]")?.showModal());
-});
-document.querySelectorAll("[data-close-drawer]").forEach((button) => {
-  button.addEventListener("click", () => button.closest("dialog").close());
+document.addEventListener("click", (event) => {
+  if (event.target.closest("[data-open-drawer]")) document.querySelector("[data-order-drawer]")?.showModal();
+  if (event.target.closest("[data-close-drawer]")) event.target.closest("dialog")?.close();
 });
 document.querySelectorAll("[data-order-drawer]").forEach((drawer) => {
   drawer.addEventListener("click", (event) => {
@@ -743,3 +752,70 @@ document.querySelectorAll('[data-media-choice]').forEach((select) => {
   select.addEventListener('change', update);
   update();
 });
+
+// Catalogue references have a chat-scoped, authenticated preview route.
+document.addEventListener('change', (event) => {
+  const select = event.target.closest('[data-template-choice], [data-media-choice]');
+  if (!select) return;
+  const link = select.closest('label').nextElementSibling;
+  link.hidden = !select.value;
+  if (select.value) link.href = select.dataset.previewBase
+    ? select.dataset.previewBase + encodeURIComponent(select.value)
+    : document.querySelector('.folio-rework-form').action.split('/chats/')[0] + '/media/' + encodeURIComponent(select.value);
+  else link.removeAttribute('href');
+});
+
+const liveChat = document.querySelector('[data-live-chat]');
+if (liveChat) {
+  let busy = false;
+  let stopped = false;
+  const dirtyForms = new WeakSet();
+  document.addEventListener('input', (event) => { if (event.target.form) dirtyForms.add(event.target.form); });
+  document.addEventListener('change', (event) => { if (event.target.form) dirtyForms.add(event.target.form); });
+  document.addEventListener('submit', () => { stopped = true; });
+  window.addEventListener('pageshow', () => { stopped = false; });
+  function refreshRegion(selector, fresh) {
+    const current = document.querySelector(selector);
+    const incoming = fresh.querySelector(selector);
+    if (!current || !incoming || current.innerHTML === incoming.innerHTML) return;
+    const bottom = current.scrollHeight - current.scrollTop - current.clientHeight < 48;
+    const scroll = current.scrollTop;
+    const focused = current.contains(document.activeElement) ? document.activeElement : null;
+    const selection = focused && typeof focused.selectionStart === 'number' ? [focused.selectionStart, focused.selectionEnd] : null;
+    const open = [...current.querySelectorAll('details')].map(d => d.open);
+    // Keep edited forms themselves: text, selected files, cursor and revision.
+    for (const form of current.querySelectorAll('form')) {
+      if (!dirtyForms.has(form) && !form.contains(document.activeElement)) continue;
+      const replacement = [...incoming.querySelectorAll('form')].find(f => f.getAttribute('action') === form.getAttribute('action'));
+      if (replacement) replacement.replaceWith(form);
+    }
+    current.replaceChildren(...incoming.childNodes);
+    if (focused?.isConnected) {
+      focused.focus({preventScroll:true});
+      if (selection) focused.setSelectionRange(...selection);
+    }
+    current.querySelectorAll('details').forEach((d, i) => { d.open = open[i] || false; });
+    current.scrollTop = selector === '[data-chat-messages]' && bottom ? current.scrollHeight : scroll;
+    if (selector === '[data-chat-messages]' && bottom) current.querySelectorAll('img').forEach(img => {
+      img.addEventListener('load', () => { current.scrollTop = current.scrollHeight; }, {once:true});
+    });
+  }
+  async function refreshChat() {
+    if (busy || stopped || document.hidden) return;
+    busy = true;
+    try {
+      const response = await fetch(location.pathname + location.search, {cache:'no-store', credentials:'same-origin', signal:AbortSignal.timeout(15000)});
+      if (!response.ok || response.redirected) return;
+      const fresh = new DOMParser().parseFromString(await response.text(), 'text/html');
+      if (fresh.querySelector('[data-live-chat]')?.dataset.liveChat !== liveChat.dataset.liveChat) return;
+      for (const selector of ['.folio-chat-list', '.folio-conversation-header', '[data-chat-messages]', '.folio-manager-tools', '[data-order-drawer]']) refreshRegion(selector, fresh);
+      const composer = document.querySelector('[data-chat-composer]');
+      const nextComposer = fresh.querySelector('[data-chat-composer]');
+      if (composer && nextComposer) composer.dispatchEvent(new CustomEvent('folio:refresh', {detail:nextComposer}));
+    } catch (_) {
+      // Keep the last successful snapshot and all drafts; retry on next tick.
+    } finally { busy = false; }
+  }
+  window.setInterval(refreshChat, 5000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshChat(); });
+}

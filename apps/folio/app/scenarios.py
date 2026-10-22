@@ -1259,6 +1259,18 @@ def manager_approve_mockup(con, chat_id, job_id, actor):
     latest = sent_mockup(con, chat_id, instance["item_id"])
     if not latest or latest[0] != job_id:
         raise Invalid("Макет изменился или ещё не отправлен. Обновите чат и проверьте актуальное превью")
+    if instance["approved_image_job_id"] == job_id:
+        return
+    graph = json.loads(con.execute("SELECT graph FROM versions WHERE id=?", (instance["version_id"],)).fetchone()[0])
+    approvals = {n["id"]: n for n in graph["nodes"] if n["kind"] == "approval"}
+    approval = approvals.get(instance["node"])
+    if not approval:
+        for outgoing in con.execute("SELECT dedup FROM outbox WHERE instance_id=? AND kind='text' ORDER BY id DESC", (instance["id"],)):
+            approval = next((n for nid, n in approvals.items() if outgoing[0].startswith(f"node:{instance['id']}:") and outgoing[0].endswith(":" + nid)), None)
+            if approval:
+                break
+    if not approval:
+        raise Invalid("Не найден этап согласования этого макета. Верните бота на нужный шаг согласования")
     fields = json.loads(instance["fields"])
     fields["approval_outcome"] = "Макет подтверждён менеджером"
     fields.pop("integration_error", None)
@@ -1271,6 +1283,37 @@ def manager_approve_mockup(con, chat_id, job_id, actor):
                 "AND error='Выбранный макет не согласован покупателем'",
                 (db.now(), instance["id"], job_id))
     db.audit(con, actor, "approval.manager_confirmed", "image_job", job_id, chat_id)
+    resume(con, chat_id, approval["next"], actor)
+
+
+def manager_brief(con, chat_id, action, form, actor):
+    instance = con.execute("SELECT s.*,i.external_status FROM instances s JOIN chats c ON c.id=s.chat_id "
+                           "JOIN items i ON i.id=s.item_id WHERE c.id=? AND c.active_item=s.item_id", (chat_id,)).fetchone()
+    if not instance or instance["external_status"] == "cancelled":
+        raise Invalid("Нет активного брифа или заказ отменён")
+    if str(form.get("revision")) != str(instance["revision"]):
+        raise Invalid("Данные заказа изменились. Обновите данные и повторите сохранение")
+    fields = json.loads(instance["fields"])
+    if action == "save_wishes":
+        for key in ("background", "wishes"):
+            value = str(form.get(key) or "").strip()
+            if len(value) > 4000:
+                raise Invalid("Пожелания должны быть не длиннее 4000 символов")
+            fields[key] = value
+    else:
+        mid = str(form.get("media_id") or "")
+        photo = con.execute("SELECT * FROM media WHERE id=? AND chat_id=? AND (item_id IS NULL OR item_id=?)", (mid, chat_id, instance["item_id"])).fetchone()
+        if not photo or photo["mime"] not in {"image/jpeg", "image/png", "image/webp"} or not (db.DATA / "media" / mid).is_file():
+            raise Invalid("Фото недоступно в этом заказе")
+        graph = json.loads(con.execute("SELECT graph FROM versions WHERE id=?", (instance["version_id"],)).fetchone()[0])
+        maximum = max((n.get("max", 1) for n in graph["nodes"] if n["kind"] in {"ask_photo", "ask_input"}), default=1)
+        photos = list(dict.fromkeys([*fields.get("photos", []), mid]))
+        if len(photos) > min(maximum, 8):
+            raise Invalid("Достигнут лимит фото этого сценария")
+        fields["photos"] = photos
+        con.execute("UPDATE media SET item_id=? WHERE id=?", (instance["item_id"], mid))
+    con.execute("UPDATE instances SET fields=?,revision=revision+1 WHERE id=?", (db.dump(fields), instance["id"]))
+    db.audit(con, actor, "brief.manager_saved", "instance", instance["id"], chat_id)
 
 
 def approval_timer(con, instance_id, action, actor):

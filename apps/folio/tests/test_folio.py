@@ -404,24 +404,35 @@ class FolioTest(unittest.TestCase):
                 con.execute("INSERT INTO assignments(chat_id,user_id) VALUES(?, '2')", (chat,))
                 source, reference = self.image(con, chat, item), self.image(con, chat, item)
                 foreign = self.image(con, other_chat, other_item)
+                template = con.execute("INSERT INTO templates(name,active,media_id) VALUES('Каталожный фон',1,?)", (reference,)).lastrowid
             page = self.client.get(f'/chats/{chat}', headers=self.manager)
             self.assertIn('Основа для доработки', page.text)
             self.assertIn(source, page.text)
             self.assertNotIn(foreign, page.text)
+            self.assertIn('Каталожный фон', page.text)
+            self.assertEqual(self.client.get(f'/chats/{chat}/reference-templates/{template}', headers=self.manager).status_code, 200)
+            self.assertEqual(self.client.get(f'/chats/{other_chat}/reference-templates/{template}', headers=self.manager).status_code, 403)
             request = {'csrf': 'csrf', 'dedup': 'f'*32, 'product_type': 'portrait_background',
                        'correction': 'Применить выбранный фон', 'source_media_id': source,
                        'background_media_id': foreign}
             rejected = self.client.post(f'/chats/{chat}/rework', headers=self.manager, data=request)
             self.assertEqual(rejected.status_code, 422)
-            request['background_media_id'] = reference
+            del request['background_media_id']
+            request['reference_template_id'] = template
             response = self.client.post(f'/chats/{chat}/rework', headers=self.manager, data=request, follow_redirects=False)
             self.assertEqual(response.status_code, 303, response.text)
             with db.transaction() as con:
                 job = con.execute("SELECT * FROM image_jobs WHERE node_id=?", ('rework:'+'f'*32,)).fetchone()
-                self.assertEqual(json.loads(job['media_ids']), [source, reference])
+                media_ids = json.loads(job['media_ids'])
+                self.assertEqual(media_ids[0], source)
+                self.assertNotEqual(media_ids[1], reference)
+                self.assertEqual(con.execute('SELECT item_id FROM media WHERE id=?', (media_ids[1],)).fetchone()['item_id'], item)
                 self.assertIn('Второе — только образец', job['prompt'])
             forbidden = self.client.post(f'/chats/{other_chat}/rework', headers=self.manager, data=request)
             self.assertEqual(forbidden.status_code, 403)
+            with db.transaction() as con:
+                con.execute('UPDATE templates SET active=0 WHERE id=?', (template,))
+            self.assertEqual(self.client.get(f'/chats/{chat}/reference-templates/{template}', headers=self.manager).status_code, 404)
 
     def test_mockup_approval_branches_and_retailcrm_note_in_dry_run(self):
         value = {"nodes": [
