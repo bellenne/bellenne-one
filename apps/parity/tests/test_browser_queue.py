@@ -52,6 +52,27 @@ class BrowserQueueTests(unittest.TestCase):
             self.assertEqual(s.scalar(select(Snapshot)).context['session'],'browser_profile')
         self.assertEqual(self.next(job).json()['state'],'finished')
 
+    def test_stop_from_integrations_without_extension(self):
+        for bound in (False, True):
+            job = self.start()
+            task = self.next(job).json()['task'] if bound else None
+            page = self.client.get('/integrations', headers=self.headers)
+            self.assertIn(f'Остановить задание #{job}', page.text)
+            response = self.client.post(f'/jobs/{job}/stop', headers=self.headers,
+                data={'csrf_token': 'csrf', 'return_to': 'integrations'}, follow_redirects=False)
+            self.assertEqual(response.status_code, 303)
+            self.assertEqual(response.headers['location'], '/parity/integrations')
+            with self.factory() as session:
+                self.assertEqual(session.get(Job, job).status, 'cancelled')
+                self.assertIsNone(session.get(ActiveJob, 1))
+            if task:
+                self.receipt(job, task)
+                with self.factory() as session:
+                    self.assertEqual(session.scalar(select(func.count()).select_from(Snapshot).where(Snapshot.job_id == job)), 0)
+                    self.assertEqual(session.get(Job, job).status, 'cancelled')
+            page = self.client.get('/integrations', headers=self.headers)
+            self.assertNotIn(f'Остановить задание #{job}', page.text)
+
     def test_popup_controls_require_owner_csrf_and_bound_profile(self):
         job = self.start()
         self.next(job)

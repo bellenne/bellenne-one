@@ -288,12 +288,12 @@ def create_app(settings=None):
                 "error_summary": summarize_errors(job.results) or job.error_summary}
 
     @app.post("/jobs/{job_id}/stop")
-    def stop_job_action(job_id: int, request: Request, csrf_token: str = Form(...), owner=Depends(identity), session=Depends(db)):
+    def stop_job_action(job_id: int, request: Request, csrf_token: str = Form(...), return_to: str = Form(""), owner=Depends(identity), session=Depends(db)):
         csrf(request, csrf_token)
         write_lock(session)
         stop_job(session, own_job(session, owner, job_id))
         session.commit()
-        return redirect(f"/jobs/{job_id}")
+        return redirect("/integrations" if return_to == "integrations" else f"/jobs/{job_id}")
 
     @app.get("/jobs/{job_id}", response_class=HTMLResponse)
     def job_page(job_id: int, request: Request, owner=Depends(identity), session=Depends(db)):
