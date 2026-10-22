@@ -14,13 +14,14 @@ class ExternalApiTests(unittest.TestCase):
     def test_ui_json_import_without_token_and_shared_dedup(self):
         import json
         body = self.payload()
-        raw = ('\ufeff' + json.dumps(body)).encode('utf-8')
+        raw = '\ufeff' + json.dumps(body)
         def upload(content=raw, csrf='csrf', headers=None):
             return self.client.post('/prices/import', headers=headers or self.headers,
-                data={'csrf_token':csrf}, files={'file':('prices.json',content,'application/json')}, follow_redirects=False)
+                data={'csrf_token':csrf, 'json_text':content}, follow_redirects=False)
         self.assertEqual(upload(csrf='wrong').status_code,403)
-        self.assertEqual(upload(b'not json').status_code,422)
-        self.assertEqual(upload(b'x'*65537).status_code,413)
+        self.assertEqual(upload('not json').status_code,422)
+        self.assertEqual(upload('я'*32769).status_code,413)
+        self.assertEqual(upload('x'*65537).status_code,422)
         result = upload()
         self.assertEqual(result.status_code,303,result.text)
         self.assertEqual(upload().headers['location'],result.headers['location'])

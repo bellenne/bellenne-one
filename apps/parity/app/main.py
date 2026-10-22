@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import unquote, urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -242,13 +242,9 @@ def create_app(settings=None):
         return redirect("/integrations?saved=1")
 
     @app.post("/prices/import")
-    async def import_prices(request: Request, csrf_token: str = Form(...), file: UploadFile = File(...), owner=Depends(identity), session=Depends(db)):
+    async def import_prices(request: Request, csrf_token: str = Form(...), json_text: str = Form(..., max_length=65536), owner=Depends(identity), session=Depends(db)):
         csrf(request, csrf_token)
-        try:
-            raw = await file.read(65537)
-        finally:
-            await file.close()
-        batch = ingest.parse_batch(raw)
+        batch = ingest.parse_batch(json_text.encode("utf-8"))
         write_lock(session)
         ensure_owner(session, owner)
         result = ingest.accept(session, owner, batch)
