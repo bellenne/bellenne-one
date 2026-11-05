@@ -47,6 +47,10 @@ FIELD_LABELS = {
     "wishes": "Дополнительные пожелания",
     "template_id": "Выбранный шаблон",
 }
+# instances.manager_forced: 0 — обычный ход сценария; 1 — шаг выбран менеджером,
+# автоматические проверки его не задерживают; 2 — то же, и ещё разрешено один раз
+# повторить ранее упавшую передачу в MES.
+MANAGER_ARMED = 2
 WAITING = {"ask_text", "ask_photo", "ask_input", "choice", "wait", "confirm", "await_mockup", "approval"}
 TEXT_KINDS = (WAITING - {"await_mockup"}) | {"send"}
 RETAILCRM_VARIABLES = {
@@ -782,10 +786,15 @@ def advance(con, instance_id, reply=None, *, simulate_external=False):
     revision = instance["revision"] + 1
     confirmed = instance["confirmed_at"]
     status = "collecting"
+    manager_forced = instance["manager_forced"]
     for _ in range(len(index) + 1):
         node = index[node_id]
         kind = node["kind"]
         answer_target = None
+        if kind in WAITING and manager_forced:
+            # Reaching a buyer question ends the run the manager asked for.
+            manager_forced = 0
+            con.execute("UPDATE instances SET manager_forced=0 WHERE id=?", (instance_id,))
         if kind in TEXT_KINDS and not prompted:
             labels = {
                 "photos": "Фото",
@@ -948,7 +957,8 @@ def advance(con, instance_id, reply=None, *, simulate_external=False):
                     valid = False
                 if valid:
                     if fields["approval_outcome"] != "Макет подтверждён покупателем":
-                        con.execute("UPDATE instances SET approved_image_job_id=NULL WHERE id=?", (instance_id,))
+                        con.execute("UPDATE instances SET approved_image_job_id=NULL,mockup_approved_at=NULL,"
+                                    "mockup_approved_by=NULL,mockup_approved_media=NULL WHERE id=?", (instance_id,))
                     con.execute("UPDATE instances SET approval_due_at=NULL WHERE id=?", (instance_id,))
                     if not simulate_external:
                         con.execute("UPDATE instances SET approval_remaining_seconds=NULL WHERE id=?", (instance_id,))
@@ -1173,8 +1183,9 @@ def advance(con, instance_id, reply=None, *, simulate_external=False):
             )
             status = (
                 "needs_review"
-                if (confirmed or not confirmation_required)
-                and complete(con, instance, graph, fields)
+                if manager_forced
+                or ((confirmed or not confirmation_required)
+                    and complete(con, instance, graph, fields))
                 else "needs_manager"
             )
             break
@@ -1207,11 +1218,6 @@ def takeover(con, chat_id, actor):
 
 
 def resume(con, chat_id, node_id, actor):
-    if con.execute(
-        "SELECT 1 FROM outbox WHERE chat_id=? AND state IN ('unknown','pending')",
-        (chat_id,),
-    ).fetchone():
-        raise Invalid("Сначала завершите или сверьте исходящие сообщения")
     chat = con.execute("SELECT * FROM chats WHERE id=?", (chat_id,)).fetchone()
     instance = con.execute(
         "SELECT * FROM instances WHERE chat_id=? AND item_id=?",
@@ -1229,13 +1235,23 @@ def resume(con, chat_id, node_id, actor):
             "SELECT graph FROM versions WHERE id=?", (instance["version_id"],)
         ).fetchone()[0]
     )
-    if node_id not in {n["id"] for n in graph["nodes"]}:
+    target = next((n for n in graph["nodes"] if n["id"] == node_id), None)
+    if not target:
         raise Invalid("Выберите существующий шаг зафиксированной версии")
+    # An unconfirmed buyer message cannot be duplicated by a step that writes to
+    # nobody, so it must not hold the order back. A pending one would be cancelled
+    # by the epoch change below: it is confirmed or failed within a send cycle.
+    blocking = ("pending",) if target["kind"] in {"order_webhook", "ready"} else ("pending", "unknown")
+    if con.execute(
+        f"SELECT 1 FROM outbox WHERE chat_id=? AND state IN ({','.join('?' * len(blocking))})",
+        (chat_id, *blocking),
+    ).fetchone():
+        raise Invalid("Сначала завершите или сверьте исходящие сообщения")
     con.execute("UPDATE chats SET mode='bot',epoch=epoch+1 WHERE id=?", (chat_id,))
     con.execute(
         "UPDATE instances SET node=?,status='collecting',prompted=0,confirmed_at=NULL,reviewed_at=NULL,ready_at=NULL,"
-        "approval_due_at=NULL,approval_remaining_seconds=NULL WHERE id=?",
-        (node_id, instance["id"]),
+        "approval_due_at=NULL,approval_remaining_seconds=NULL,manager_forced=? WHERE id=?",
+        (node_id, MANAGER_ARMED, instance["id"]),
     )
     db.audit(con, actor, "chat.resumed", "instance", instance["id"], chat_id)
     advance(con, instance["id"])
@@ -1243,11 +1259,58 @@ def resume(con, chat_id, node_id, actor):
 
 def sent_mockup(con, chat_id, item_id):
     return con.execute(
-        "SELECT j.id FROM outbox o JOIN media m ON m.id=o.media_id AND m.item_id=? "
+        "SELECT j.id,m.id AS media_id FROM outbox o JOIN media m ON m.id=o.media_id AND m.item_id=? "
         "LEFT JOIN image_jobs j ON j.preview_media_id=m.id AND j.item_id=m.item_id AND j.state='completed' "
         "WHERE o.chat_id=? AND o.kind='file' AND o.state='sent' ORDER BY o.id DESC LIMIT 1",
         (item_id, chat_id),
     ).fetchone()
+
+
+def manager_approved(con, instance):
+    """The manager's mark applies only to the preview it was set on."""
+    if not instance["mockup_approved_at"]:
+        return False
+    latest = sent_mockup(con, instance["chat_id"], instance["item_id"])
+    return instance["mockup_approved_media"] == (latest["media_id"] if latest else None)
+
+
+def mockup_approved(con, instance):
+    latest = sent_mockup(con, instance["chat_id"], instance["item_id"])
+    return manager_approved(con, instance) or bool(
+        latest and latest["id"] and instance["approved_image_job_id"] == latest["id"])
+
+
+def set_mockup_approval(con, chat_id, approved, actor):
+    """The «Макет согласован» checkbox. Never writes to the buyer in manual mode."""
+    chat = con.execute("SELECT * FROM chats WHERE id=?", (chat_id,)).fetchone()
+    instance = con.execute("SELECT s.*,i.external_status FROM instances s JOIN items i ON i.id=s.item_id "
+                           "WHERE s.chat_id=? AND s.item_id=?", (chat_id, chat["active_item"])).fetchone()
+    if not instance or instance["external_status"] == "cancelled":
+        raise Invalid("Нельзя менять согласование: нет активного заказа или он отменён")
+    fields = json.loads(instance["fields"])
+    if not approved:
+        fields.pop("approval_outcome", None)
+        con.execute("UPDATE instances SET approved_image_job_id=NULL,mockup_approved_at=NULL,mockup_approved_by=NULL,"
+                    "mockup_approved_media=NULL,fields=? WHERE id=?", (db.dump(fields), instance["id"]))
+        db.audit(con, actor, "approval.manager_unchecked", "instance", instance["id"], chat_id)
+        return
+    latest = sent_mockup(con, chat_id, instance["item_id"])
+    fields["approval_outcome"] = "Макет подтверждён менеджером"
+    fields.pop("integration_error", None)
+    con.execute("UPDATE instances SET approved_image_job_id=?,mockup_approved_at=?,mockup_approved_by=?,"
+                "mockup_approved_media=?,fields=?,approval_due_at=NULL,approval_remaining_seconds=NULL WHERE id=?",
+                (latest["id"] if latest else None, db.now(), actor, latest["media_id"] if latest else None,
+                 db.dump(fields), instance["id"]))
+    db.audit(con, actor, "approval.manager_checked", "instance", instance["id"], chat_id)
+    graph = json.loads(con.execute("SELECT graph FROM versions WHERE id=?", (instance["version_id"],)).fetchone()[0])
+    node = next((n for n in graph["nodes"] if n["id"] == instance["node"]), None)
+    if chat["mode"] != "bot" or instance["status"] != "waiting_approval" or not node or node["kind"] != "approval":
+        return
+    # The bot was waiting for exactly this answer: follow the «Согласовано» branch.
+    if con.execute("SELECT 1 FROM outbox WHERE chat_id=? AND state IN ('unknown','pending')", (chat_id,)).fetchone():
+        takeover(con, chat_id, actor)
+    else:
+        resume(con, chat_id, node["next"], actor)
 
 
 def manager_approve_mockup(con, chat_id, job_id, actor):
@@ -1259,7 +1322,7 @@ def manager_approve_mockup(con, chat_id, job_id, actor):
     latest = sent_mockup(con, chat_id, instance["item_id"])
     if not latest or latest[0] != job_id:
         raise Invalid("Макет изменился или ещё не отправлен. Обновите чат и проверьте актуальное превью")
-    if instance["approved_image_job_id"] == job_id:
+    if instance["approved_image_job_id"] == job_id and chat["mode"] == "bot":
         return
     graph = json.loads(con.execute("SELECT graph FROM versions WHERE id=?", (instance["version_id"],)).fetchone()[0])
     approvals = {n["id"]: n for n in graph["nodes"] if n["kind"] == "approval"}
@@ -1344,7 +1407,7 @@ def approval_timer(con, instance_id, action, actor):
     return instance["chat_id"]
 
 
-def approve(con, instance_id, actor):
+def approve(con, instance_id, actor, *, override=False):
     instance = con.execute(
         "SELECT * FROM instances WHERE id=?", (instance_id,)
     ).fetchone()
@@ -1360,7 +1423,13 @@ def approve(con, instance_id, actor):
     confirmation_required = any(
         node.get("kind") == "confirm" for node in graph["nodes"]
     )
-    if (
+    if override:
+        item = con.execute("SELECT external_status FROM items WHERE id=?", (instance["item_id"],)).fetchone()
+        if item["external_status"] == "cancelled":
+            raise Invalid("Заказ отменён в Ozon")
+        if instance["status"] in {"waiting_release", "ready"}:
+            raise Invalid("Бриф уже проверен")
+    elif (
         instance["status"] != "needs_review"
         or (confirmation_required and not instance["confirmed_at"])
         or not complete(con, instance, graph, json.loads(instance["fields"]))
@@ -1374,8 +1443,9 @@ def approve(con, instance_id, actor):
     )
     eligible = (datetime.fromisoformat(origin) + timedelta(hours=hours)).isoformat()
     con.execute(
-        "UPDATE instances SET status='waiting_release',reviewed_at=?,reviewed_by=?,ready_at=? WHERE id=?",
-        (db.now(), actor, eligible, instance_id),
+        "UPDATE instances SET status='waiting_release',reviewed_at=?,reviewed_by=?,ready_at=?,"
+        "manager_forced=? WHERE id=?",
+        (db.now(), actor, eligible, int(override), instance_id),
     )
     db.audit(con, actor, "brief.reviewed", "instance", instance_id, instance["chat_id"])
 
@@ -1390,12 +1460,13 @@ def release_due(con):
                 "SELECT graph FROM versions WHERE id=?", (instance["version_id"],)
             ).fetchone()[0]
         )
-        if not settled(con, instance):
+        forced = instance["manager_forced"]
+        if not forced and not settled(con, instance):
             continue
         confirmation_required = any(
             node.get("kind") == "confirm" for node in graph["nodes"]
         )
-        valid = (
+        valid = forced or (
             (instance["confirmed_at"] or not confirmation_required)
             and instance["reviewed_at"]
             and complete(con, instance, graph, json.loads(instance["fields"]))

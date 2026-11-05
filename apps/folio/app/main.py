@@ -348,6 +348,7 @@ def inbox(
             [],
             [],
         )
+        mes_failures = []
         rework_jobs = []
         rework_has_preview = False
         current_product_type = ""
@@ -409,6 +410,10 @@ def inbox(
                     "UNION ALL SELECT error FROM mattermost_actions WHERE instance_id=? AND state='failed' AND error IS NOT NULL",
                     (instance["id"], instance["id"]),
                 ).fetchall()
+                mes_failures = con.execute(
+                    "SELECT error FROM order_webhook_actions WHERE instance_id=? AND state='failed' AND error IS NOT NULL",
+                    (instance["id"],),
+                ).fetchall()
                 active_item = con.execute(
                     "SELECT m.product_type FROM items i LEFT JOIN mappings m ON m.id=i.mapping_id "
                     "WHERE i.id=?", (chat["active_item"],),
@@ -445,6 +450,8 @@ def inbox(
             instance=instance,
             reference_templates=con.execute("SELECT id,name,media_id FROM templates WHERE active=1 AND media_id IS NOT NULL ORDER BY name,id").fetchall() if chat else [],
             approvable_mockup=scenarios.sent_mockup(con, chat_id, chat["active_item"]) if chat and instance else None,
+            mockup_approved=scenarios.mockup_approved(con, instance) if chat and instance else False,
+            mes_failures=mes_failures,
             media=media_rows,
             nodes=nodes,
             history=history,
@@ -475,6 +482,8 @@ async def chat_action(request: Request, chat_id: int, action: str):
             scenarios.takeover(con, chat_id, actor["id"])
         elif action == "approve_mockup":
             scenarios.manager_approve_mockup(con, chat_id, number(form, "job_id", 1, integer=True), actor["id"])
+        elif action == "mockup_approval":
+            scenarios.set_mockup_approval(con, chat_id, form.get("approved") == "yes", actor["id"])
         elif action in {"save_wishes", "save_photo"}:
             scenarios.manager_brief(con, chat_id, action, form, actor["id"])
         elif action in {"rework_retry", "rework_close"}:
@@ -676,7 +685,7 @@ async def chat_action(request: Request, chat_id: int, action: str):
             ).fetchone()
             if not instance:
                 raise scenarios.Invalid("Нет активного брифа")
-            scenarios.approve(con, instance[0], actor["id"])
+            scenarios.approve(con, instance[0], actor["id"], override=True)
         elif action == "attach":
             if not chat["active_item"]:
                 raise scenarios.Invalid("Товарная позиция чата не определена")
@@ -1051,7 +1060,7 @@ async def retry_order_webhook(event: str, request: Request):
             raw.pop("paused_code", None)
             con.execute("UPDATE order_webhook_settings SET value=? WHERE id=1", (db.dump(raw),))
         # Delivery only. Never rewind a scenario that already followed its error branch.
-        con.execute("UPDATE order_webhook_actions SET state='pending',delivery_only=1,due_at=?,error=NULL WHERE id=?", (db.now(), event))
+        con.execute("UPDATE order_webhook_actions SET state='pending',delivery_only=1,manager_forced=1,due_at=?,error=NULL WHERE id=?", (db.now(), event))
         db.audit(con, actor["id"], "order_webhook.retry", "order_webhook", event)
     return redirect("/settings/order-webhook")
 
@@ -1940,10 +1949,10 @@ def export(request: Request, instance_id: int):
         graph = json.loads(get_record(con, "versions", instance["version_id"])["graph"])
         if (
             instance["status"] != "ready"
-            or not scenarios.complete(
-                con, instance, graph, json.loads(instance["fields"])
-            )
-            or not scenarios.settled(con, instance)
+            or (not instance["manager_forced"] and (
+                not scenarios.complete(con, instance, graph, json.loads(instance["fields"]))
+                or not scenarios.settled(con, instance)
+            ))
         ):
             raise scenarios.Invalid("Бриф ещё не готов к передаче")
         payload = {

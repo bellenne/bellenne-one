@@ -1,7 +1,10 @@
+import json
 import unittest
 from unittest.mock import patch
 
-from app import db, scenarios
+import httpx
+
+from app import db, order_webhook, placement, scenarios
 from tests import test_folio
 
 
@@ -149,7 +152,7 @@ class ManagerControlsTest(unittest.TestCase):
         self.assertEqual(save("save_wishes", background="Оставить комнату", wishes="Согласовать").status_code, 303)
         self.assertEqual(save("save_photo", media_id=photo).status_code, 303)
         self.assertEqual(save("save_photo", media_id=photo).status_code, 303)
-        import json
+
         fields = json.loads(self.record(instance)["fields"])
         self.assertEqual(fields["background"], "Оставить комнату")
         self.assertEqual(fields["wishes"], "Согласовать")
@@ -169,8 +172,240 @@ class ManagerControlsTest(unittest.TestCase):
             con.execute("UPDATE items SET external_status='cancelled' WHERE id=?", (item,))
         self.assertEqual(save("save_wishes", background="Не менять").status_code, 422)
 
+    def setup_mes(self, *, sent_preview=True):
+        """Unapproved order with a finished mockup; the chat is in manual mode."""
+        instance, item, chat, _ = self.setup_approval()
+        with db.transaction() as con:
+            order_webhook.save(con, {"url": "https://mes.example.com", "send_token": "s" * 32, "shop_1": "12"})
+            con.execute("UPDATE items SET order_number='123-1' WHERE id=?", (item,))
+            mid = self.image(con, chat, item)
+            job = con.execute(
+                "INSERT INTO image_jobs(item_id,media_id,preview_media_id,prompt,width_cm,height_cm,state,print_file,"
+                "owner_id,created_at,updated_at) VALUES(?,?,?,'prompt',40,60,'completed','D:/Print/p.jpg','owner',?,?)",
+                (item, mid, mid, db.now(), db.now())).lastrowid
+            con.execute("UPDATE outbox SET state='cancelled' WHERE chat_id=?", (chat,))
+            if sent_preview:
+                self.sent_file(con, chat, mid, "preview")
+            graph = {"nodes": [
+                {"id": "approve", "kind": "approval", "dictionary_version": 1, "text": "Согласны?", "hours": 6,
+                 "next": "hook", "otherwise": "stop", "timeout": "stop", "error": "stop"},
+                {"id": "hook", "kind": "order_webhook", "next": "done", "error": "stop"},
+                {"id": "ask", "kind": "send", "text": "Спасибо", "next": "hook"},
+                {"id": "review", "kind": "ready"},
+                {"id": "stop", "kind": "handoff"},
+                {"id": "done", "kind": "end"}]}
+            con.execute("UPDATE versions SET graph=? WHERE id=(SELECT version_id FROM instances WHERE id=?)",
+                        (db.dump(graph), instance))
+            scenarios.takeover(con, chat, "2")
+        return instance, item, chat, job
+
+    def sent_file(self, con, chat, mid, key):
+        con.execute("INSERT INTO outbox(chat_id,actor,body,dedup,epoch,state,created_at,kind,media_id) "
+                    "VALUES(?,'manager:2','',?,0,'sent',?,'file',?)", (chat, key, db.now(), mid))
+
+    def resume(self, chat, node):
+        return self.client.post(f"/chats/{chat}/resume", headers=self.manager,
+                                data={"csrf": "csrf", "node": node}, follow_redirects=False)
+
+    def check(self, chat, approved=True):
+        return self.client.post(f"/chats/{chat}/mockup_approval", headers=self.manager,
+                                data={"csrf": "csrf", **({"approved": "yes"} if approved else {})},
+                                follow_redirects=False)
+
+    def action(self):
+        with db.transaction() as con:
+            return dict(con.execute("SELECT * FROM order_webhook_actions").fetchone())
+
+    def tick(self, response=None):
+        with db.transaction() as con:
+            con.execute("UPDATE order_webhook_actions SET due_at='2000-01-01'")
+        calls = []
+        def sender(url, token, payload, key):
+            calls.append(json.loads(payload))
+            return response or httpx.Response(202, json={
+                "accepted": True, "external_order_id": "MES-1", "print_files": [
+                    {"serial": 1, "instance_code": "A", "layout_key": "k", "filename": "k.jpg"}]})
+        order_webhook.tick(sender)
+        return calls
+
+    def checkbox_checked(self, chat):
+        page = self.client.get(f"/chats/{chat}", headers=self.manager).text
+        self.assertIn("Макет согласован", page)
+        return 'value="yes" data-submit-on-change checked' in page
+
+    def test_manager_sends_unapproved_order_to_mes(self):
+        instance, _, chat, job = self.setup_mes()
+        self.assertIsNone(self.record(instance)["approved_image_job_id"])
+        self.assertEqual(self.resume(chat, "hook").status_code, 303)
+        self.assertEqual(len(self.tick()), 1)
+        action = self.action()
+        self.assertEqual(action["state"], "sent")
+        self.assertEqual(action["image_job_id"], job)
+        self.assertEqual(self.record(instance)["status"], "closed")
+        with db.transaction() as con:
+            row = con.execute("SELECT * FROM image_jobs WHERE id=?", (job,)).fetchone()
+            self.assertTrue(placement.current(con, row))
+
+    def test_step_before_mes_is_also_the_managers_decision(self):
+        instance, _, chat, _ = self.setup_mes()
+        self.assertEqual(self.resume(chat, "ask").status_code, 303)
+        self.assertEqual(len(self.tick()), 1)
+        self.assertEqual(self.action()["state"], "sent")
+        self.assertEqual(self.record(instance)["status"], "closed")
+
+    def test_buyer_question_ends_override_and_bot_still_needs_approval(self):
+        instance, _, chat, _ = self.setup_mes()
+        self.assertEqual(self.resume(chat, "approve").status_code, 303)
+        self.assertEqual(self.record(instance)["manager_forced"], 0)
+        with db.transaction() as con:
+            con.execute("UPDATE instances SET approved_image_job_id=NULL,node='hook',prompted=0,status='collecting'")
+            scenarios.advance(con, instance)
+        self.assertEqual(self.tick(), [])
+        self.assertEqual(self.action()["error"], "Выбранный макет не согласован покупателем")
+
+    def test_manager_repeat_requeues_failed_event_once_without_loop(self):
+        instance, _, chat, _ = self.setup_mes()
+        self.resume(chat, "hook")
+        self.assertEqual(len(self.tick(httpx.Response(422, json={"message": "Нет магазина"}))), 1)
+        first = self.action()
+        self.assertEqual(first["state"], "failed")
+        self.assertEqual(self.record(instance)["node"], "stop")
+        page = self.client.get(f"/chats/{chat}", headers=self.manager).text
+        self.assertIn("Заказ не передан в MES", page)
+        self.assertIn("Нет магазина", page)
+        self.assertEqual(self.resume(chat, "hook").status_code, 303)
+        self.assertEqual(self.action()["state"], "pending")
+        calls = self.tick()
+        self.assertEqual(self.action()["state"], "sent")
+        self.assertEqual(self.action()["id"], first["id"])
+        self.assertEqual(calls[0]["print_file"]["id"], first["id"])
+
+    def test_mes_conflict_is_not_resent_by_manager(self):
+        _, _, chat, _ = self.setup_mes()
+        self.resume(chat, "hook")
+        self.tick(httpx.Response(409, json={"message": "Конфликт"}))
+        self.assertEqual(self.resume(chat, "hook").status_code, 303)
+        self.assertEqual(self.action()["state"], "failed")
+        self.assertEqual(self.tick(), [])
+
+    def test_manager_delivery_survives_takeover_and_unknown_message(self):
+        instance, _, chat, _ = self.setup_mes()
+        with db.transaction() as con:
+            con.execute("INSERT INTO outbox(chat_id,actor,body,dedup,epoch,state,created_at) "
+                        "VALUES(?,'manager:2','Текст','lost',0,'unknown',?)", (chat, db.now()))
+        self.assertEqual(self.resume(chat, "ask").status_code, 422)
+        self.assertEqual(self.resume(chat, "hook").status_code, 303)
+        with db.transaction() as con:
+            scenarios.takeover(con, chat, "2")
+        self.assertEqual(len(self.tick()), 1)
+        self.assertEqual(self.action()["state"], "sent")
+        self.assertEqual(self.record(instance)["node"], "hook")
+        self.assertEqual(self.resume(chat, "hook").status_code, 303)
+        self.assertEqual(self.record(instance)["status"], "closed")
+
+    def test_manager_mes_without_sent_preview_or_with_own_file(self):
+        _, item, chat, job = self.setup_mes(sent_preview=False)
+        self.resume(chat, "hook")
+        self.assertEqual(self.action()["image_job_id"], job)
+        self.assertEqual(len(self.tick()), 1)
+        with db.transaction() as con:
+            con.execute("DELETE FROM order_webhook_actions")
+            con.execute("UPDATE image_jobs SET placement_id=NULL")
+            own = self.image(con, chat, item)
+            self.sent_file(con, chat, own, "own")
+        self.resume(chat, "hook")
+        self.assertIsNone(self.action()["image_job_id"])
+        self.assertEqual(self.tick(), [])
+        self.assertIn("Нет макета с печатным файлом", self.action()["error"])
+
+    def test_cancelled_order_is_not_sent_to_mes(self):
+        _, item, chat, _ = self.setup_mes()
+        self.resume(chat, "hook")
+        with db.transaction() as con:
+            con.execute("UPDATE items SET external_status='cancelled' WHERE id=?", (item,))
+        self.assertEqual(self.tick(), [])
+        self.assertEqual(self.action()["state"], "failed")
+
+    def test_checkbox_in_manual_mode_only_records_decision(self):
+        instance, item, chat, job = self.setup_mes()
+        with db.transaction() as con:
+            before = con.execute("SELECT COUNT(*) FROM outbox").fetchone()[0]
+        self.assertFalse(self.checkbox_checked(chat))
+        self.assertEqual(self.check(chat).status_code, 303)
+        record = self.record(instance)
+        self.assertEqual(record["approved_image_job_id"], job)
+        self.assertEqual(record["mockup_approved_by"], "2")
+        self.assertEqual(json.loads(record["fields"])["approval_outcome"], "Макет подтверждён менеджером")
+        self.assertTrue(self.checkbox_checked(chat))
+        with db.transaction() as con:
+            self.assertEqual(con.execute("SELECT mode FROM chats WHERE id=?", (chat,)).fetchone()[0], "manual")
+            self.assertEqual(con.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], before)
+            self.assertEqual(con.execute("SELECT COUNT(*) FROM audit WHERE action='approval.manager_checked' "
+                                         "AND actor='2'").fetchone()[0], 1)
+            newer = self.image(con, chat, item)
+            self.sent_file(con, chat, newer, "newer")
+        self.assertFalse(self.checkbox_checked(chat))
+        self.check(chat)
+        self.assertTrue(self.checkbox_checked(chat))
+        self.assertEqual(self.check(chat, approved=False).status_code, 303)
+        self.assertFalse(self.checkbox_checked(chat))
+        self.assertNotIn("approval_outcome", json.loads(self.record(instance)["fields"]))
+
+    def test_checkbox_works_without_generated_mockup(self):
+        instance, item, chat, job = self.setup_mes(sent_preview=False)
+        self.check(chat)
+        self.assertTrue(self.checkbox_checked(chat))
+        with db.transaction() as con:
+            own = self.image(con, chat, item)
+            self.sent_file(con, chat, own, "own")
+        self.assertFalse(self.checkbox_checked(chat))
+        self.check(chat)
+        self.assertTrue(self.checkbox_checked(chat))
+        self.assertIsNone(self.record(instance)["approved_image_job_id"])
+
+    def test_checkbox_while_bot_waits_follows_approved_branch(self):
+        instance, _, chat, job = self.setup_mes()
+        with db.transaction() as con:
+            con.execute("UPDATE chats SET mode='bot' WHERE id=?", (chat,))
+            con.execute("UPDATE instances SET node='approve',status='waiting_approval',prompted=1 WHERE id=?", (instance,))
+        self.check(chat)
+        self.assertEqual(self.record(instance)["node"], "hook")
+        self.assertEqual(self.action()["image_job_id"], job)
+
+    def test_checkbox_access_csrf_and_cancelled(self):
+        _, item, chat, _ = self.setup_mes()
+        _, _, other_chat, _ = self.setup_instance(posting="FOREIGN", external_chat="FOREIGN")
+        self.assertEqual(self.check(other_chat).status_code, 403)
+        self.assertEqual(self.client.post(f"/chats/{chat}/mockup_approval", headers=self.manager,
+                                          data={"approved": "yes"}).status_code, 403)
+        with db.transaction() as con:
+            con.execute("UPDATE items SET external_status='cancelled' WHERE id=?", (item,))
+        self.assertEqual(self.check(chat).status_code, 422)
+        self.assertNotIn("data-submit-on-change", self.client.get(f"/chats/{chat}", headers=self.manager).text)
+
+    def test_manager_makes_incomplete_brief_ready(self):
+        instance, _, chat, _ = self.setup_mes()
+        with db.transaction() as con:
+            settings = db.config(con)
+            settings["handoff_hours"] = 0
+            con.execute("UPDATE settings SET value=? WHERE id=1", (db.dump(settings),))
+            graph = json.loads(con.execute("SELECT graph FROM versions").fetchone()[0])
+            graph["nodes"].append({"id": "text", "kind": "ask_text", "field": "wishes", "required": True,
+                                   "text": "?", "next": "review"})
+            con.execute("UPDATE versions SET graph=?", (db.dump(graph),))
+            with self.assertRaises(scenarios.Invalid):
+                scenarios.approve(con, instance, "2")
+        self.resume(chat, "review")
+        self.assertEqual(self.record(instance)["status"], "needs_review")
+        self.assertEqual(self.client.post(f"/chats/{chat}/approve", headers=self.manager,
+                                          data={"csrf": "csrf"}, follow_redirects=False).status_code, 303)
+        with db.transaction() as con:
+            scenarios.release_due(con)
+        self.assertEqual(self.record(instance)["status"], "ready")
+        self.assertEqual(self.client.get(f"/briefs/{instance}/export", headers=self.admin).status_code, 200)
+
     def test_manual_mockup_approval_survives_stage_change(self):
-        from app import placement
+
         instance, item, chat, _ = self.setup_approval()
         with db.transaction() as con:
             graph = {"nodes": [{"id": "approve", "kind": "approval", "next": "thanks"},

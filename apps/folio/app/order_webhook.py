@@ -82,30 +82,64 @@ def print_filename(value):
     return name
 
 
+def bound_job(con, instance, forced):
+    # Bind the last actually sent preview, not a newer unapproved generation.
+    sent = con.execute("SELECT j.id FROM outbox o JOIN media m ON m.id=o.media_id AND m.item_id=? "
+                       "LEFT JOIN image_jobs j ON j.preview_media_id=o.media_id AND j.item_id=? AND j.state='completed' "
+                       "WHERE o.chat_id=? AND o.kind='file' AND o.state='sent' "
+                       "ORDER BY o.id DESC,j.id DESC LIMIT 1",
+                       (instance["item_id"], instance["item_id"], instance["chat_id"])).fetchone()
+    if sent or not forced:
+        # A manager's own file has no print result: never print another mockup instead.
+        return sent[0] if sent else None
+    # The manager moved the order on before any preview reached the buyer.
+    latest = con.execute("SELECT id FROM image_jobs WHERE item_id=? AND state='completed' "
+                         "AND print_file IS NOT NULL AND preview_media_id IS NOT NULL ORDER BY id DESC LIMIT 1",
+                         (instance["item_id"],)).fetchone()
+    return latest[0] if latest else None
+
+
+def force(con, row, instance, node_id, armed):
+    """A manager's decision outranks the approval, chat mode and step gates."""
+    if row["state"] == "sent" or row["protocol"] != 2:
+        return row
+    if row["state"] == "failed":
+        # A conflict needs reconciliation with MES; "armed" is spent by one
+        # explicit manager action, so the error branch cannot loop into a resend.
+        if not armed or row["http_code"] == 409:
+            return row
+        con.execute("UPDATE order_webhook_actions SET state='pending',error=NULL,due_at=?,delivery_only=0 WHERE id=?",
+                    (db.now(), row["id"]))
+    job = row["image_job_id"] if row["payload"] else bound_job(con, instance, True)
+    con.execute("UPDATE order_webhook_actions SET manager_forced=1,node_id=?,image_job_id=? WHERE id=?",
+                (node_id, job, row["id"]))
+    db.audit(con, "system", "order_webhook.manager_forced", "order_webhook", row["id"], instance["chat_id"])
+    return con.execute("SELECT * FROM order_webhook_actions WHERE id=?", (row["id"],)).fetchone()
+
+
 def enqueue(con, instance_id, node_id):
+    from . import scenarios
+    instance = con.execute("SELECT * FROM instances WHERE id=?", (instance_id,)).fetchone()
+    armed = instance["manager_forced"] == scenarios.MANAGER_ARMED
+    if armed:
+        con.execute("UPDATE instances SET manager_forced=1 WHERE id=?", (instance_id,))
+    forced = bool(instance["manager_forced"]) or scenarios.manager_approved(con, instance)
     # One immutable event per position, even when a graph has another webhook
     # node. A new UUID must never be used to bypass a prior acceptance/conflict.
     row = con.execute("SELECT * FROM order_webhook_actions WHERE instance_id=? ORDER BY created_at LIMIT 1",
                       (instance_id,)).fetchone()
     if row:
-        return row
-    # Bind the last actually sent preview, not a newer unapproved generation.
-    job = con.execute("SELECT j.id FROM instances i JOIN outbox o ON o.chat_id=i.chat_id "
-                      "JOIN media m ON m.id=o.media_id AND m.item_id=i.item_id "
-                      "LEFT JOIN image_jobs j ON j.preview_media_id=o.media_id AND j.item_id=i.item_id AND j.state='completed' "
-                      "WHERE i.id=? AND o.kind='file' AND o.state='sent' "
-                      "ORDER BY o.id DESC,j.id DESC LIMIT 1",
-                      (instance_id,)).fetchone()
+        return force(con, row, instance, node_id, armed) if forced else row
     event = str(uuid.uuid4())
-    con.execute("INSERT INTO order_webhook_actions(id,instance_id,node_id,image_job_id,due_at,created_at,protocol) VALUES(?,?,?,?,?,?,2)",
-                (event, instance_id, node_id, job[0] if job else None, db.now(), db.now()))
+    con.execute("INSERT INTO order_webhook_actions(id,instance_id,node_id,image_job_id,due_at,created_at,protocol,manager_forced) VALUES(?,?,?,?,?,?,2,?)",
+                (event, instance_id, node_id, bound_job(con, instance, forced), db.now(), db.now(), int(forced)))
     db.audit(con, "system", "order_webhook.queued", "order_webhook", event)
     return con.execute("SELECT * FROM order_webhook_actions WHERE id=?", (event,)).fetchone()
 
 
 def prepare(action, settings, item, job):
     if not job or job["state"] != "completed":
-        raise ValueError("Нет отправленного макета с печатным файлом для этой позиции")
+        raise ValueError("Нет макета с печатным файлом для этой позиции. Файл, отправленный менеджером вручную, не связан с печатным результатом")
     if not item["order_number"] or not item["posting"] or item["quantity"] <= 0:
         raise ValueError("Не заполнены номер заказа, отправление или количество")
     shop = settings.get("shops", {}).get(str(item["account_id"]))
@@ -158,7 +192,8 @@ def tick(sender=send):
         if item["external_status"] == "cancelled":
             con.execute("UPDATE order_webhook_actions SET state='failed',error='Заказ отменён' WHERE id=?", (action["id"],))
             return True
-        if not action["delivery_only"] and (chat["mode"] != "bot" or chat["active_item"] != item["id"] or instance["node"] != action["node_id"]):
+        unattended = not action["delivery_only"] and not action["manager_forced"]
+        if unattended and (chat["mode"] != "bot" or chat["active_item"] != item["id"] or instance["node"] != action["node_id"]):
             con.execute("UPDATE order_webhook_actions SET due_at=? WHERE id=?",
                         ((datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat(), action["id"]))
             return False
@@ -175,7 +210,7 @@ def tick(sender=send):
             raise ValueError("Настройте подключение вебхука в Folio")
         from . import placement
         with db.transaction() as con:
-            if not placement.approved(con, instance["id"], job):
+            if job and not action["manager_forced"] and not placement.approved(con, instance["id"], job):
                 raise ValueError("Выбранный макет не согласован покупателем")
         payload = action["payload"]
         if not payload:
@@ -191,7 +226,7 @@ def tick(sender=send):
                                   (action["instance_id"],)).fetchone()
             if current["external_status"] == "cancelled":
                 raise ValueError("Заказ отменён")
-            if not action["delivery_only"] and (current["mode"] != "bot" or current["active_item"] != item["id"] or current["node"] != action["node_id"]):
+            if unattended and (current["mode"] != "bot" or current["active_item"] != item["id"] or current["node"] != action["node_id"]):
                 con.execute("UPDATE order_webhook_actions SET state='pending',due_at=? WHERE id=?", (lease, action["id"]))
                 return True
             if config(con).get("paused_reason"):
@@ -209,9 +244,9 @@ def tick(sender=send):
                                       (action["instance_id"],)).fetchone()
                 if current["external_status"] == "cancelled":
                     raise ValueError("Заказ отменён")
-                if not placement.approved(con, action["instance_id"], job):
+                if not action["manager_forced"] and not placement.approved(con, action["instance_id"], job):
                     raise ValueError("Согласованная версия макета изменилась")
-                if config(con).get("paused_reason") or (not action["delivery_only"] and
+                if config(con).get("paused_reason") or (unattended and
                         (current["mode"] != "bot" or current["active_item"] != item["id"] or current["node"] != action["node_id"])):
                     con.execute("UPDATE order_webhook_actions SET state='pending',due_at=? WHERE id=?", (lease, action["id"]))
                     return True
@@ -285,7 +320,9 @@ def tick(sender=send):
             con.execute("UPDATE order_webhook_actions SET placement_error=? WHERE id=?", (placement_error, action["id"]))
         db.audit(con, "system", "order_webhook." + state, "order_webhook", action["id"], instance["chat_id"])
         if state in {"sent", "failed"} and not action["delivery_only"]:
-            scenarios.advance(con, action["instance_id"])
+            # A forced delivery may finish after the manager moved to another step.
+            if con.execute("SELECT node FROM instances WHERE id=?", (action["instance_id"],)).fetchone()[0] == action["node_id"]:
+                scenarios.advance(con, action["instance_id"])
     return True
 
 

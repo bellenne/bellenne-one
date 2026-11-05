@@ -765,6 +765,10 @@ document.addEventListener('change', (event) => {
   else link.removeAttribute('href');
 });
 
+document.addEventListener('change', (event) => {
+  if (event.target.matches('[data-submit-on-change]')) event.target.form.requestSubmit();
+});
+
 const liveChat = document.querySelector('[data-live-chat]');
 if (liveChat) {
   let busy = false;

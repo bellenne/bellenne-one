@@ -73,7 +73,7 @@ def current(con, job):
     instance = con.execute("SELECT * FROM instances WHERE id=?", (action["instance_id"],)).fetchone() if action else None
     item = con.execute("SELECT external_status FROM items WHERE id=?", (job["item_id"],)).fetchone()
     return bool(action and action["state"] == "sent" and not action["placement_error"] and instance
-                and approved(con, instance["id"], job)
+                and (action["manager_forced"] or approved(con, instance["id"], job))
                 and job["placement_version"] == job["preview_media_id"]
                 and item["external_status"] != "cancelled")
 
