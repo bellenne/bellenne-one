@@ -19,7 +19,7 @@ from urllib.parse import quote, urlsplit
 import httpx
 from PIL import Image
 
-from . import db, security
+from . import db, policy, security, wish_intent
 
 PROGRESS = {"queued", "generating", "waiting_topaz", "composing", "webhook_pending"}
 TERMINAL = {"completed", "failed"}
@@ -181,6 +181,42 @@ def model_for_item(con, item_id: int, product_type: str | None = None) -> str:
     return model
 
 
+def print_only(width: int, height: int, width_cm: float, height_cm: float) -> bool:
+    """True when the photo is close enough to the print size to skip generation."""
+    target_width, target_height = (round(side / 2.54 * 150) for side in (width_cm, height_cm))
+    # A photo turned the other way loses most of its frame in the crop below;
+    # the generator extends the surroundings instead of cutting the subject.
+    if width != height and target_width != target_height and (width > height) != (target_width > target_height):
+        return False
+    # The worker crops to the canvas proportions, so only that part counts.
+    scale = max(target_width / width, target_height / height)
+    return (target_width - target_width / scale < policy.GENERATION_SHORTFALL_PX
+            and target_height - target_height / scale < policy.GENERATION_SHORTFALL_PX)
+
+
+def generation_needed(con, item_id: int, photos: list[str], fields: dict,
+                      width_cm: float, height_cm: float) -> bool:
+    """Generation is the safe default: it is skipped only when nothing asks for it."""
+    mapped = con.execute("SELECT m.product_type FROM items i LEFT JOIN mappings m ON m.id=i.mapping_id "
+                         "WHERE i.id=?", (item_id,)).fetchone()
+    # A collage is composed and a template is applied only by the generator.
+    if not mapped or mapped["product_type"] != "portrait_background" or len(photos) != 1:
+        return True
+    for key in ("background", "caption", "wishes", "template_id"):
+        value = str(fields.get(key) or "").strip()
+        if value and not wish_intent.asks_no_changes(value):
+            return True
+    try:
+        with Image.open(db.DATA / "media" / photos[0]) as image:
+            width, height = image.size
+            # The worker applies EXIF rotation, so the sides must be read the same way.
+            if image.getexif().get(0x0112) in {5, 6, 7, 8}:
+                width, height = height, width
+    except OSError:
+        return True
+    return not print_only(width, height, width_cm, height_cm)
+
+
 def rework_sources(con, chat_id, item_id):
     """Only private images owned by this order/chat; never global media IDs."""
     rows = con.execute(
@@ -209,7 +245,8 @@ def enqueue(con, item_id: int, media_id: str | list[str], prompt: str,
             width_cm: float, height_cm: float, actor: str,
             *, instance_id: int | None = None, node_id: str | None = None,
             source_preview: bool = False, chat_id: int | None = None,
-            product_type: str | None = None, manager_selected: bool = False) -> int:
+            product_type: str | None = None, manager_selected: bool = False,
+            skip_generation: bool = False) -> int:
     if not configured(con):
         raise ImageTaskError("image_worker_not_configured")
     if not 1 <= len(prompt.strip()) <= 4000:
@@ -247,7 +284,8 @@ def enqueue(con, item_id: int, media_id: str | list[str], prompt: str,
         (item_id, media_ids[0], json.dumps(media_ids), secrets.token_urlsafe(32), prompt.strip(), model, width_cm, height_cm,
          stamp, stamp, instance_id, node_id, chat_id),
     ).lastrowid
-    con.execute("UPDATE image_jobs SET prompt_mode=? WHERE id=?", (prompt_mode, task_id))
+    con.execute("UPDATE image_jobs SET prompt_mode=?,skip_generation=? WHERE id=?",
+                (prompt_mode, int(skip_generation), task_id))
     db.audit(con, actor, "image_job.queued", "image_job", task_id)
     return task_id
 
@@ -515,6 +553,7 @@ def claim_next(con, owner_id=None) -> dict | None:
     prefix = os.environ.get("MODULE_PREFIX", "/folio").rstrip("/")
     return {"action": "generate", "id": row["id"], "worker_id": worker_id, "prompt": row["prompt"], "model": row["model"], "prompt_mode": row["prompt_mode"],
             "width_cm": row["width_cm"], "height_cm": row["height_cm"],
+            "skip_generation": bool(row["skip_generation"]),
             "image_urls": [f"{public_base}{prefix}/image-worker/input/{quote(row['input_token'], safe='')}/{index}"
                            for index in range(len(media_ids))]}
 

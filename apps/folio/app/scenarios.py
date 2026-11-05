@@ -1060,10 +1060,13 @@ def advance(con, instance_id, reply=None, *, simulate_external=False):
                              instance_id, node_id),
                         )
                     else:
+                        skip = not image_tasks.generation_needed(con, item["id"], photos, fields, width, height)
                         image_tasks.enqueue(
                             con, item["id"], photos, prompt, width, height, "system",
-                            instance_id=instance_id, node_id=node_id,
+                            instance_id=instance_id, node_id=node_id, skip_generation=skip,
                         )
+                        if skip:
+                            db.audit(con, "system", "image_job.generation_skipped", "instance", instance_id, chat["id"])
                 except image_tasks.ImageTaskError as exc:
                     fields["integration_error"] = image_tasks.ERROR_LABELS.get(
                         exc.code, "Не удалось поставить макет в очередь. Проверьте подключение и данные заказа."
@@ -1377,6 +1380,49 @@ def manager_brief(con, chat_id, action, form, actor):
         con.execute("UPDATE media SET item_id=? WHERE id=?", (instance["item_id"], mid))
     con.execute("UPDATE instances SET fields=?,revision=revision+1 WHERE id=?", (db.dump(fields), instance["id"]))
     db.audit(con, actor, "brief.manager_saved", "instance", instance["id"], chat_id)
+
+
+def manager_photo_target(con, chat_id):
+    instance = con.execute("SELECT s.*,i.external_status,c.mode FROM instances s JOIN chats c ON c.id=s.chat_id "
+                           "JOIN items i ON i.id=s.item_id WHERE c.id=? AND c.active_item=s.item_id", (chat_id,)).fetchone()
+    if not instance:
+        raise Invalid("Для этого чата нет брифа. Сначала выберите позицию и запустите сценарий")
+    if instance["external_status"] == "cancelled":
+        raise Invalid("Заказ отменён в Ozon. Фото добавлять нельзя")
+    photos = json.loads(instance["fields"]).get("photos", [])
+    if len(photos) >= _photo_limit(con, instance) > 1:
+        raise Invalid("В брифе уже максимум фото для этого сценария. Новое фото добавить нельзя")
+    return instance
+
+
+def _photo_limit(con, instance):
+    graph = json.loads(con.execute("SELECT graph FROM versions WHERE id=?", (instance["version_id"],)).fetchone()[0])
+    return min(max((n.get("max", 1) for n in graph["nodes"] if n["kind"] in {"ask_photo", "ask_input"}), default=1), 8)
+
+
+def manager_add_photo(con, instance, mid, actor):
+    """Put a stored photo into the brief; a single-photo brief takes the newest one."""
+    fields = json.loads(instance["fields"])
+    existing = fields.get("photos", [])
+    if mid not in existing:
+        replacing = len(existing) >= _photo_limit(con, instance) == 1
+        fields["photos"] = [] if replacing else existing
+        graph = json.loads(con.execute("SELECT graph FROM versions WHERE id=?", (instance["version_id"],)).fetchone()[0])
+        node = next((n for n in graph["nodes"] if n["id"] == instance["node"]), {})
+        waiting = (instance["mode"] == "bot" and instance["status"] == "collecting"
+                   and node.get("kind") in {"ask_photo", "ask_input"})
+        if not waiting:
+            fields["photos"] = [*fields["photos"], mid]
+        con.execute("UPDATE instances SET fields=?,revision=revision+1 WHERE id=?", (db.dump(fields), instance["id"]))
+        if waiting:
+            # The bot asked for this photo: it continues exactly as after a buyer's upload.
+            advance(con, instance["id"], {"text": "", "media_ids": [mid]})
+            current = con.execute("SELECT fields FROM instances WHERE id=?", (instance["id"],)).fetchone()
+            fields = json.loads(current["fields"])
+            if mid not in fields.get("photos", []):
+                fields["photos"] = [*fields.get("photos", []), mid]
+                con.execute("UPDATE instances SET fields=?,revision=revision+1 WHERE id=?", (db.dump(fields), instance["id"]))
+    db.audit(con, actor, "brief.manager_saved", "instance", instance["id"], instance["chat_id"])
 
 
 def approval_timer(con, instance_id, action, actor):

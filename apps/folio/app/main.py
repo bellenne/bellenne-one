@@ -1,3 +1,4 @@
+import hashlib
 import json
 import hmac
 import math
@@ -12,6 +13,7 @@ from pathlib import Path
 from urllib.parse import unquote
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -29,6 +31,7 @@ templates = Jinja2Templates(
 )
 templates.env.filters["json"] = json.loads
 templates.env.filters["folio_time"] = presentation.format_time
+templates.env.filters["message_links"] = presentation.message_links
 templates.env.globals.update(
     error_details=presentation.error_details,
     operation_error_details=presentation.operation_error_details,
@@ -114,6 +117,7 @@ async def http_problem(request, exc):
 
 FORM_LABELS = {
     "name": "Название",
+    "url": "Ссылка на изображение",
     "client_id": "Client ID",
     "api_key": "API-ключ",
     "text": "Текст ответа",
@@ -469,6 +473,34 @@ def inbox(
             unread=unread,
             dedup=uuid.uuid4().hex,
         )
+
+
+@app.post("/chats/{chat_id}/photo_url")
+async def chat_photo_url(request: Request, chat_id: int):
+    form = await request.form()
+    security.csrf(request, form.get("csrf"))
+    url = required(form, "url")
+    with db.transaction() as con:
+        security.chat_access(con, security.user(request, con), chat_id)
+        scenarios.manager_photo_target(con, chat_id)
+    # The site may answer slowly: no database lock is held while it does.
+    content = await run_in_threadpool(media.download_public, url)
+    digest = hashlib.sha256(content).hexdigest()
+    with db.transaction() as con:
+        actor = security.user(request, con)
+        security.chat_access(con, actor, chat_id)
+        instance = scenarios.manager_photo_target(con, chat_id)
+        same = con.execute("SELECT id FROM media WHERE chat_id=? AND item_id=? AND digest=?",
+                           (chat_id, instance["item_id"], digest)).fetchone()
+        mid = same["id"] if same else media.store(con, content, db.config(con), chat_id, instance["item_id"])
+        if not same:
+            con.execute(
+                "INSERT INTO messages(chat_id,actor,body,media_ids,created_at) VALUES(?,?,?,?,?)",
+                (chat_id, f"manager:{actor['id']}", "Фото добавлено менеджером по ссылке", db.dump([mid]), db.now()),
+            )
+            db.audit(con, actor["id"], "media.added_by_link", "media", mid, chat_id)
+        scenarios.manager_add_photo(con, instance, mid, actor["id"])
+    return redirect(f"/chats/{chat_id}")
 
 
 @app.post("/chats/{chat_id}/{action}")

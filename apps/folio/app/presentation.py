@@ -5,6 +5,7 @@ uses them as the only explanation.  This module deliberately contains no domain
 decisions and can therefore be reused by templates and HTTP validation errors.
 """
 
+import re
 from datetime import datetime
 
 
@@ -392,6 +393,8 @@ AUDIT_LABELS = {
     "outbound.retry_queued": "Запрошен безопасный повтор неуспешной отправки",
     "chat.linked": "Чат связан с товарной позицией",
     "media.added": "Добавлено изображение",
+    "media.added_by_link": "Менеджер добавил фото по ссылке",
+    "image_job.generation_skipped": "Фото достаточного размера: макет готовится без генерации",
     "media.accepted": "Изображение добавлено в бриф",
     "mapping.updated": "Обновлено соответствие товара",
     "mapping.deleted": "Удалена привязка товара",
@@ -532,3 +535,8 @@ def format_time(value):
         return parsed.astimezone().strftime("%d.%m.%Y %H:%M")
     except (TypeError, ValueError):
         return "—"
+
+def message_links(text):
+    """Links in a buyer's message, offered to the manager as possible photos."""
+    found = re.findall(r"https?://[^\s<>\"'()\[\]{}]+", str(text or ""), re.IGNORECASE)
+    return list(dict.fromkeys(link.rstrip(".,;:!?»") for link in found))[:3]

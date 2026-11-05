@@ -21,7 +21,7 @@ Gateway пропускает `GET /folio/image-worker/next`, `POST /folio/image-
 
 ## Контракт очереди
 
-`GET /folio/image-worker/next`: 204 при пустой очереди; иначе JSON с `id`, `worker_id`, `prompt`, `model`, `prompt_mode`, `width_cm`, `height_cm`, `image_urls`. Последнее поле содержит 1–8 HTTPS-ссылок в порядке фото брифа. ID закрепляются в БД при выдаче; повторный опрос и перезапуск Core не создают новое задание. Воркер также должен сохранять выполнение по этим ID, не запускать генерацию повторно после потери ответа.
+`GET /folio/image-worker/next`: 204 при пустой очереди; иначе JSON с `id`, `worker_id`, `prompt`, `model`, `prompt_mode`, `width_cm`, `height_cm`, `skip_generation`, `image_urls`. Последнее поле содержит 1–8 HTTPS-ссылок в порядке фото брифа. ID закрепляются в БД при выдаче; повторный опрос и перезапуск Core не создают новое задание. Воркер также должен сохранять выполнение по этим ID, не запускать генерацию повторно после потери ответа.
 
 `POST /folio/image-worker/jobs/{id}`: multipart-поля `worker_id`, `status`. Статусы: `queued`, `generating`, `composing`, `completed`, `failed`, `unknown`. Для `completed` обязательны `print_file` с расширением `.jpg`/`.jpeg` и JPEG-файл `preview`. Для `failed`/`unknown` передаётся `error`. Повтор завершения идемпотентен; другое терминальное состояние отклоняется.
 

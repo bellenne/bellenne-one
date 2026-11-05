@@ -2,6 +2,36 @@
 import re
 
 
+_WHAT = r"(?:все|фон|фото|фотографию|изображение)"
+_AS_IS = r"(?:как есть|так как есть|так|без изменений)"
+_CHANGE = r"(?:менять|изменять|трогать)"
+_NEED = r"(?:надо|нужно|стоит)"
+# Whole answers only: "оставьте все как есть, но замените фон" must not match.
+NO_CHANGES = re.compile(
+    rf"(?:{_WHAT} )?(?:оставьте|оставить|оставим|оставляем|оставляйте)(?: {_WHAT})? {_AS_IS}|"
+    rf"пусть (?:{_WHAT} )?(?:останется|остается)(?: {_WHAT})? {_AS_IS}|"
+    r"(?:все )?как есть|без изменений|без пожеланий|без обработки|без согласования|пожеланий нет|нет пожеланий|"
+    rf"(?:фон )?не менять|не менять фон|фон как на фото|фон оставить|оставить фон|оставьте фон|"
+    rf"ничего не (?:менять|меняйте|меняем|изменять|изменяйте|трогайте|трогать)|"
+    rf"(?:ничего {_CHANGE}|{_CHANGE} ничего) не {_NEED}|не {_NEED} ничего {_CHANGE}"
+)
+
+
+def _plain(value):
+    value = re.sub(r"[^\w\s]", " ", value.casefold().replace("ё", "е"))
+    value = re.sub(r"\s+", " ", value).strip()
+    value = re.sub(r"^(?:(?:здравствуйте|добрый день|добрый вечер|доброе утро|привет)\s*)+", "", value)
+    value = re.sub(r"\b(?:пожалуйста|спасибо)\b", "", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def asks_no_changes(text):
+    """True only for a known refusal; any other wording may hide a request."""
+    plain = _plain(str(text or ""))
+    # A bare "нет" or "оставить" is enough here, but not for routing a chat below.
+    return bool(NO_CHANGES.fullmatch(plain)) or plain in {"нет", "оставить"}
+
+
 def classify(text):
     value = re.sub(r"\s+", " ", text.casefold().replace("ё", "е")).strip()
     # Match words, not fragments such as "цена" inside a visual description.
@@ -10,14 +40,8 @@ def classify(text):
     if re.search(r"\b(вариант|пример|образец|образц|каталог).*(фон|оформлен|фото|стил)|"
                  r"(фон|оформлен|стил).*\b(вариант|пример|образец|образц|каталог)", value):
         return "options"
-    plain = re.sub(r"[^\w\s]", " ", value)
-    plain = re.sub(r"\s+", " ", plain).strip()
-    plain = re.sub(r"^(?:здравствуйте|добрый день|добрый вечер|доброе утро|привет)\s*", "", plain)
-    plain = re.sub(r"\b(?:пожалуйста|спасибо)\b", "", plain)
-    plain = re.sub(r"\s+", " ", plain).strip()
-    if re.fullmatch(r"без согласования|без изменений|без пожеланий|пожеланий нет|нет пожеланий|"
-                    r"оставьте как есть|оставить как есть|все как есть|ничего не менять|"
-                    r"ничего менять не надо|ничего менять не нужно|на ваше усмотрение", plain):
+    plain = _plain(value)
+    if NO_CHANGES.fullmatch(plain) or plain == "на ваше усмотрение":
         return "wish"
     # Intake asks about processing as well as backgrounds. Quality/sharpness
     # requests must not fall through to handoff just because they omit "фото".
