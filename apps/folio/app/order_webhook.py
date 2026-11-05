@@ -323,6 +323,8 @@ def tick(sender=send):
             # A forced delivery may finish after the manager moved to another step.
             if con.execute("SELECT node FROM instances WHERE id=?", (action["instance_id"],)).fetchone()[0] == action["node_id"]:
                 scenarios.advance(con, action["instance_id"])
+        if state == "sent":
+            scenarios.close_after_delivery(con, action["instance_id"])
     return True
 
 

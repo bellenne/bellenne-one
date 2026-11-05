@@ -1181,6 +1181,10 @@ def advance(con, instance_id, reply=None, *, simulate_external=False):
             status = "needs_manager"
             break
         if kind == "ready":
+            if not simulate_external and mes_accepted(con, instance_id):
+                # MES already has the order: there is no brief left to hand over.
+                status = "closed"
+                break
             confirmation_required = any(
                 candidate.get("kind") == "confirm" for candidate in graph["nodes"]
             )
@@ -1209,9 +1213,134 @@ def advance(con, instance_id, reply=None, *, simulate_external=False):
         (node_id, db.dump(fields), status, prompted, revision, confirmed, instance_id),
     )
     db.audit(con, "system", f"scenario.{status}", "instance", instance_id, chat["id"])
+    if status == "closed" and not simulate_external and mes_accepted(con, instance_id):
+        _mark_order_closed(con, instance_id, chat["id"], "system")
+
+
+def mes_accepted(con, instance_id):
+    return bool(con.execute("SELECT 1 FROM order_webhook_actions WHERE instance_id=? AND state='sent' LIMIT 1",
+                            (instance_id,)).fetchone())
+
+
+def _mark_order_closed(con, instance_id, chat_id, actor):
+    con.execute("UPDATE instances SET order_closed_at=COALESCE(order_closed_at,?) WHERE id=?", (db.now(), instance_id))
+    db.audit(con, actor, "order.closed", "instance", instance_id, chat_id)
+
+
+def _close_order_now(con, instance, actor):
+    con.execute("UPDATE instances SET status='closed',approval_due_at=NULL,approval_remaining_seconds=NULL WHERE id=?",
+                (instance["id"],))
+    con.execute("UPDATE outbox SET state='cancelled' WHERE instance_id=? AND actor='bot' AND state='pending'",
+                (instance["id"],))
+    _mark_order_closed(con, instance["id"], instance["chat_id"], actor)
+
+
+def close_after_delivery(con, instance_id):
+    """MES took the order. Steps the bot still has to run close it at their end."""
+    instance = con.execute("SELECT * FROM instances WHERE id=?", (instance_id,)).fetchone()
+    chat = con.execute("SELECT mode,active_item FROM chats WHERE id=?", (instance["chat_id"],)).fetchone()
+    running = (chat["mode"] == "bot" and chat["active_item"] == instance["item_id"]
+               and instance["status"] in {"collecting", "waiting_integration", "waiting_mockup", "waiting_approval"})
+    if not instance["order_closed_at"] and not running:
+        _close_order_now(con, instance, "system")
+
+
+def close_order(con, chat_id, actor):
+    """The manager's button: closes again an order reopened by a late buyer message."""
+    instance = con.execute("SELECT s.*,i.external_status FROM instances s JOIN chats c ON c.id=s.chat_id "
+                           "JOIN items i ON i.id=s.item_id WHERE c.id=? AND c.active_item=s.item_id", (chat_id,)).fetchone()
+    if not instance or instance["external_status"] == "cancelled":
+        raise Invalid("Закрывать нечего: нет активного заказа или он отменён в Ozon")
+    if not mes_accepted(con, instance["id"]):
+        raise Invalid("Закрыть можно только заказ, который принят MES. Сначала передайте его в MES")
+    if not instance["order_closed_at"]:
+        _close_order_now(con, instance, actor)
+
+
+def reopen_order(con, instance, chat_id):
+    """A buyer wrote after closure: only a person can answer, the bot's scenario is over."""
+    con.execute("UPDATE instances SET status='needs_manager',order_closed_at=NULL WHERE id=?", (instance["id"],))
+    db.audit(con, "system", "order.reopened_by_buyer", "instance", instance["id"], chat_id)
+    takeover(con, chat_id, "system")
+
+
+def queue_ahead(con, chat_id):
+    """The buyer's unfinished order that holds this one: Ozon keeps one chat per buyer."""
+    return con.execute(
+        "SELECT other.id,item.posting FROM chats c "
+        "JOIN chats other ON other.account_id=c.account_id AND other.external_id=c.external_id AND other.id!=c.id "
+        "JOIN instances s ON s.chat_id=other.id AND s.item_id=other.active_item "
+        "JOIN items item ON item.id=s.item_id "
+        "WHERE c.id=? AND item.external_status NOT IN ('cancelled','delivered') AND s.order_closed_at IS NULL "
+        "AND s.status NOT IN ('closed','ready','waiting_queue') ORDER BY s.id LIMIT 1",
+        (chat_id,),
+    ).fetchone()
+
+
+def queue_behind(con, chat_id):
+    return con.execute(
+        "SELECT other.id,item.posting FROM chats c "
+        "JOIN chats other ON other.account_id=c.account_id AND other.external_id=c.external_id AND other.id!=c.id "
+        "JOIN instances s ON s.chat_id=other.id AND s.item_id=other.active_item "
+        "JOIN items item ON item.id=s.item_id "
+        "WHERE c.id=? AND s.status='waiting_queue' ORDER BY s.id",
+        (chat_id,),
+    ).fetchall()
+
+
+def begin_or_queue(con, instance_id):
+    """A new order waits while the same buyer has another one in progress."""
+    instance = con.execute("SELECT * FROM instances WHERE id=?", (instance_id,)).fetchone()
+    if instance["status"] == "collecting" and not instance["revision"] and queue_ahead(con, instance["chat_id"]):
+        con.execute("UPDATE instances SET status='waiting_queue' WHERE id=?", (instance_id,))
+        db.audit(con, "system", "order.queued", "instance", instance_id, instance["chat_id"])
+        return
+    advance(con, instance_id)
+
+
+def _start_queued(con, row, action, actor):
+    con.execute("SAVEPOINT queue_start")
+    try:
+        con.execute("UPDATE instances SET status='collecting' WHERE id=?", (row["id"],))
+        db.audit(con, actor, action, "instance", row["id"], row["chat_id"])
+        advance(con, row["id"])
+    except Exception:  # noqa: BLE001 -- one broken scenario must not stop the worker loop
+        con.execute("ROLLBACK TO queue_start")
+        con.execute("UPDATE instances SET status='needs_manager' WHERE id=?", (row["id"],))
+        takeover(con, row["chat_id"], "system")
+    con.execute("RELEASE queue_start")
+
+
+def release_queue(con):
+    """Derived from current state, so no closing path can forget to wake the next order."""
+    rows = con.execute(
+        "SELECT s.id,s.chat_id FROM instances s JOIN items i ON i.id=s.item_id "
+        "WHERE s.status='waiting_queue' AND i.external_status NOT IN ('cancelled','delivered') ORDER BY s.id"
+    ).fetchall()
+    for row in rows:
+        # The first released order blocks the ones behind it in this same pass.
+        if not queue_ahead(con, row["chat_id"]):
+            _start_queued(con, row, "order.queue_released", "system")
+
+
+def start_queued_order(con, chat_id, actor):
+    instance = con.execute("SELECT s.*,i.external_status FROM instances s JOIN chats c ON c.id=s.chat_id "
+                           "JOIN items i ON i.id=s.item_id WHERE c.id=? AND c.active_item=s.item_id", (chat_id,)).fetchone()
+    if not instance or instance["status"] != "waiting_queue":
+        raise Invalid("Этот заказ не ждёт очереди. Обновите страницу")
+    if instance["external_status"] in {"cancelled", "delivered"}:
+        raise Invalid("Заказ уже завершён в Ozon. Начинать его нельзя")
+    con.execute("UPDATE instances SET queue_priority_at=? WHERE id=?", (db.now(), instance["id"]))
+    _start_queued(con, instance, "order.queue_started", actor)
 
 
 def takeover(con, chat_id, actor):
+    if actor not in {"system", "ozon-seller"}:
+        # The buyer's next reply belongs to the order a person is working on now.
+        con.execute("UPDATE instances SET queue_priority_at=?,"
+                    "status=CASE WHEN status='waiting_queue' THEN 'needs_manager' ELSE status END "
+                    "WHERE chat_id=? AND item_id=(SELECT active_item FROM chats WHERE id=?)",
+                    (db.now(), chat_id, chat_id))
     con.execute("UPDATE chats SET mode='manual',epoch=epoch+1 WHERE id=?", (chat_id,))
     con.execute(
         "UPDATE outbox SET state='cancelled' WHERE chat_id=? AND actor='bot' AND state='pending'",
@@ -1253,8 +1382,9 @@ def resume(con, chat_id, node_id, actor):
     con.execute("UPDATE chats SET mode='bot',epoch=epoch+1 WHERE id=?", (chat_id,))
     con.execute(
         "UPDATE instances SET node=?,status='collecting',prompted=0,confirmed_at=NULL,reviewed_at=NULL,ready_at=NULL,"
-        "approval_due_at=NULL,approval_remaining_seconds=NULL,manager_forced=? WHERE id=?",
-        (node_id, MANAGER_ARMED, instance["id"]),
+        "approval_due_at=NULL,approval_remaining_seconds=NULL,manager_forced=?,order_closed_at=NULL,"
+        "queue_priority_at=? WHERE id=?",
+        (node_id, MANAGER_ARMED, db.now(), instance["id"]),
     )
     db.audit(con, actor, "chat.resumed", "instance", instance["id"], chat_id)
     advance(con, instance["id"])
@@ -1290,6 +1420,8 @@ def set_mockup_approval(con, chat_id, approved, actor):
                            "WHERE s.chat_id=? AND s.item_id=?", (chat_id, chat["active_item"])).fetchone()
     if not instance or instance["external_status"] == "cancelled":
         raise Invalid("Нельзя менять согласование: нет активного заказа или он отменён")
+    if instance["order_closed_at"]:
+        raise Invalid("Заказ закрыт. Чтобы изменить согласование, сначала верните его боту на нужный шаг")
     fields = json.loads(instance["fields"])
     if not approved:
         fields.pop("approval_outcome", None)

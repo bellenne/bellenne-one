@@ -46,6 +46,8 @@
 .folio-rework-source { grid-column: 1 / -1; min-width: 0; display: grid; gap: var(--bp-space-2); }
 .folio-chat-notice { flex: none; max-height: calc(var(--bp-space-12) * 3); overflow-y: auto; padding: var(--bp-space-2) var(--bp-space-4); background: var(--bp-negative-bg); border-bottom: 1px solid var(--bp-border); }
 .folio-chat-notice summary { cursor: pointer; color: var(--bp-negative); }
+[data-queue-notice] { flex: none; }
+.folio-queue-notice { display: grid; justify-items: start; gap: var(--bp-space-1); padding: var(--bp-space-2) var(--bp-space-4); border-bottom: 1px solid var(--bp-border); }
 .folio-order-drawer { width: min(calc(var(--bp-space-12) * 9), calc(100% - var(--bp-space-8))); max-width: none; height: 100%; max-height: none; margin: 0 0 0 auto; padding: var(--bp-space-5); border: 1px solid var(--bp-border-strong); border-radius: var(--bp-radius-xl) 0 0 var(--bp-radius-xl); background: var(--bp-surface); color: var(--bp-text); box-shadow: var(--bp-shadow-elevated); }
 .folio-order-drawer::backdrop { background: var(--bp-shadow-color); }
 .folio-drawer-header { display: flex; align-items: center; justify-content: space-between; gap: var(--bp-space-4); margin-bottom: var(--bp-space-5); }

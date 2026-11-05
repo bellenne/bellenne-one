@@ -267,6 +267,7 @@ def inbox(
     q: str = "",
     mode: str = "",
     unread: bool = False,
+    closed: bool = False,
 ):
     with db.transaction() as con:
         actor = security.user(request, con)
@@ -316,6 +317,11 @@ def inbox(
             params.append(mode)
         if unread:
             clauses.append("c.unread>0")
+        if closed:
+            clauses.append("closing.order_closed_at IS NOT NULL")
+        elif not q:
+            # Search still finds a closed order; an unanswered buyer keeps it in view.
+            clauses.append("(closing.order_closed_at IS NULL OR c.unread>0)")
         chats = con.execute(
             "SELECT c.*,"
             "COALESCE(NULLIF(c.buyer_name_manual,''),NULLIF(c.buyer_name,''),"
@@ -335,8 +341,10 @@ def inbox(
             "(SELECT CASE WHEN m.body='' AND m.media_ids<>'[]' THEN 'Фото' ELSE m.body END "
             "FROM messages m WHERE m.chat_id=c.id "
             "ORDER BY m.created_at DESC,m.id DESC LIMIT 1) AS last_message,"
-            "active.external_status AS active_order_status "
-            "FROM chats c LEFT JOIN items active ON active.id=c.active_item WHERE "
+            "active.external_status AS active_order_status,"
+            "closing.order_closed_at AS active_order_closed_at,closing.status AS active_instance_status "
+            "FROM chats c LEFT JOIN items active ON active.id=c.active_item "
+            "LEFT JOIN instances closing ON closing.chat_id=c.id AND closing.item_id=c.active_item WHERE "
             + " AND ".join(clauses)
             + " ORDER BY c.updated_at DESC",
             params,
@@ -456,6 +464,10 @@ def inbox(
             approvable_mockup=scenarios.sent_mockup(con, chat_id, chat["active_item"]) if chat and instance else None,
             mockup_approved=scenarios.mockup_approved(con, instance) if chat and instance else False,
             mes_failures=mes_failures,
+            mes_accepted=scenarios.mes_accepted(con, instance["id"]) if chat and instance else False,
+            closed=closed,
+            queue_ahead=scenarios.queue_ahead(con, chat_id) if chat and instance else None,
+            queue_behind=scenarios.queue_behind(con, chat_id) if chat and instance else [],
             media=media_rows,
             nodes=nodes,
             history=history,
@@ -514,6 +526,10 @@ async def chat_action(request: Request, chat_id: int, action: str):
             scenarios.takeover(con, chat_id, actor["id"])
         elif action == "approve_mockup":
             scenarios.manager_approve_mockup(con, chat_id, number(form, "job_id", 1, integer=True), actor["id"])
+        elif action == "queue_start":
+            scenarios.start_queued_order(con, chat_id, actor["id"])
+        elif action == "close_order":
+            scenarios.close_order(con, chat_id, actor["id"])
         elif action == "mockup_approval":
             scenarios.set_mockup_approval(con, chat_id, form.get("approved") == "yes", actor["id"])
         elif action in {"save_wishes", "save_photo"}:
@@ -1945,7 +1961,7 @@ def orders_page(request: Request):
             items=con.execute(
                 "SELECT i.*,a.name AS account_name,a.capabilities AS account_capabilities,"
                 "a.error AS account_error,s.status AS brief_status,s.id AS instance_id,"
-                "s.approval_due_at,s.approval_remaining_seconds,"
+                "s.approval_due_at,s.approval_remaining_seconds,s.order_closed_at,"
                 "(SELECT c.id FROM chats c JOIN chat_items ci ON ci.chat_id=c.id "
                 "WHERE ci.item_id=i.id AND c.start_job_id IS NOT NULL LIMIT 1) AS folio_chat_id,"
                 "(SELECT j.state FROM jobs j WHERE j.kind='start_chat' "

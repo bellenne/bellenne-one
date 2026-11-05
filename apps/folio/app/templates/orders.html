@@ -19,7 +19,7 @@
         {% elif not settings.get('automation_enabled_at') or item.order_started_at < settings.automation_enabled_at %}<span class="field-help">Заказ оформлен до включения автоматизации.</span>
         {% else %}<span class="field-help">Ожидает следующей синхронизации и проверки прав Ozon.</span>{% endif %}
       </td>
-      <td>{{ instance_labels.get(item.brief_status, 'Не начат') }}</td>
+      <td>{{ 'Заказ закрыт' if item.order_closed_at else instance_labels.get(item.brief_status, 'Не начат') }}</td>
       <td>{% if item.brief_status == 'waiting_approval' and item.external_status != 'cancelled' %}{{ approval_timer(item.instance_id, item.approval_due_at, item.approval_remaining_seconds, 'orders') }}{% endif %}{% if item.brief_status == 'ready' and actor.role == 'admin' %}<a href="{{ prefix }}/briefs/{{ item.instance_id }}/export">Экспортировать бриф</a>{% endif %}</td>
     </tr>{% else %}<tr><td colspan="8">Подходящих заказов пока нет. Настройте артикул и сценарий, затем синхронизируйте Ozon.</td></tr>{% endfor %}
   </tbody></table></div>

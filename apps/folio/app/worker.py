@@ -699,6 +699,18 @@ def _open_order_chats_at(order_chats, created):
             and chat["external_status"] not in {"cancelled", "delivered"}]
 
 
+def _current_order_chat(candidates):
+    """The one order a buyer's message without an order number belongs to."""
+    unfinished = [chat for chat in candidates if not chat["order_closed_at"]
+                  and chat["instance_status"] not in {"closed", "ready"}]
+    if not unfinished:
+        # Everything is done: the buyer most likely writes about the latest order.
+        return candidates[-1]
+    running = [chat for chat in unfinished if chat["instance_status"] != "waiting_queue"] or unfinished
+    chosen = [chat for chat in running if chat["queue_priority_at"]]
+    return max(chosen, key=lambda chat: chat["queue_priority_at"]) if chosen else running[0]
+
+
 def _order_chat_for_message(con, order_chats, raw, file_digests=None):
     """Route one Ozon message to one order, never by buyer identity alone."""
 
@@ -768,6 +780,8 @@ def _order_chat_for_message(con, order_chats, raw, file_digests=None):
     if not created:
         return None
     active = _open_order_chats_at(order_chats, created)
+    if len(active) > 1 and _text(user.get("type")).casefold() in {"buyer", "customer"}:
+        return _current_order_chat(active)
     return active[0] if len(active) == 1 else None
 
 
@@ -785,7 +799,9 @@ def process_event(con, event):
         con.execute("UPDATE events SET state='processed' WHERE id=?", (event["id"],))
         db.audit(con, "system", "event.ignored_cancelled", "event", event["id"], chat["id"])
         return
-    if instance and instance["status"] in {
+    if instance and instance["order_closed_at"]:
+        scenarios.reopen_order(con, instance, chat["id"])
+    elif instance and instance["status"] in {
         "waiting_integration",
         "waiting_mockup",
         "needs_review",
@@ -1396,7 +1412,7 @@ def sync_job(job, adapter, settings):
             inst = con.execute(
                 "SELECT id FROM instances WHERE item_id=?", (items[0]["id"],)
             ).fetchone()
-            scenarios.advance(con, inst[0])
+            scenarios.begin_or_queue(con, inst[0])
         return
     history_checked = False
     attachments_checked = False
@@ -1420,7 +1436,7 @@ def sync_job(job, adapter, settings):
             known = con.execute(
                 "SELECT c.*,COALESCE(j.finished_at,j.created_at) AS start_at,i.external_status,"
                 "i.order_number AS item_order_number,i.sku AS item_sku,"
-                "inst.status AS instance_status FROM chats c "
+                "inst.status AS instance_status,inst.order_closed_at,inst.queue_priority_at FROM chats c "
                 "JOIN jobs j ON j.id=c.start_job_id "
                 "JOIN items i ON i.id=c.active_item "
                 "LEFT JOIN instances inst ON inst.chat_id=c.id AND inst.item_id=i.id "
@@ -1460,28 +1476,6 @@ def sync_job(job, adapter, settings):
                 target = _order_chat_for_message(con, known, raw, file_digests_all)
                 if target:
                     routed.setdefault(target["id"], []).append(raw)
-            ambiguous = []
-            for raw in raw_messages:
-                if _order_chat_for_message(con, known, raw, file_digests_all) is not None:
-                    continue
-                user = raw.get("user") if isinstance(raw.get("user"), dict) else {}
-                if _text(user.get("type")).casefold() not in {"buyer", "customer"}:
-                    continue
-                if _message_context(raw)[0]:
-                    continue
-                created = _utc_timestamp(raw.get("created_at"))
-                active = _open_order_chats_at(known, created)
-                if len(active) > 1:
-                    ambiguous.append((raw, active))
-            for raw, active in ambiguous:
-                for chat in active:
-                    current = con.execute("SELECT * FROM chats WHERE id=?", (chat["id"],)).fetchone()
-                    if not con.execute("SELECT 1 FROM messages WHERE chat_id=? AND external_id=?",
-                                       (chat["id"], _text(raw.get("message_id")))).fetchone():
-                        import_message(con, current, raw, route_event=False)
-                        scenarios.takeover(con, chat["id"], "system")
-                        db.audit(con, "system", "chat.ambiguous_order_reply", "message",
-                                 _text(raw.get("message_id")), chat["id"])
         for chat in known:
             scoped_messages = routed.get(chat["id"], [])
             with db.transaction() as con:
@@ -1574,6 +1568,7 @@ def tick():
     with db.transaction() as con:
         close_cancelled_start_jobs(con)
         scenarios.release_due(con)
+        scenarios.release_queue(con)
         event = con.execute(
             "SELECT e.* FROM events e WHERE e.state='pending' AND (NOT EXISTS("
             "SELECT 1 FROM outbox o WHERE o.chat_id=e.chat_id "

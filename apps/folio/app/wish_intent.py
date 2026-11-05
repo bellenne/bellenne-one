@@ -13,7 +13,16 @@ NO_CHANGES = re.compile(
     r"(?:все )?как есть|без изменений|без пожеланий|без обработки|без согласования|пожеланий нет|нет пожеланий|"
     rf"(?:фон )?не менять|не менять фон|фон как на фото|фон оставить|оставить фон|оставьте фон|"
     rf"ничего не (?:менять|меняйте|меняем|изменять|изменяйте|трогайте|трогать)|"
-    rf"(?:ничего {_CHANGE}|{_CHANGE} ничего) не {_NEED}|не {_NEED} ничего {_CHANGE}"
+    rf"(?:ничего {_CHANGE}|{_CHANGE} ничего) не {_NEED}|не {_NEED} ничего {_CHANGE}|"
+    r"(?:согласование|согласования|согласовывать) не (?:нужно|надо)|не (?:нужно|надо) (?:согласование|согласования|согласовывать)"
+)
+_LEAD = r"(?:(?:да|я|бы|мне|хочу|хотела|хотел|хотелось|хотим|можно|нужно|надо|желательно|сначала|сперва|давайте|обязательно|лучше) )*"
+_MOCKUP = r"(?:на )?(?:готовый )?(?:макет|результат|эскиз|превью)(?: на согласование| перед печатью| до печати| сначала)?"
+# The buyer asks to approve the mockup first: an answer, not a change to the picture.
+MOCKUP_REVIEW = re.compile(
+    rf"{_LEAD}(?:посмотреть|увидеть|взглянуть|глянуть|согласовать) {_MOCKUP}|"
+    rf"{_LEAD}(?:покажите|показать|пришлите|прислать|отправьте|отправить|скиньте)(?: мне)? {_MOCKUP}|"
+    rf"{_LEAD}согласование(?: нужно| надо| обязательно)?|(?:да )?с согласованием"
 )
 
 
@@ -29,7 +38,7 @@ def asks_no_changes(text):
     """True only for a known refusal; any other wording may hide a request."""
     plain = _plain(str(text or ""))
     # A bare "нет" or "оставить" is enough here, but not for routing a chat below.
-    return bool(NO_CHANGES.fullmatch(plain)) or plain in {"нет", "оставить"}
+    return bool(NO_CHANGES.fullmatch(plain) or MOCKUP_REVIEW.fullmatch(plain)) or plain in {"нет", "оставить"}
 
 
 def classify(text):
@@ -41,7 +50,7 @@ def classify(text):
                  r"(фон|оформлен|стил).*\b(вариант|пример|образец|образц|каталог)", value):
         return "options"
     plain = _plain(value)
-    if NO_CHANGES.fullmatch(plain) or plain == "на ваше усмотрение":
+    if NO_CHANGES.fullmatch(plain) or MOCKUP_REVIEW.fullmatch(plain) or plain == "на ваше усмотрение":
         return "wish"
     # Intake asks about processing as well as backgrounds. Quality/sharpness
     # requests must not fall through to handoff just because they omit "фото".

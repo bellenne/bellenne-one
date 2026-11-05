@@ -3697,7 +3697,10 @@ class FolioTest(unittest.TestCase):
             self.assertEqual([row["posting"] for row in chats], ["POSTING-A", "POSTING-B"])
             self.assertEqual([row["active_item"] for row in chats], [first_item, second_item])
             self.assertEqual(con.execute("SELECT COUNT(*) FROM instances").fetchone()[0], 2)
-            self.assertEqual(con.execute("SELECT COUNT(*) FROM outbox WHERE state='pending'").fetchone()[0], 2)
+            # The second order of this buyer waits and writes nothing yet.
+            self.assertEqual(con.execute("SELECT COUNT(*) FROM outbox WHERE state='pending'").fetchone()[0], 1)
+            self.assertEqual(con.execute("SELECT status FROM instances WHERE item_id=?", (second_item,)).fetchone()[0],
+                             "waiting_queue")
             self.assertEqual(con.execute("PRAGMA foreign_key_check").fetchall(), [])
         self.assertNotEqual(first_chat, chats[1]["id"])
         with db.transaction() as con:
@@ -3708,6 +3711,7 @@ class FolioTest(unittest.TestCase):
             self.assertEqual(con.execute(
                 "SELECT status FROM instances WHERE id=?", (first_instance,)
             ).fetchone()[0], "closed")
+            scenarios.release_queue(con)
             self.assertEqual(con.execute(
                 "SELECT status FROM instances WHERE item_id=?", (second_item,)
             ).fetchone()[0], "collecting")
@@ -3716,7 +3720,7 @@ class FolioTest(unittest.TestCase):
                 (chats[1]["id"],),
             ).fetchone()[0], 1)
 
-    def test_shared_chat_reply_without_order_goes_to_manager(self):
+    def test_shared_chat_reply_without_order_goes_to_one_order(self):
         _, _, first_chat, _ = self.setup_instance(posting="POSTING-A", external_chat="SHARED")
         _, _, second_chat, _ = self.setup_instance(posting="POSTING-B", external_chat="SHARED")
         message = {
@@ -3741,26 +3745,13 @@ class FolioTest(unittest.TestCase):
         for _ in range(2):
             worker.sync_job({"kind": "sync", "account_id": 1, "payload": "{}"}, Adapter(), settings)
         with db.transaction() as con:
-            self.assertEqual(con.execute("SELECT COUNT(*) FROM events").fetchone()[0], 0)
-            self.assertEqual(con.execute("SELECT COUNT(*) FROM messages WHERE external_id='reply-without-order'").fetchone()[0], 2)
+            self.assertEqual([row[0] for row in con.execute(
+                "SELECT chat_id FROM messages WHERE external_id='reply-without-order'"
+            )], [first_chat])
+            self.assertEqual([row[0] for row in con.execute("SELECT chat_id FROM events")], [first_chat])
             self.assertEqual([row[0] for row in con.execute(
                 "SELECT mode FROM chats WHERE id IN (?,?) ORDER BY id", (first_chat, second_chat)
-            )], ["manual", "manual"])
-            self.assertEqual(con.execute(
-                "SELECT COUNT(*) FROM audit WHERE action='chat.ambiguous_order_reply'"
-            ).fetchone()[0], 2)
-        # Handoff must not make the next ambiguous correction disappear.
-        message["message_id"] = "second-reply-after-handoff"
-        for _ in range(2):
-            worker.sync_job({"kind": "sync", "account_id": 1, "payload": "{}"}, Adapter(), settings)
-        with db.transaction() as con:
-            self.assertEqual(con.execute("SELECT COUNT(*) FROM events").fetchone()[0], 0)
-            self.assertEqual(con.execute(
-                "SELECT COUNT(*) FROM messages WHERE external_id='second-reply-after-handoff'"
-            ).fetchone()[0], 2)
-            self.assertEqual(con.execute(
-                "SELECT COUNT(*) FROM audit WHERE action='chat.ambiguous_order_reply'"
-            ).fetchone()[0], 4)
+            )], ["bot", "bot"])
 
     def test_manual_order_keeps_receiving_shared_chat_history_until_terminal(self):
         _, old_item, old_chat, _ = self.setup_instance(posting="OLD", external_chat="SHARED")

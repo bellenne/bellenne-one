@@ -812,7 +812,7 @@ if (liveChat) {
       if (!response.ok || response.redirected) return;
       const fresh = new DOMParser().parseFromString(await response.text(), 'text/html');
       if (fresh.querySelector('[data-live-chat]')?.dataset.liveChat !== liveChat.dataset.liveChat) return;
-      for (const selector of ['.folio-chat-list', '.folio-conversation-header', '[data-chat-messages]', '.folio-manager-tools', '[data-order-drawer]']) refreshRegion(selector, fresh);
+      for (const selector of ['.folio-chat-list', '.folio-conversation-header', '[data-queue-notice]', '[data-chat-messages]', '.folio-manager-tools', '[data-order-drawer]']) refreshRegion(selector, fresh);
       const composer = document.querySelector('[data-chat-composer]');
       const nextComposer = fresh.querySelector('[data-chat-composer]');
       if (composer && nextComposer) composer.dispatchEvent(new CustomEvent('folio:refresh', {detail:nextComposer}));
