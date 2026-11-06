@@ -343,7 +343,7 @@ def submit_one(*, client=None) -> bool:
         ).fetchone():
             return False
         row = con.execute(
-            "SELECT j.*,i.external_status FROM image_jobs j JOIN items i ON i.id=j.item_id "
+            "SELECT j.*,i.external_status,i.offer_id,i.order_number,i.posting FROM image_jobs j JOIN items i ON i.id=j.item_id "
             "WHERE j.state='pending' ORDER BY j.id LIMIT 1"
         ).fetchone()
         if not row:
@@ -367,7 +367,8 @@ def submit_one(*, client=None) -> bool:
                for media, media_id in zip(media_rows, media_ids)):
             raise ImageTaskError("image_worker_media_missing")
         data = {"prompt": row["prompt"], "model": row["model"], "width_cm": str(row["width_cm"]),
-                "height_cm": str(row["height_cm"]), "webhook_url": callback}
+                "height_cm": str(row["height_cm"]), "webhook_url": callback,
+                "offer_id": row["offer_id"], "order_number": row["order_number"] or row["posting"]}
         public_base = input_base_url()
         if public_base:
             prefix = os.environ.get("MODULE_PREFIX", "/folio").rstrip("/")
@@ -517,19 +518,19 @@ def authenticate_pull(con, authorization: str) -> None:
 def claim_next(con, owner_id=None) -> dict | None:
     """Return the same claimed job until its terminal result is acknowledged."""
     row = con.execute(
-        "SELECT j.*,i.external_status FROM image_jobs j JOIN items i ON i.id=j.item_id "
+        "SELECT j.*,i.external_status,i.offer_id,i.order_number,i.posting FROM image_jobs j JOIN items i ON i.id=j.item_id "
         "WHERE j.pull_claimed=1 AND j.state NOT IN ('completed','failed','unknown') "
         "AND (j.owner_id IS NULL OR j.owner_id=?) ORDER BY j.id LIMIT 1", (owner_id,)
     ).fetchone()
     if not row:
         row = con.execute(
-            "SELECT j.*,i.external_status FROM image_jobs j JOIN items i ON i.id=j.item_id "
+            "SELECT j.*,i.external_status,i.offer_id,i.order_number,i.posting FROM image_jobs j JOIN items i ON i.id=j.item_id "
             "WHERE j.pull_claimed=0 AND j.worker_id IS NOT NULL "
             "AND j.state NOT IN ('completed','failed','unknown') AND (j.owner_id IS NULL OR j.owner_id=?) ORDER BY j.id LIMIT 1", (owner_id,)
         ).fetchone()
     if not row:
         row = con.execute(
-            "SELECT j.*,i.external_status FROM image_jobs j JOIN items i ON i.id=j.item_id "
+            "SELECT j.*,i.external_status,i.offer_id,i.order_number,i.posting FROM image_jobs j JOIN items i ON i.id=j.item_id "
             "WHERE j.state='pending' AND (j.owner_id IS NULL OR j.owner_id=?) ORDER BY j.id LIMIT 1", (owner_id,)
         ).fetchone()
     if not row:
@@ -554,6 +555,7 @@ def claim_next(con, owner_id=None) -> dict | None:
     return {"action": "generate", "id": row["id"], "worker_id": worker_id, "prompt": row["prompt"], "model": row["model"], "prompt_mode": row["prompt_mode"],
             "width_cm": row["width_cm"], "height_cm": row["height_cm"],
             "skip_generation": bool(row["skip_generation"]),
+            "offer_id": row["offer_id"], "order_number": row["order_number"] or row["posting"],
             "image_urls": [f"{public_base}{prefix}/image-worker/input/{quote(row['input_token'], safe='')}/{index}"
                            for index in range(len(media_ids))]}
 

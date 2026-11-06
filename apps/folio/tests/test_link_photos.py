@@ -349,6 +349,21 @@ class GenerationDecisionTest(unittest.TestCase):
         self.assertIs(pulled["skip_generation"], True)
         self.assertEqual(len(pulled["image_urls"]), 1)
 
+    def test_job_carries_the_article_and_order_number_for_the_print_labels(self):
+        row, _ = self.job()
+        with db.transaction() as con:
+            con.execute("UPDATE items SET offer_id='ТЕСТ-1',order_number='12345678-0001' WHERE id=?", (row["item_id"],))
+            pulled = image_tasks.claim_next(con)
+        self.assertEqual((pulled["offer_id"], pulled["order_number"]), ("ТЕСТ-1", "12345678-0001"))
+
+    def test_print_label_falls_back_to_the_posting_without_an_order_number(self):
+        row, _ = self.job()
+        with db.transaction() as con:
+            con.execute("UPDATE items SET order_number='' WHERE id=?", (row["item_id"],))
+            posting = con.execute("SELECT posting FROM items WHERE id=?", (row["item_id"],)).fetchone()[0]
+            pulled = image_tasks.claim_next(con)
+        self.assertEqual(pulled["order_number"], posting)
+
     def test_buyer_refusing_changes_still_skips(self):
         self.assertEqual(self.job(background="Фон не менять", wishes="Без изменений")[0]["skip_generation"], 1)
 
