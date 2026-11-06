@@ -32,6 +32,7 @@ templates = Jinja2Templates(
 templates.env.filters["json"] = json.loads
 templates.env.filters["folio_time"] = presentation.format_time
 templates.env.filters["message_links"] = presentation.message_links
+templates.env.filters["money"] = presentation.format_money
 templates.env.globals.update(
     error_details=presentation.error_details,
     operation_error_details=presentation.operation_error_details,
@@ -464,6 +465,7 @@ def inbox(
             approvable_mockup=scenarios.sent_mockup(con, chat_id, chat["active_item"]) if chat and instance else None,
             mockup_approved=scenarios.mockup_approved(con, instance) if chat and instance else False,
             mes_failures=mes_failures,
+            mockup_choices=scenarios.mockup_choices(con, instance) if chat and instance else None,
             mes_accepted=scenarios.mes_accepted(con, instance["id"]) if chat and instance else False,
             closed=closed,
             queue_ahead=scenarios.queue_ahead(con, chat_id) if chat and instance else None,
@@ -526,6 +528,8 @@ async def chat_action(request: Request, chat_id: int, action: str):
             scenarios.takeover(con, chat_id, actor["id"])
         elif action == "approve_mockup":
             scenarios.manager_approve_mockup(con, chat_id, number(form, "job_id", 1, integer=True), actor["id"])
+        elif action == "select_mockup":
+            scenarios.select_mockup(con, chat_id, number(form, "job_id", 1, integer=True), actor["id"])
         elif action == "queue_start":
             scenarios.start_queued_order(con, chat_id, actor["id"])
         elif action == "close_order":

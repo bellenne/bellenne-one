@@ -6,6 +6,7 @@ import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 
 from . import business_hours, db, image_tasks, mattermost, media, presentation, retailcrm, scenarios
 from .ozon import OzonAdapter, OzonError
@@ -199,6 +200,15 @@ def close_cancelled_start_jobs(con, account_id=None, posting=None):
         db.audit(con, "system", "integration.cancelled", "job", row["id"])
 
 
+def _item_price(value):
+    """Ozon sends money as text. A missing or odd value must not stop the order import."""
+    try:
+        price = Decimal(_text(value))
+    except InvalidOperation:
+        return None
+    return format(price, "f") if price.is_finite() and price > 0 else None
+
+
 def import_order(con, account_id, posting):
     number = posting.get("posting_number")
     products = posting.get("products")
@@ -225,6 +235,7 @@ def import_order(con, account_id, posting):
             quantity = 0
         if not sku or not offer_id or quantity < 1:
             raise OzonError("invalid_order_item")
+        price = _item_price(product.get("price"))
         existing = con.execute(
             "SELECT * FROM items WHERE account_id=? AND posting=? AND sku=?",
             (account_id, number, sku),
@@ -234,7 +245,7 @@ def import_order(con, account_id, posting):
             (account_id, offer_id),
         ).fetchone()
         con.execute(
-            "INSERT INTO items(account_id,posting,order_number,sku,offer_id,name,customer_name,quantity,external_status,order_started_at,mapping_id) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(account_id,posting,sku) DO UPDATE SET order_number=CASE WHEN excluded.order_number<>'' THEN excluded.order_number ELSE items.order_number END,external_status=excluded.external_status,quantity=excluded.quantity,name=excluded.name,customer_name=CASE WHEN excluded.customer_name<>'' THEN excluded.customer_name ELSE items.customer_name END,order_started_at=COALESCE(items.order_started_at,excluded.order_started_at),mapping_id=COALESCE(items.mapping_id,excluded.mapping_id)",
+            "INSERT INTO items(account_id,posting,order_number,sku,offer_id,name,customer_name,quantity,external_status,order_started_at,mapping_id,price,currency) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(account_id,posting,sku) DO UPDATE SET price=COALESCE(excluded.price,items.price),currency=COALESCE(excluded.currency,items.currency),order_number=CASE WHEN excluded.order_number<>'' THEN excluded.order_number ELSE items.order_number END,external_status=excluded.external_status,quantity=excluded.quantity,name=excluded.name,customer_name=CASE WHEN excluded.customer_name<>'' THEN excluded.customer_name ELSE items.customer_name END,order_started_at=COALESCE(items.order_started_at,excluded.order_started_at),mapping_id=COALESCE(items.mapping_id,excluded.mapping_id)",
             (
                 account_id,
                 number,
@@ -247,6 +258,8 @@ def import_order(con, account_id, posting):
                 external_status,
                 order_started_at,
                 mapping[0] if mapping else None,
+                price,
+                _text(product.get("currency_code"))[:3].upper() if price else None,
             ),
         )
         if existing and (

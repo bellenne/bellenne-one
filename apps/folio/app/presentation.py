@@ -7,6 +7,7 @@ decisions and can therefore be reused by templates and HTTP validation errors.
 
 import re
 from datetime import datetime
+from decimal import Decimal
 
 
 ERRORS = {
@@ -394,6 +395,7 @@ AUDIT_LABELS = {
     "outbound.retry_queued": "Запрошен безопасный повтор неуспешной отправки",
     "chat.linked": "Чат связан с товарной позицией",
     "media.added": "Добавлено изображение",
+    "approval.manager_selected": "Менеджер выбрал макет для печати",
     "order.closed": "Заказ закрыт",
     "order.queued": "Заказ ждёт завершения другого заказа этого покупателя",
     "order.queue_released": "Подошла очередь заказа: бот начал диалог",
@@ -546,3 +548,12 @@ def message_links(text):
     """Links in a buyer's message, offered to the manager as possible photos."""
     found = re.findall(r"https?://[^\s<>\"'()\[\]{}]+", str(text or ""), re.IGNORECASE)
     return list(dict.fromkeys(link.rstrip(".,;:!?»") for link in found))[:3]
+
+
+def format_money(price, currency=None):
+    """1259.5000 and RUB become «1 259,50 ₽»; the amount is shown as Ozon sent it."""
+    amount = Decimal(str(price))
+    text = f"{amount:,.2f}".replace(",", "\u00a0").replace(".", ",")
+    text = text[:-3] if text.endswith(",00") else text
+    code = currency or ""
+    return f"{text}\u00a0{'₽' if code == 'RUB' else code}".rstrip("\u00a0")

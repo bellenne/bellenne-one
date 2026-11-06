@@ -82,7 +82,37 @@ def print_filename(value):
     return name
 
 
+def choice_blocked(event):
+    """Why the mockup of this MES event can no longer change; None while it can."""
+    if not event:
+        return None
+    if event["state"] == "sent":
+        return "MES уже приняла заказ с этим макетом. Замена требует сверки с MES"
+    if event["state"] == "failed" and event["http_code"] in {400, 422}:
+        return None  # MES refused the data: nothing was accepted under this event.
+    if event["state"] == "sending" or event["attempts"]:
+        return "Заказ уже передаётся в MES, и она могла его принять. Дождитесь результата передачи"
+    return None
+
+
+def bind_selected(con, instance, job_id):
+    from . import scenarios
+    event = con.execute("SELECT * FROM order_webhook_actions WHERE instance_id=? ORDER BY created_at LIMIT 1",
+                        (instance["id"],)).fetchone()
+    blocked = choice_blocked(event)
+    if blocked:
+        raise scenarios.Invalid(blocked)
+    if event:
+        # The prepared JSON named another file; the same event carries the new choice.
+        con.execute("UPDATE order_webhook_actions SET image_job_id=?,payload=NULL,manager_forced=1 WHERE id=?",
+                    (job_id, event["id"]))
+
+
 def bound_job(con, instance, forced):
+    from . import scenarios
+    selected = scenarios.selected_mockup(con, instance)
+    if selected:
+        return selected
     # Bind the last actually sent preview, not a newer unapproved generation.
     sent = con.execute("SELECT j.id FROM outbox o JOIN media m ON m.id=o.media_id AND m.item_id=? "
                        "LEFT JOIN image_jobs j ON j.preview_media_id=o.media_id AND j.item_id=? AND j.state='completed' "

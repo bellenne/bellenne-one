@@ -1392,17 +1392,46 @@ def resume(con, chat_id, node_id, actor):
 
 def sent_mockup(con, chat_id, item_id):
     return con.execute(
-        "SELECT j.id,m.id AS media_id FROM outbox o JOIN media m ON m.id=o.media_id AND m.item_id=? "
+        "SELECT j.id,m.id AS media_id,o.id AS outbox_id FROM outbox o JOIN media m ON m.id=o.media_id AND m.item_id=? "
         "LEFT JOIN image_jobs j ON j.preview_media_id=m.id AND j.item_id=m.item_id AND j.state='completed' "
         "WHERE o.chat_id=? AND o.kind='file' AND o.state='sent' ORDER BY o.id DESC LIMIT 1",
         (item_id, chat_id),
     ).fetchone()
 
 
+def selected_mockup(con, instance):
+    """The mockup the manager picked; another preview sent later needs a new decision."""
+    if not instance["mockup_approved_at"] or not instance["mockup_selected_job_id"]:
+        return None
+    latest = sent_mockup(con, instance["chat_id"], instance["item_id"])
+    current = (latest["outbox_id"] == instance["mockup_selected_after"]
+               or latest["media_id"] == instance["mockup_approved_media"]) if latest else not instance["mockup_selected_after"]
+    return instance["mockup_selected_job_id"] if current else None
+
+
+def mockup_choices(con, instance):
+    """Finished mockups of this position and which of them is approved for print."""
+    from . import order_webhook
+    rows = con.execute(
+        "SELECT j.id,j.preview_media_id,j.updated_at,EXISTS(SELECT 1 FROM outbox o WHERE o.chat_id=? "
+        "AND o.kind='file' AND o.state='sent' AND o.media_id=j.preview_media_id) AS sent FROM image_jobs j "
+        "WHERE j.item_id=? AND j.state='completed' AND j.preview_media_id IS NOT NULL AND j.print_file IS NOT NULL "
+        "ORDER BY j.id DESC", (instance["chat_id"], instance["item_id"]),
+    ).fetchall()
+    event = con.execute("SELECT * FROM order_webhook_actions WHERE instance_id=? ORDER BY created_at LIMIT 1",
+                        (instance["id"],)).fetchone()
+    locked = order_webhook.choice_blocked(event)
+    latest = sent_mockup(con, instance["chat_id"], instance["item_id"])
+    approved = selected_mockup(con, instance) or (latest["id"] if latest and mockup_approved(con, instance) else None)
+    return {"items": rows, "locked": locked, "approved": event["image_job_id"] if locked else approved}
+
+
 def manager_approved(con, instance):
     """The manager's mark applies only to the preview it was set on."""
     if not instance["mockup_approved_at"]:
         return False
+    if instance["mockup_selected_job_id"]:
+        return selected_mockup(con, instance) is not None
     latest = sent_mockup(con, instance["chat_id"], instance["item_id"])
     return instance["mockup_approved_media"] == (latest["media_id"] if latest else None)
 
@@ -1433,10 +1462,45 @@ def set_mockup_approval(con, chat_id, approved, actor):
     fields["approval_outcome"] = "Макет подтверждён менеджером"
     fields.pop("integration_error", None)
     con.execute("UPDATE instances SET approved_image_job_id=?,mockup_approved_at=?,mockup_approved_by=?,"
-                "mockup_approved_media=?,fields=?,approval_due_at=NULL,approval_remaining_seconds=NULL WHERE id=?",
+                "mockup_approved_media=?,fields=?,approval_due_at=NULL,approval_remaining_seconds=NULL,"
+                "mockup_selected_job_id=NULL,mockup_selected_after=NULL WHERE id=?",
                 (latest["id"] if latest else None, db.now(), actor, latest["media_id"] if latest else None,
                  db.dump(fields), instance["id"]))
     db.audit(con, actor, "approval.manager_checked", "instance", instance["id"], chat_id)
+    _continue_after_approval(con, chat, instance, actor)
+
+
+def select_mockup(con, chat_id, job_id, actor):
+    """Make one of several finished mockups the approved one for print."""
+    from . import order_webhook
+    chat = con.execute("SELECT * FROM chats WHERE id=?", (chat_id,)).fetchone()
+    instance = con.execute("SELECT s.*,i.external_status FROM instances s JOIN items i ON i.id=s.item_id "
+                           "WHERE s.chat_id=? AND s.item_id=?", (chat_id, chat["active_item"])).fetchone()
+    if not instance or instance["external_status"] == "cancelled":
+        raise Invalid("Нельзя выбрать макет: нет активного заказа или он отменён")
+    if instance["order_closed_at"]:
+        raise Invalid("Заказ закрыт. Чтобы выбрать другой макет, сначала верните его боту на нужный шаг")
+    job = con.execute("SELECT * FROM image_jobs WHERE id=? AND item_id=? AND state='completed' "
+                      "AND preview_media_id IS NOT NULL AND print_file IS NOT NULL",
+                      (job_id, instance["item_id"])).fetchone()
+    if not job:
+        raise Invalid("Этот макет недоступен в заказе. Обновите чат и выберите готовый макет")
+    order_webhook.bind_selected(con, instance, job_id)
+    latest = sent_mockup(con, chat_id, instance["item_id"])
+    fields = json.loads(instance["fields"])
+    fields["approval_outcome"] = f"Менеджер выбрал макет №{job_id}"
+    fields.pop("integration_error", None)
+    con.execute("UPDATE instances SET approved_image_job_id=?,mockup_approved_at=?,mockup_approved_by=?,"
+                "mockup_approved_media=?,fields=?,approval_due_at=NULL,approval_remaining_seconds=NULL,"
+                "mockup_selected_job_id=?,mockup_selected_after=? WHERE id=?",
+                (job_id, db.now(), actor, job["preview_media_id"], db.dump(fields), job_id,
+                 latest["outbox_id"] if latest else None, instance["id"]))
+    db.audit(con, actor, "approval.manager_selected", "image_job", job_id, chat_id)
+    _continue_after_approval(con, chat, instance, actor)
+
+
+def _continue_after_approval(con, chat, instance, actor):
+    chat_id = chat["id"]
     graph = json.loads(con.execute("SELECT graph FROM versions WHERE id=?", (instance["version_id"],)).fetchone()[0])
     node = next((n for n in graph["nodes"] if n["id"] == instance["node"]), None)
     if chat["mode"] != "bot" or instance["status"] != "waiting_approval" or not node or node["kind"] != "approval":
@@ -1473,7 +1537,8 @@ def manager_approve_mockup(con, chat_id, job_id, actor):
     fields["approval_outcome"] = "Макет подтверждён менеджером"
     fields.pop("integration_error", None)
     con.execute("UPDATE instances SET approved_image_job_id=?,fields=?,approval_due_at=NULL,"
-                "approval_remaining_seconds=NULL WHERE id=?", (job_id, db.dump(fields), instance["id"]))
+                "approval_remaining_seconds=NULL,mockup_selected_job_id=NULL,mockup_selected_after=NULL WHERE id=?",
+                (job_id, db.dump(fields), instance["id"]))
     # Recover only the local approval precondition failure, never an MES conflict
     # or a rejected payload. Preserve the immutable event and any saved JSON.
     con.execute("UPDATE order_webhook_actions SET state='pending',error=NULL,due_at=? "
