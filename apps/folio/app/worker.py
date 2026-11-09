@@ -198,6 +198,36 @@ def close_cancelled_start_jobs(con, account_id=None, posting=None):
             (db.now(), row["id"]),
         )
         db.audit(con, "system", "integration.cancelled", "job", row["id"])
+    lift_cancelled_start_block(con, account_id)
+
+
+def lift_cancelled_start_block(con, account_id=None):
+    """Resume chat starts when Ozon's refusal concerned an order that was cancelled.
+
+    Ozon answers 403 to a chat start for a cancelled posting. That says nothing
+    about the account's rights, so the account-wide stop is lifted once the job
+    that caused it is retired as cancelled. Any other refusal keeps the stop.
+    """
+    accounts = con.execute(
+        "SELECT id,capabilities FROM accounts WHERE (? IS NULL OR id=?)", (account_id, account_id)
+    ).fetchall()
+    for account in accounts:
+        caps = json.loads(account["capabilities"])
+        if caps.get("start") is not False or caps.get("start_error") != "ozon_http_403":
+            continue
+        blocking = con.execute(
+            "SELECT id,state FROM jobs WHERE id=? AND kind='start_chat'", (caps.get("start_error_job"),)
+        ).fetchone() if caps.get("start_error_job") else con.execute(
+            # Accounts blocked before the job was recorded: the latest refusal decides.
+            "SELECT id,state FROM jobs WHERE kind='start_chat' AND account_id=? "
+            "AND error='ozon_http_403' ORDER BY id DESC LIMIT 1", (account["id"],)
+        ).fetchone()
+        if not blocking or blocking["state"] != "cancelled":
+            continue
+        for key in ("start", "start_error", "start_error_job"):
+            caps.pop(key, None)
+        con.execute("UPDATE accounts SET capabilities=? WHERE id=?", (db.dump(caps), account["id"]))
+        db.audit(con, "system", "integration.start_resumed", "job", blocking["id"])
 
 
 def _item_price(value):
@@ -1704,6 +1734,7 @@ def tick():
                 ).fetchone()[0])
                 caps["start"] = False
                 caps["start_error"] = error
+                caps["start_error_job"] = job["id"]
                 con.execute(
                     "UPDATE accounts SET capabilities=? WHERE id=?",
                     (db.dump(caps), job["account_id"]),

@@ -14,6 +14,7 @@
         {% elif item.managed_count > 1 %}<span class="badge badge-warning">Несколько настроенных позиций</span><span class="field-help">Автоматический запуск для такого отправления не выполняется.</span>
         {% elif item.start_state in ['failed','unknown'] %}{% set issue = operation_error_details('start_chat', item.start_state, item.start_error) %}<span class="badge {{ 'badge-warning' if item.start_state == 'unknown' else 'badge-negative' }}">{{ 'Старт не подтверждён' if item.start_state == 'unknown' else 'Не удалось начать чат' }}</span><span class="field-help">{{ issue.title }}. {{ issue.action }}</span>
         {% elif item.start_state in ['pending','running'] %}<span class="badge badge-neutral">Создание чата в очереди</span>
+        {% elif item.start_blocked %}<span class="badge badge-negative">Автозапуск чатов остановлен</span><span class="field-help">Ozon отказал кабинету в создании чата. Проверьте права кабинета в Ozon и повторите неуспешную операцию в журнале.</span>
         {% elif not settings.automation_enabled or not settings.start_enabled %}<span class="field-help">Автозапуск выключен в настройках Folio.</span>
         {% elif not item.order_started_at %}<span class="field-help">Ozon не передал время появления заказа. Автоматический старт остановлен для безопасности.</span>
         {% elif not settings.get('automation_enabled_at') or item.order_started_at < settings.automation_enabled_at %}<span class="field-help">Заказ оформлен до включения автоматизации.</span>

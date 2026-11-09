@@ -376,6 +376,7 @@ AUDIT_LABELS = {
     "integration.unknown": "Результат операции интеграции требует сверки",
     "integration.retry_requested": "Запрошен безопасный повтор операции",
     "integration.cancelled": "Попытка создания чата закрыта: заказ отменён",
+    "integration.start_resumed": "Автозапуск чатов возобновлён: Ozon отказал по отменённому заказу",
     "order.imported": "Получен новый заказ Ozon",
     "order.changed": "Изменились данные заказа Ozon",
     "order.cancelled": "Заказ отменён в Ozon, сценарий остановлен",

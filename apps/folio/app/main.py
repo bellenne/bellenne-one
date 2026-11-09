@@ -1965,6 +1965,7 @@ def orders_page(request: Request):
             items=con.execute(
                 "SELECT i.*,a.name AS account_name,a.capabilities AS account_capabilities,"
                 "a.error AS account_error,s.status AS brief_status,s.id AS instance_id,"
+                "json_type(a.capabilities,'$.start')='false' AS start_blocked,"
                 "s.approval_due_at,s.approval_remaining_seconds,s.order_closed_at,"
                 "(SELECT c.id FROM chats c JOIN chat_items ci ON ci.chat_id=c.id "
                 "WHERE ci.item_id=i.id AND c.start_job_id IS NOT NULL LIMIT 1) AS folio_chat_id,"
@@ -2332,6 +2333,7 @@ async def retry_job(request: Request, job_id: int):
             caps = json.loads(account[0])
             caps.pop("start", None)
             caps.pop("start_error", None)
+            caps.pop("start_error_job", None)
             con.execute(
                 "UPDATE accounts SET capabilities=?,error=NULL WHERE id=?",
                 (db.dump(caps), record["account_id"]),

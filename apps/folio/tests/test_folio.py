@@ -2242,6 +2242,101 @@ class FolioTest(unittest.TestCase):
         response = self.client.get("/settings/ozon", headers=self.admin)
         self.assertIn("Создание чата не подтверждено", response.text)
 
+    def refused_start(self, posting="POSTING-1"):
+        """Run one chat start that Ozon refuses with 403."""
+        settings = {**self.settings, "start_enabled": True, "automation_enabled": True,
+                    "automation_enabled_at": "2026-09-23T00:00:00+00:00"}
+        with db.transaction() as con:
+            con.execute("UPDATE settings SET value=?", (db.dump(settings),))
+            con.execute("UPDATE accounts SET capabilities=?,error=NULL WHERE id=1",
+                        (db.dump({"account": True, "orders": True, "list": True}),))
+            sid = con.execute("INSERT INTO scenarios(name,product_type,draft) VALUES('Portrait','portrait_background',?)",
+                              (db.dump(graph("portrait_background")),)).lastrowid
+            scenarios.publish(con, sid, "1")
+            con.execute("INSERT INTO mappings(account_id,sku,product_type,scenario_id,key_kind) "
+                        "VALUES(1,'KARTINA-1','portrait_background',?,'seller_article')", (sid,))
+            worker.import_order(con, 1, {"posting_number": posting, "in_process_at": "2026-09-24T08:00:00Z",
+                                         "status": "awaiting_packaging",
+                                         "products": [{"sku": "1001", "offer_id": "KARTINA-1", "quantity": 1}]})
+            db.job(con, "start_chat", 1, {"posting": posting})
+            job_id = con.execute("SELECT MAX(id) FROM jobs WHERE kind='start_chat'").fetchone()[0]
+
+        class RefusingAdapter:
+            def __init__(self, *_args):
+                pass
+
+            def start(self, _posting):
+                raise OzonError("ozon_http_403")
+
+            def close(self):
+                pass
+
+        with patch("app.worker.OzonAdapter", RefusingAdapter):
+            self.assertTrue(worker.tick())
+        with db.transaction() as con:
+            self.assertFalse(worker._account_can_start(con, 1))
+            self.assertEqual(json.loads(con.execute("SELECT capabilities FROM accounts WHERE id=1").fetchone()[0])
+                             .get("start_error_job"), job_id)
+        return job_id
+
+    def cancel(self, posting="POSTING-1"):
+        with db.transaction() as con:
+            worker.import_order(con, 1, {"posting_number": posting, "status": "cancelled",
+                                         "products": [{"sku": "1001", "offer_id": "KARTINA-1", "quantity": 1}]})
+
+    def test_refusal_for_a_cancelled_order_resumes_chat_starts(self):
+        job_id = self.refused_start()
+        with db.transaction() as con:
+            # The next order waits behind the stop, and the page says why.
+            worker.import_order(con, 1, {"posting_number": "POSTING-2", "in_process_at": "2026-09-24T09:00:00Z",
+                                         "status": "awaiting_packaging",
+                                         "products": [{"sku": "1002", "offer_id": "KARTINA-1", "quantity": 1}]})
+        self.assertIn("Автозапуск чатов остановлен", self.client.get("/orders", headers=self.admin).text)
+        self.cancel()
+        with db.transaction() as con:
+            self.assertEqual(con.execute("SELECT state FROM jobs WHERE id=?", (job_id,)).fetchone()[0], "cancelled")
+            self.assertTrue(worker._account_can_start(con, 1))
+            caps = json.loads(con.execute("SELECT capabilities FROM accounts WHERE id=1").fetchone()[0])
+            self.assertFalse({"start", "start_error", "start_error_job"} & caps.keys())
+        self.assertIn("Автозапуск чатов возобновлён", self.client.get("/audit", headers=self.admin).text)
+        self.assertNotIn("Автозапуск чатов остановлен", self.client.get("/orders", headers=self.admin).text)
+
+    def test_refusal_for_a_live_order_keeps_chat_starts_stopped(self):
+        self.refused_start()
+        with patch.object(worker, "send_one", return_value=False):
+            worker.tick()
+        with db.transaction() as con:
+            self.assertFalse(worker._account_can_start(con, 1))
+
+    def test_account_blocked_before_the_upgrade_resumes_on_the_next_tick(self):
+        job_id = self.refused_start()
+        with db.transaction() as con:
+            # The old worker did not record the job, and the order was cancelled meanwhile.
+            caps = json.loads(con.execute("SELECT capabilities FROM accounts WHERE id=1").fetchone()[0])
+            caps.pop("start_error_job")
+            con.execute("UPDATE accounts SET capabilities=? WHERE id=1", (db.dump(caps),))
+            con.execute("UPDATE jobs SET state='cancelled' WHERE id=?", (job_id,))
+            self.assertFalse(worker._account_can_start(con, 1))
+        with patch.object(worker, "send_one", return_value=False):
+            worker.tick()
+        with db.transaction() as con:
+            self.assertTrue(worker._account_can_start(con, 1))
+
+    def test_later_refusal_for_a_live_order_keeps_the_stop(self):
+        first = self.refused_start()
+        with db.transaction() as con:
+            con.execute("UPDATE jobs SET state='cancelled' WHERE id=?", (first,))
+            caps = json.loads(con.execute("SELECT capabilities FROM accounts WHERE id=1").fetchone()[0])
+            caps["start_error_job"] = con.execute(
+                "INSERT INTO jobs(kind,account_id,payload,state,error,created_at,finished_at) "
+                "VALUES('start_chat',1,?,'failed','ozon_http_403',?,?)",
+                (db.dump({"posting": "LIVE-2"}), db.now(), db.now())).lastrowid
+            con.execute("UPDATE accounts SET capabilities=? WHERE id=1", (db.dump(caps),))
+        with patch.object(worker, "send_one", return_value=False):
+            worker.tick()
+        with db.transaction() as con:
+            self.assertFalse(worker._account_can_start(con, 1))
+
     def test_unknown_chat_start_does_not_disable_other_orders(self):
         settings = {
             **self.settings,
