@@ -321,12 +321,14 @@ class GenerationDecisionTest(unittest.TestCase):
             with self.subTest(text):
                 self.assertFalse(wish_intent.asks_no_changes(text))
 
-    def job(self, *, kind="portrait_background", size=(2000, 4000), count=1, exif=None, **fields):
+    def job(self, *, kind="portrait_background", size=(2000, 4000), count=1, exif=None, article=None, **fields):
         number = next(ORDERS)
         instance, item, chat, _ = self.setup_instance(kind, posting=f"ORDER-{number}", external_chat=f"CHAT-{number}")
         graph = {"nodes": [{"id": "make", "kind": "image_worker", "prompt": "Обработать", "next": "end", "error": "end"},
                            {"id": "end", "kind": "end"}]}
         with db.transaction() as con:
+            if article:
+                con.execute("UPDATE items SET offer_id=? WHERE id=?", (article, item))
             photos = [media.store(con, picture(size[0] + index, size[1], kind="JPEG", exif=exif), {}, chat, item)
                       for index in range(count)]
             con.execute("UPDATE versions SET graph=? WHERE id=(SELECT version_id FROM instances WHERE id=?)",
@@ -391,7 +393,33 @@ class GenerationDecisionTest(unittest.TestCase):
         exif[0x0112] = 6
         # Stored as landscape, shown as portrait: fits a portrait canvas.
         self.assertEqual(self.job(size=(4000, 2000), exif=exif)[0]["skip_generation"], 1)
-        self.assertEqual(self.job(size=(4000, 2000))[0]["skip_generation"], 0)
+        landscape = self.job(size=(4000, 2000))[0]
+        self.assertEqual(landscape["skip_generation"], 1)
+        self.assertEqual((landscape["width_cm"], landscape["height_cm"]), (60, 40))
+
+    def test_source_orientation_swaps_dimensions_without_rotating_square(self):
+        _, item, chat, _ = self.setup_instance()
+        with db.transaction() as con:
+            for size, target, expected in [((400, 200), (30, 40), (40, 30)),
+                                            ((200, 400), (40, 30), (30, 40)),
+                                            ((200, 200), (30, 40), (30, 40)),
+                                            ((400, 200), (40, 40), (40, 40))]:
+                photo = media.store(con, picture(*size), {}, chat, item)
+                self.assertEqual(image_tasks.orient_dimensions(photo, *target), expected)
+
+    def test_landscape_article_dimensions_reach_worker_and_survive_repoll(self):
+        row, _ = self.job(size=(1200, 900), article="ART_30х40", background="Замените фон")
+        self.assertEqual((row["width_cm"], row["height_cm"]), (40, 30))
+        with db.transaction() as con:
+            first = image_tasks.claim_next(con)
+        with db.transaction() as con:
+            repeated = image_tasks.claim_next(con)
+        self.assertEqual(first["id"], repeated["id"])
+        self.assertEqual((repeated["width_cm"], repeated["height_cm"]), (40, 30))
+
+    def test_multiple_originals_keep_article_orientation(self):
+        row, _ = self.job(kind="collage", size=(1200, 900), count=2, article="ART_30х40")
+        self.assertEqual((row["width_cm"], row["height_cm"]), (30, 40))
 
     def test_unreadable_photo_keeps_generation(self):
         _, item, chat, _ = self.setup_instance()

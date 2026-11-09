@@ -167,6 +167,20 @@ def dimensions_from_article(article: str) -> tuple[int, int]:
     return 40, 60
 
 
+def orient_dimensions(media_id: str, width_cm: float, height_cm: float) -> tuple[float, float]:
+    """Align the canvas with the displayed source, including camera EXIF rotation."""
+    try:
+        with Image.open(db.DATA / "media" / media_id) as image:
+            width, height = image.size
+            if image.getexif().get(0x0112) in {5, 6, 7, 8}:
+                width, height = height, width
+    except (OSError, ValueError):
+        raise ImageTaskError("image_worker_media_missing") from None
+    if width != height and width_cm != height_cm and (width > height) != (width_cm > height_cm):
+        return height_cm, width_cm
+    return width_cm, height_cm
+
+
 def model_for_item(con, item_id: int, product_type: str | None = None) -> str:
     if product_type is None:
         mapped = con.execute(
@@ -207,12 +221,13 @@ def generation_needed(con, item_id: int, photos: list[str], fields: dict,
         if value and not wish_intent.asks_no_changes(value):
             return True
     try:
+        width_cm, height_cm = orient_dimensions(photos[0], width_cm, height_cm)
         with Image.open(db.DATA / "media" / photos[0]) as image:
             width, height = image.size
             # The worker applies EXIF rotation, so the sides must be read the same way.
             if image.getexif().get(0x0112) in {5, 6, 7, 8}:
                 width, height = height, width
-    except OSError:
+    except (OSError, ImageTaskError):
         return True
     return not print_only(width, height, width_cm, height_cm)
 
@@ -273,6 +288,10 @@ def enqueue(con, item_id: int, media_id: str | list[str], prompt: str,
                 or (manager_selected and (chat_id is None or media["chat_id"] != chat_id))
                 or (selected_id not in collected and not approved_preview and not manager_selected)):
             raise ImageTaskError("image_worker_media_missing")
+    # Multiple customer photos have no unique orientation. A manager-selected
+    # rework has one primary image; any later image is only a style reference.
+    if len(media_ids) == 1 or manager_selected:
+        width_cm, height_cm = orient_dimensions(media_ids[0], width_cm, height_cm)
     stamp = db.now()
     model = model_for_item(con, item_id, product_type)
     prompt_mode = db.config(con).get("image_prompt_mode", "direct")
