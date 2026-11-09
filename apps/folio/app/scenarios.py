@@ -1370,15 +1370,17 @@ def resume(con, chat_id, node_id, actor):
     target = next((n for n in graph["nodes"] if n["id"] == node_id), None)
     if not target:
         raise Invalid("Выберите существующий шаг зафиксированной версии")
-    # An unconfirmed buyer message cannot be duplicated by a step that writes to
-    # nobody, so it must not hold the order back. A pending one would be cancelled
-    # by the epoch change below: it is confirmed or failed within a send cycle.
-    blocking = ("pending",) if target["kind"] in {"order_webhook", "ready"} else ("pending", "unknown")
-    if con.execute(
-        f"SELECT 1 FROM outbox WHERE chat_id=? AND state IN ({','.join('?' * len(blocking))})",
-        (chat_id, *blocking),
+    # The MES handoff and the ready step write to nobody, so no buyer message,
+    # pending or unconfirmed, can be duplicated by them and none holds the order
+    # back. What the manager wrote just before still goes out with the new epoch.
+    if target["kind"] not in {"order_webhook", "ready"} and con.execute(
+        "SELECT 1 FROM outbox WHERE chat_id=? AND state IN ('pending','unknown')", (chat_id,)
     ).fetchone():
         raise Invalid("Сначала завершите или сверьте исходящие сообщения")
+    con.execute(
+        "UPDATE outbox SET epoch=epoch+1 WHERE chat_id=? AND state='pending' AND actor LIKE 'manager:%' "
+        "AND epoch=?", (chat_id, chat["epoch"]),
+    )
     con.execute("UPDATE chats SET mode='bot',epoch=epoch+1 WHERE id=?", (chat_id,))
     con.execute(
         "UPDATE instances SET node=?,status='collecting',prompted=0,confirmed_at=NULL,reviewed_at=NULL,ready_at=NULL,"

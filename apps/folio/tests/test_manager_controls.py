@@ -303,6 +303,25 @@ class ManagerControlsTest(unittest.TestCase):
         self.assertEqual(self.resume(chat, "hook").status_code, 303)
         self.assertEqual(self.record(instance)["status"], "closed")
 
+    def test_pending_messages_behind_an_unknown_one_do_not_block_mes(self):
+        _, _, chat, _ = self.setup_mes()
+        with db.transaction() as con:
+            con.execute("INSERT INTO outbox(chat_id,actor,body,dedup,epoch,state,created_at) "
+                        "VALUES(?,'manager:2','Файл','lost',0,'unknown',?)", (chat, db.now()))
+            con.execute("INSERT INTO outbox(chat_id,actor,body,dedup,epoch,state,created_at) "
+                        "VALUES(?,'system','Превью','stuck',0,'pending',?)", (chat, db.now()))
+            epoch = con.execute("SELECT epoch FROM chats WHERE id=?", (chat,)).fetchone()[0]
+            note = con.execute("INSERT INTO outbox(chat_id,actor,body,dedup,epoch,state,created_at) "
+                               "VALUES(?,'manager:2','Передаю в работу','note',?,'pending',?)",
+                               (chat, epoch, db.now())).lastrowid
+        self.assertEqual(self.resume(chat, "ask").status_code, 422)
+        self.assertEqual(self.resume(chat, "hook").status_code, 303)
+        self.assertEqual(len(self.tick()), 1)
+        self.assertEqual(self.action()["state"], "sent")
+        with db.transaction() as con:
+            self.assertEqual(con.execute("SELECT epoch FROM outbox WHERE id=?", (note,)).fetchone()[0],
+                             con.execute("SELECT epoch FROM chats WHERE id=?", (chat,)).fetchone()[0])
+
     def test_manager_mes_without_sent_preview_or_with_own_file(self):
         _, item, chat, job = self.setup_mes(sent_preview=False)
         self.resume(chat, "hook")
