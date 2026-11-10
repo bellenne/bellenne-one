@@ -78,6 +78,29 @@ class OrderCloseTest(unittest.TestCase):
             actions = [r[0] for r in con.execute("SELECT action FROM audit WHERE chat_id=?", (chat,))]
         self.assertEqual(actions.count("order.closed"), 1)
 
+    def test_repeated_mes_step_after_acceptance_writes_nothing_to_the_buyer(self):
+        instance, _, chat, _ = self.setup_mes()
+
+        def extend(index, nodes):
+            index["hook"]["next"] = "thanks"
+            nodes.append({"id": "thanks", "kind": "send", "text": "Отправили в производство", "next": "done"})
+
+        self.graph(instance, extend)
+        self.resume(chat, "hook")
+        self.tick()
+        with db.transaction() as con:
+            con.execute("UPDATE outbox SET state='sent' WHERE chat_id=?", (chat,))
+            before = con.execute("SELECT COUNT(*) FROM outbox WHERE chat_id=?", (chat,)).fetchone()[0]
+            con.execute("UPDATE instances SET status='needs_manager',order_closed_at=NULL WHERE id=?", (instance,))
+        self.assertEqual(self.resume(chat, "hook").status_code, 303)
+        self.assertEqual(self.tick(), [])
+        with db.transaction() as con:
+            self.assertEqual(con.execute("SELECT COUNT(*) FROM outbox WHERE chat_id=?", (chat,)).fetchone()[0], before)
+            self.assertEqual(con.execute("SELECT COUNT(*) FROM order_webhook_actions").fetchone()[0], 1)
+        record = self.record(instance)
+        self.assertEqual(record["status"], "closed")
+        self.assertTrue(record["order_closed_at"])
+
     def test_refused_delivery_does_not_close(self):
         instance, _, chat, _ = self.setup_mes()
         self.resume(chat, "hook")

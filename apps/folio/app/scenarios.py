@@ -1370,6 +1370,12 @@ def resume(con, chat_id, node_id, actor):
     target = next((n for n in graph["nodes"] if n["id"] == node_id), None)
     if not target:
         raise Invalid("Выберите существующий шаг зафиксированной версии")
+    if target["kind"] == "order_webhook" and mes_accepted(con, instance["id"]):
+        # MES already has this position. Running the step again would only repeat
+        # what follows it, such as telling the buyer again that it went to production.
+        if instance["status"] != "closed" or not instance["order_closed_at"]:
+            _close_order_now(con, instance, actor)
+        return
     # The MES handoff and the ready step write to nobody, so no buyer message,
     # pending or unconfirmed, can be duplicated by them and none holds the order
     # back. What the manager wrote just before still goes out with the new epoch.
